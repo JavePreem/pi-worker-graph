@@ -1,0 +1,55 @@
+{
+  "name": "pi-worker-graph",
+  "version": "0.1.0",
+  "description": "A DAG-first worker orchestration runtime for Pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "coding-agent",
+    "dag",
+    "orchestration",
+    "workers"
+  ],
+  "files": [
+    "dist",
+    "docs",
+    "extensions",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "pretest": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\"",
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/graph.test.js",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "check": "biome check . && npm run typecheck && npm test",
+    "prepack": "npm run check && npm run build"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}
