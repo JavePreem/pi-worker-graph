@@ -4,6 +4,10 @@ import { chmod, link, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { GraphState, NodeStatus, NormalizedGraph } from "./graph.js";
 import { normalizeGraph, setNodeStatus, settleBlocked } from "./graph.js";
+import type { JsonValue } from "./json.js";
+import { isJsonValue } from "./json.js";
+
+export type { JsonValue } from "./json.js";
 
 export const RUN_STORE_MAX_RECORD_BYTES = 1024 * 1024;
 
@@ -27,14 +31,6 @@ const OUTPUT_STATUSES = new Set<NodeOutputStatus>([
   "failed",
   "aborted",
 ]);
-
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
 
 export type RunStoreErrorCode =
   | "invalid_argument"
@@ -159,41 +155,6 @@ function isTimestamp(value: unknown): value is string {
     value.length > 0 &&
     !Number.isNaN(Date.parse(value))
   );
-}
-
-function isJsonValue(
-  value: unknown,
-  ancestors = new Set<object>(),
-): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object") return false;
-  if (ancestors.has(value)) return false;
-
-  ancestors.add(value);
-  let valid: boolean;
-  if (Array.isArray(value)) {
-    valid = true;
-    for (let index = 0; index < value.length; index += 1) {
-      if (!(index in value) || !isJsonValue(value[index], ancestors)) {
-        valid = false;
-        break;
-      }
-    }
-  } else {
-    const prototype = Object.getPrototypeOf(value);
-    valid =
-      (prototype === Object.prototype || prototype === null) &&
-      Object.values(value).every((item) => isJsonValue(item, ancestors));
-  }
-  ancestors.delete(value);
-  return valid;
 }
 
 function serializedRecord(value: unknown, recordPath?: string): string {

@@ -72,24 +72,32 @@ Acceptance tests:
 
 ## Phase 3 — Worker execution adapter
 
-**Current focus.** Define and verify the interface with a fake executor before
-selecting or implementing a Pi transport.
+The transport-independent interface and fake-backed runner are complete. Select
+and implement a Pi transport only after reviewing the applicable Pi APIs.
 
 Implement one bounded execution path behind a testable interface:
 
-- resolve configurable worker profiles and authentication through Pi;
-- start isolated child contexts in the requested working directory;
-- apply explicit worker tool allowlists;
-- pass run and task identity without secrets;
-- stream progress and capture usage;
-- enforce time, output, and artifact limits;
-- propagate aborts and clean up child processes;
-- prevent recursive graph spawning.
+- [x] define a narrow asynchronous execution function;
+- [x] pass working directory, task identity, payload, and direct prerequisites;
+- [x] enforce task, dependency, concurrency, payload, output, context, and time
+      limits;
+- [x] propagate abort signals and sanitize thrown executor failures;
+- [ ] resolve configurable worker profiles and authentication through Pi;
+- [ ] start isolated child contexts in the requested working directory;
+- [ ] apply explicit worker tool allowlists;
+- [ ] stream progress and capture usage;
+- [ ] clean up child processes through the selected adapter;
+- [ ] prevent recursive graph spawning.
 
-Acceptance tests use fake executors and verify:
+Transport-independent tests use fake executors and verify:
 
-- profile, working directory, task, and prerequisite context propagation;
-- bounded concurrency and cancellation;
+- working directory, task, payload, and prerequisite context propagation;
+- bounded concurrency, output, context, runtime, and cancellation;
+- thrown and malformed executor results become bounded node failures.
+
+The selected Pi adapter must additionally verify:
+
+- profile and authentication resolution;
 - provider and tool failures become node failures;
 - no child receives graph-spawning capabilities;
 - no child session state is written into the target checkout.
@@ -98,11 +106,13 @@ Acceptance tests use fake executors and verify:
 
 Connect the scheduler to worker execution:
 
-- run ready nodes up to the configured concurrency limit;
-- persist terminal results before opening the next frontier;
-- prepend named direct-prerequisite outputs to downstream assignments;
-- block descendants of failed prerequisites;
-- return aggregate graph status and artifact references.
+- [x] run ready nodes up to the configured concurrency limit;
+- [x] persist terminal results before opening the next frontier;
+- [x] pass named direct-prerequisite outputs to downstream execution;
+- [x] block descendants of failed prerequisites;
+- [x] return deterministic aggregate graph and node status;
+- [ ] validate the versioned structured worker output contract;
+- [ ] return retained artifact references when truncation is implemented.
 
 Acceptance tests:
 

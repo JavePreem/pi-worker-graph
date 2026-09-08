@@ -19,6 +19,22 @@ export {
   validateGraph,
 } from "./graph.js";
 export type {
+  GraphRunResult,
+  GraphRunStatus,
+  PrerequisiteOutput,
+  RunGraphIssue,
+  RunGraphIssueCode,
+  RunGraphOptions,
+  TaskExecutionInput,
+  TaskExecutionResult,
+  TaskExecutor,
+} from "./run.js";
+export {
+  RUN_GRAPH_LIMITS,
+  RunGraphValidationError,
+  runGraph,
+} from "./run.js";
+export type {
   JsonValue,
   NodeOutputRecord,
   NodeOutputStatus,

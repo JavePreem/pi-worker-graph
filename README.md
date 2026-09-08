@@ -10,11 +10,10 @@ discovered while work is in progress.
 
 ## Status
 
-Early implementation. The package currently provides tested, dependency-free
-graph primitives plus an explicit-root filesystem store for run manifests, node
-state, and terminal outputs. The included Pi extension entry point is
-intentionally inert while worker execution and opt-in mode integration are
-developed.
+Early implementation. The package currently provides tested graph primitives,
+an explicit-root filesystem store, and a bounded DAG runner behind an injected
+execution function. The included Pi extension entry point is intentionally inert
+while real worker execution and opt-in mode integration are developed.
 
 No `/swarm` commands or worker processes are registered yet.
 
@@ -58,15 +57,15 @@ state = setNodeStatus(graph, state, "api", "succeeded");
 
 The graph module is generic over `payload` and has no provider, model, process,
 filesystem, or Pi runtime dependency. `readyFrontier()` returns every eligible
-task; the future executor will apply the graph's concurrency limit when selecting
-work. Payload serialization and size limits likewise belong to that executor.
+task; `runGraph()` applies concurrency and fixed resource limits when selecting
+and executing work through an injected adapter.
 
 ## Planned runtime
 
 The remaining runtime will add:
 
-- bounded concurrent execution of ready tasks;
-- compact outputs passed only across declared dependency edges;
+- a real Pi worker execution adapter and worker profiles;
+- the versioned structured worker-report contract and retained artifacts;
 - Pi-specific state-root resolution outside the target checkout;
 - child-only coordination and reporting tools;
 - explicit `/swarm on`, `/swarm status`, and `/swarm off` activation;
