@@ -119,16 +119,28 @@ test("passes only durable direct-prerequisite outputs", async (t) => {
 
   assert.equal(result.status, "succeeded");
   assert.deepEqual(received.get("root")?.prerequisites, []);
+  assert.equal(received.get("root")?.prerequisiteContext, "");
   assert.deepEqual(received.get("root")?.payload, {
     assignment: "root work",
   });
   assert.deepEqual(received.get("middle")?.prerequisites, [
     { taskId: "root", output: nodeOutput("Completed root") },
   ]);
+  assert.match(
+    received.get("middle")?.prerequisiteContext ?? "",
+    /"taskId":"root".*"summary":"Completed root"/,
+  );
   assert.deepEqual(received.get("leaf")?.prerequisites, [
     { taskId: "middle", output: nodeOutput("Completed middle") },
     { taskId: "side", output: nodeOutput("Completed side") },
   ]);
+  const leafContext = received.get("leaf")?.prerequisiteContext ?? "";
+  assert.ok(leafContext.indexOf('"taskId":"middle"') >= 0);
+  assert.ok(
+    leafContext.indexOf('"taskId":"middle"') <
+      leafContext.indexOf('"taskId":"side"'),
+  );
+  assert.equal(leafContext.includes("Completed root"), false);
   assert.equal(
     received.get("leaf")?.workingDirectory,
     resolve(workingDirectory),
@@ -600,7 +612,7 @@ test("fails a task instead of passing oversized prerequisite context", async (t)
   assert.equal(statuses(result).join, "failed");
   assert.equal(
     (await readNodeOutput(stateRoot, result.runId, "join")).diagnostics,
-    "Direct prerequisite output exceeds context limit",
+    "Serialized direct-prerequisite context exceeds limit",
   );
 });
 

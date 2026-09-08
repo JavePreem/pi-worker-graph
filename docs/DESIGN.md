@@ -120,12 +120,14 @@ into immutable snapshots before publication. Malformed or oversized reports fail
 the node. A valid report with one or more blockers also fails the node, but is
 retained for parent review; its dependents do not run.
 
-For a node, outputs from each task named directly in `needs` will be serialized
-into canonical named blocks and prepended to its assignment. Worker-authored text
-is treated as untrusted report data within those blocks. Full transcripts are not
-propagated by default. The runtime will apply a hard size limit to every
-serialized edge payload and retained artifact; truncation will be explicit and
-include a reference to any retained artifact.
+For a node, outputs from each task named directly in `needs` are serialized in
+task-ID order into canonical named JSON blocks for the execution adapter to
+prepend to its assignment. Worker-authored text is explicitly marked as
+untrusted report data within those blocks. Full transcripts and undeclared report
+fields are not propagated. The complete serialization, including block labels
+and the warning, is measured in UTF-8 bytes against a hard limit. Overflow fails
+the downstream node without truncation. If truncation is added later, it will be
+explicit and include a reference to a bounded retained artifact.
 
 Persisted output records use their own envelope schema version, independently of
 the worker-report schema version. Current envelopes include run and task identity,

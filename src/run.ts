@@ -1,4 +1,9 @@
 import { resolve } from "node:path";
+import type { PrerequisiteOutput } from "./context.js";
+import {
+  PrerequisiteContextOverflowError,
+  serializePrerequisiteReports,
+} from "./context.js";
 import type { GraphRequest, GraphState, NormalizedGraph } from "./graph.js";
 import {
   createInitialState,
@@ -59,17 +64,14 @@ export class RunGraphValidationError extends Error {
   }
 }
 
-export interface PrerequisiteOutput {
-  readonly taskId: string;
-  readonly output: NodeOutput;
-}
-
 export interface TaskExecutionInput {
   readonly runId: string;
   readonly taskId: string;
   readonly payload: JsonValue | undefined;
   readonly workingDirectory: string;
   readonly prerequisites: readonly PrerequisiteOutput[];
+  /** Canonical, byte-bounded prompt context for the direct prerequisites. */
+  readonly prerequisiteContext: string;
   readonly signal: AbortSignal;
 }
 
@@ -510,13 +512,19 @@ export async function runGraph<TPayload>(
             manifest,
             taskId,
           );
-          const contextValue = prerequisites.map((prerequisite) => ({
-            taskId: prerequisite.taskId,
-            output: prerequisite.output,
-          })) as unknown as JsonValue;
-          const contextTooLarge =
-            jsonByteLength(contextValue) >
-            RUN_GRAPH_LIMITS.maxPrerequisiteBytes;
+          let prerequisiteContext: string | undefined;
+          let contextTooLarge = false;
+          try {
+            prerequisiteContext = serializePrerequisiteReports(
+              prerequisites,
+              RUN_GRAPH_LIMITS.maxPrerequisiteBytes,
+            ).text;
+          } catch (error) {
+            if (!(error instanceof PrerequisiteContextOverflowError)) {
+              throw error;
+            }
+            contextTooLarge = true;
+          }
 
           await writeNodeState(
             options.stateRoot,
@@ -538,7 +546,7 @@ export async function runGraph<TPayload>(
                     taskId,
                     status: "failed",
                     diagnostics:
-                      "Direct prerequisite output exceeds context limit",
+                      "Serialized direct-prerequisite context exceeds limit",
                   })
                 : executeTask(
                     options.executor,
@@ -548,6 +556,7 @@ export async function runGraph<TPayload>(
                       payload: task.payload,
                       workingDirectory,
                       prerequisites,
+                      prerequisiteContext: prerequisiteContext ?? "",
                     },
                     signal,
                     taskTimeoutMs,

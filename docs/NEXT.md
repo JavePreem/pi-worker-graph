@@ -19,6 +19,9 @@ The repository now has a small end-to-end core independent of Pi and providers:
 - bounded concurrent DAG execution with deterministic frontier selection;
 - durable terminal output before dependent activation;
 - direct-prerequisite-only output propagation;
+- deterministic task-ordered prerequisite report serialization;
+- named JSON report blocks with explicit untrusted-data labeling;
+- exact UTF-8 context accounting and fail-without-truncation overflow behavior;
 - sanitized executor failures, cancellation, and task timeouts;
 - task, dependency, concurrency, payload, output, and context limits;
 - behavioral coverage using `node:test`, fakes, and temporary directories.
@@ -36,30 +39,30 @@ npm run build
 pi -e .
 ```
 
-`npm run check` currently runs 54 graph, report, store, and runner tests. Loading
-the package in Pi should have no visible effect because the extension entry point
-is intentionally inert.
+`npm run check` currently runs 60 context, graph, report, store, and runner tests.
+Loading the package in Pi should have no visible effect because the extension
+entry point is intentionally inert.
 
 ## Next implementation slice
 
-Finish the deterministic edge-context boundary before selecting a real Pi
-transport:
+Select and implement one real Pi worker transport behind the existing executor
+boundary:
 
-1. Serialize direct-prerequisite reports into canonical named blocks within the
-   existing context limit.
-2. Keep oversized reports and edge context as explicit node failures; add
-   truncation and retained-artifact references only with the artifact consumer.
-3. Keep the generic graph domain unchanged and keep all tests provider-free.
+1. Review Pi's subprocess and SDK examples and record the selected strategy. A
+   subprocess adapter is currently preferred for child isolation and termination.
+2. Resolve an explicitly configured provider/model profile without introducing
+   defaults.
+3. Start Pi in the target working directory with a strict worker tool allowlist
+   that excludes graph-spawning and orchestrator tools.
+4. Deliver assignments and canonical prerequisite context without placing task
+   content in child-process arguments.
+5. Capture bounded reports, diagnostics, progress, and usage, and terminate the
+   process tree on timeout or cancellation.
+6. Keep automated coverage provider-free behind a fake subprocess boundary and
+   set the package's Pi compatibility range when Pi APIs are first imported.
 
-Acceptance tests should prove:
-
-- each downstream task receives exactly its declared prerequisite reports;
-- report and prerequisite ordering is deterministic;
-- serialized context is byte-bounded and never silently truncated;
-- full transcripts and undeclared output fields are never propagated.
-
-After that boundary is stable, review Pi's subprocess and SDK examples, choose the
-narrow execution adapter strategy, and set the package's Pi compatibility range.
+The adapter must treat startup, provider, tool, and process errors as bounded node
+failures. Provider-backed checks remain optional manual tests.
 
 ## Deferred run-store work
 

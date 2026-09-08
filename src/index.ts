@@ -1,3 +1,4 @@
+export type { PrerequisiteOutput } from "./context.js";
 export type {
   GraphIssue,
   GraphIssueCode,
@@ -28,7 +29,6 @@ export {
 export type {
   GraphRunResult,
   GraphRunStatus,
-  PrerequisiteOutput,
   RunGraphIssue,
   RunGraphIssueCode,
   RunGraphOptions,

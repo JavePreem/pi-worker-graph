@@ -112,7 +112,7 @@ Connect the scheduler to worker execution:
 - [x] block descendants of failed prerequisites;
 - [x] return deterministic aggregate graph and node status;
 - [x] validate the versioned structured worker output contract;
-- [ ] serialize canonical named prerequisite-report blocks;
+- [x] serialize canonical named prerequisite-report blocks;
 - [ ] return retained artifact references when truncation is implemented.
 
 Acceptance tests:

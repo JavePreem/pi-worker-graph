@@ -11,10 +11,11 @@ discovered while work is in progress.
 ## Status
 
 Early implementation. The package currently provides tested graph primitives,
-a versioned structured worker-report contract, an explicit-root filesystem
-store, and a bounded DAG runner behind an injected execution function. The
-included Pi extension entry point is intentionally inert while real worker
-execution and opt-in mode integration are developed.
+a versioned structured worker-report contract, canonical byte-bounded
+prerequisite context, an explicit-root filesystem store, and a bounded DAG
+runner behind an injected execution function. The included Pi extension entry
+point is intentionally inert while real worker execution and opt-in mode
+integration are developed.
 
 No `/swarm` commands or worker processes are registered yet.
 
@@ -72,12 +73,18 @@ values and returns an immutable snapshot suitable for publication or
 dependency-edge propagation. A report with blockers fails its node, retains the
 report for review, and blocks dependents.
 
+Direct-prerequisite reports are serialized in deterministic task-ID order into
+named JSON blocks. The complete UTF-8 context, including labels and an explicit
+untrusted-worker-data warning, is measured against a hard byte limit. Oversized
+context fails the downstream node and is never silently truncated. Only the
+validated reports of declared direct prerequisites are included.
+
 ## Planned runtime
 
 The remaining runtime will add:
 
 - a real Pi worker execution adapter and worker profiles;
-- deterministic prompt serialization and retained report artifacts;
+- retained report artifacts if explicit truncation is added;
 - Pi-specific state-root resolution outside the target checkout;
 - child-only coordination and reporting tools;
 - explicit `/swarm on`, `/swarm status`, and `/swarm off` activation;
