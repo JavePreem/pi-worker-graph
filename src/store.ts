@@ -6,6 +6,8 @@ import type { GraphState, NodeStatus, NormalizedGraph } from "./graph.js";
 import { normalizeGraph, setNodeStatus, settleBlocked } from "./graph.js";
 import type { JsonValue } from "./json.js";
 import { isJsonValue } from "./json.js";
+import type { NodeOutput } from "./output.js";
+import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
 
 export type { JsonValue } from "./json.js";
 
@@ -30,6 +32,18 @@ const OUTPUT_STATUSES = new Set<NodeOutputStatus>([
   "succeeded",
   "failed",
   "aborted",
+]);
+const NODE_OUTPUT_RECORD_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "runId",
+  "taskId",
+  "taskKey",
+  "attempt",
+  "status",
+  "completedAt",
+  "output",
+  "diagnostics",
 ]);
 
 export type RunStoreErrorCode =
@@ -85,25 +99,52 @@ export interface NodeStateRecord {
 
 export type NodeOutputStatus = "succeeded" | "failed" | "aborted";
 
-export interface NodeOutputRecord {
+interface NodeOutputRecordBase {
   readonly schemaVersion: 1;
   readonly kind: "node-output";
   readonly runId: string;
   readonly taskId: string;
   readonly taskKey: string;
   readonly attempt: number;
-  readonly status: NodeOutputStatus;
   readonly completedAt: string;
-  readonly output?: JsonValue;
   readonly diagnostics?: string;
 }
 
-export interface PublishNodeOutput {
-  readonly taskId: string;
-  readonly status: NodeOutputStatus;
-  readonly output?: JsonValue;
-  readonly diagnostics?: string;
-}
+export type NodeOutputRecord = NodeOutputRecordBase &
+  (
+    | {
+        readonly status: "succeeded";
+        readonly output: NodeOutput;
+      }
+    | {
+        readonly status: "failed";
+        readonly output?: NodeOutput;
+      }
+    | {
+        readonly status: "aborted";
+        readonly output?: never;
+      }
+  );
+
+export type PublishNodeOutput =
+  | {
+      readonly taskId: string;
+      readonly status: "succeeded";
+      readonly output: NodeOutput;
+      readonly diagnostics?: string;
+    }
+  | {
+      readonly taskId: string;
+      readonly status: "failed";
+      readonly output?: NodeOutput;
+      readonly diagnostics?: string;
+    }
+  | {
+      readonly taskId: string;
+      readonly status: "aborted";
+      readonly output?: never;
+      readonly diagnostics?: string;
+    };
 
 function errorCode(error: unknown): string | undefined {
   if (
@@ -398,7 +439,10 @@ function validateNodeState(value: unknown, path: string): NodeStateRecord {
   return value as unknown as NodeStateRecord;
 }
 
-function validateNodeOutput(value: unknown, path: string): NodeOutputRecord {
+function validateNodeOutputRecord(
+  value: unknown,
+  path: string,
+): NodeOutputRecord {
   if (
     !isRecord(value) ||
     value.schemaVersion !== SCHEMA_VERSION ||
@@ -411,12 +455,62 @@ function validateNodeOutput(value: unknown, path: string): NodeOutputRecord {
     typeof value.status !== "string" ||
     !OUTPUT_STATUSES.has(value.status as NodeOutputStatus) ||
     !isTimestamp(value.completedAt) ||
-    ("output" in value && !isJsonValue(value.output)) ||
-    ("diagnostics" in value && typeof value.diagnostics !== "string")
+    Object.keys(value).some((field) => !NODE_OUTPUT_RECORD_FIELDS.has(field))
   ) {
     return invalidRecord(path, "node output does not match schema version 1");
   }
-  return value as unknown as NodeOutputRecord;
+
+  let diagnostics: string | undefined;
+  try {
+    diagnostics = parseNodeDiagnostics(value.diagnostics);
+  } catch {
+    return invalidRecord(path, "node output has invalid diagnostics");
+  }
+  const base: NodeOutputRecordBase = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "node-output",
+    runId: value.runId,
+    taskId: value.taskId,
+    taskKey: value.taskKey,
+    attempt: value.attempt as number,
+    completedAt: value.completedAt,
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+  };
+
+  if (value.status === "succeeded") {
+    if (!("output" in value)) {
+      return invalidRecord(path, "succeeded node output is missing its report");
+    }
+    let output: NodeOutput;
+    try {
+      output = parseNodeOutput(value.output);
+    } catch {
+      return invalidRecord(path, "succeeded node output has an invalid report");
+    }
+    if (output.blockers.length > 0) {
+      return invalidRecord(
+        path,
+        "succeeded node output report contains blockers",
+      );
+    }
+    return { ...base, status: value.status, output };
+  }
+  if (value.status === "failed") {
+    if (!("output" in value)) return { ...base, status: value.status };
+    try {
+      return {
+        ...base,
+        status: value.status,
+        output: parseNodeOutput(value.output),
+      };
+    } catch {
+      return invalidRecord(path, "failed node output has an invalid report");
+    }
+  }
+  if ("output" in value) {
+    return invalidRecord(path, "aborted node output contains a report");
+  }
+  return { ...base, status: "aborted" };
 }
 
 function findTask(manifest: RunManifest, taskId: string): RunManifestTask {
@@ -472,7 +566,7 @@ async function readNodeOutputRecord(
     "outputs",
     `${task.key}.json`,
   );
-  const record = validateNodeOutput(await readJson(path), path);
+  const record = validateNodeOutputRecord(await readJson(path), path);
   assertIdentity(path, manifest, task, record);
   return record;
 }
@@ -688,19 +782,36 @@ export async function publishNodeOutput(
       `Invalid node output status ${JSON.stringify(input.status)}`,
     );
   }
-  if (input.output !== undefined && !isJsonValue(input.output)) {
+  let output: NodeOutput | undefined;
+  if (input.status === "aborted" && "output" in input) {
     throw new RunStoreError(
       "invalid_argument",
-      `Output for task ${JSON.stringify(input.taskId)} is not a JSON value`,
+      `Aborted task ${JSON.stringify(input.taskId)} must not publish a node report`,
     );
   }
-  if (
-    input.diagnostics !== undefined &&
-    typeof input.diagnostics !== "string"
-  ) {
+  if (input.status === "succeeded" || "output" in input) {
+    try {
+      output = parseNodeOutput(input.output);
+    } catch {
+      throw new RunStoreError(
+        "invalid_argument",
+        `Output for task ${JSON.stringify(input.taskId)} is not a valid node report`,
+      );
+    }
+  }
+  if (input.status === "succeeded" && output?.blockers.length) {
     throw new RunStoreError(
       "invalid_argument",
-      `Diagnostics for task ${JSON.stringify(input.taskId)} must be a string`,
+      `Succeeded task ${JSON.stringify(input.taskId)} must not report blockers`,
+    );
+  }
+  let diagnostics: string | undefined;
+  try {
+    diagnostics = parseNodeDiagnostics(input.diagnostics);
+  } catch {
+    throw new RunStoreError(
+      "invalid_argument",
+      `Diagnostics for task ${JSON.stringify(input.taskId)} are invalid or oversized`,
     );
   }
   const manifest = await readRun(stateRoot, runId);
@@ -718,20 +829,31 @@ export async function publishNodeOutput(
   }
 
   const path = join(runPath(stateRoot, runId), "outputs", `${task.key}.json`);
-  const record: NodeOutputRecord = {
+  const baseRecord: NodeOutputRecordBase = {
     schemaVersion: SCHEMA_VERSION,
     kind: "node-output",
     runId,
     taskId: task.id,
     taskKey: task.key,
     attempt: state.attempt,
-    status: input.status,
     completedAt: new Date().toISOString(),
-    ...(input.output === undefined ? {} : { output: input.output }),
-    ...(input.diagnostics === undefined
-      ? {}
-      : { diagnostics: input.diagnostics }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
   };
+  let record: NodeOutputRecord;
+  if (input.status === "succeeded") {
+    if (output === undefined) {
+      throw new Error("Validated node report is unexpectedly missing");
+    }
+    record = { ...baseRecord, status: input.status, output };
+  } else if (input.status === "failed") {
+    record = {
+      ...baseRecord,
+      status: input.status,
+      ...(output === undefined ? {} : { output }),
+    };
+  } else {
+    record = { ...baseRecord, status: input.status };
+  }
   await publishRecord(path, record);
   return record;
 }

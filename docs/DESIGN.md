@@ -101,6 +101,7 @@ Each worker reports a compact result:
 
 ```ts
 interface NodeOutput {
+  schemaVersion: 1;
   summary: string;
   changedFiles: Array<{ path: string; description: string }>;
   interfaces: string[];
@@ -110,15 +111,26 @@ interface NodeOutput {
 }
 ```
 
-For a node, outputs from each task named directly in `needs` are serialized into
-named blocks and prepended to its assignment. Full transcripts are not propagated
-by default. The runtime applies a hard size limit to every serialized edge payload
-and retained artifact; truncation is explicit and includes a reference to any
-retained artifact.
+The report schema is versioned independently of the enclosing filesystem record.
+Reports require exactly these fields, use non-empty bounded strings, limit each
+section's item count, and have a hard aggregate UTF-8 JSON size limit.
+Changed-file paths use normalized repository-relative form; they are report data,
+not authority to access a path. Untyped executor values are validated and copied
+into immutable snapshots before publication. Malformed or oversized reports fail
+the node. A valid report with one or more blockers also fails the node, but is
+retained for parent review; its dependents do not run.
 
-Persisted output records will also include schema version, run and task identity,
-attempt, completion time, status, diagnostics, usage when available, and
-truncation metadata.
+For a node, outputs from each task named directly in `needs` will be serialized
+into canonical named blocks and prepended to its assignment. Worker-authored text
+is treated as untrusted report data within those blocks. Full transcripts are not
+propagated by default. The runtime will apply a hard size limit to every
+serialized edge payload and retained artifact; truncation will be explicit and
+include a reference to any retained artifact.
+
+Persisted output records use their own envelope schema version, independently of
+the worker-report schema version. Current envelopes include run and task identity,
+attempt, completion time, status, and bounded diagnostics. Usage and truncation
+metadata will be added with the transport and artifact layers that consume them.
 
 ## Coordination journal
 

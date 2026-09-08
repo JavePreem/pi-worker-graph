@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RunStoreErrorCode } from "../src/index.js";
+import type { NodeOutput, RunStoreErrorCode } from "../src/index.js";
 import {
   createRun,
   normalizeGraph,
@@ -15,6 +15,7 @@ import {
   readRun,
   writeNodeState,
 } from "../src/index.js";
+import { nodeOutput } from "./fixtures.js";
 
 async function temporaryStateRoot(t: test.TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-worker-graph-"));
@@ -99,10 +100,16 @@ test("publishes one immutable terminal output", async (t) => {
   const published = await publishNodeOutput(root, manifest.runId, {
     taskId: "task",
     status: "succeeded",
-    output: { summary: "done", files: ["src/file.ts"] },
+    output: {
+      ...nodeOutput("Implemented the change"),
+      changedFiles: [
+        { path: "src/file.ts", description: "Implemented the change" },
+      ],
+    },
   });
   await writeNodeState(root, manifest.runId, "task", "succeeded");
 
+  assert.equal(published.schemaVersion, 1);
   assert.deepEqual(
     await readNodeOutput(root, manifest.runId, "task"),
     published,
@@ -116,7 +123,7 @@ test("publishes one immutable terminal output", async (t) => {
       publishNodeOutput(root, manifest.runId, {
         taskId: "task",
         status: "succeeded",
-        output: { summary: "replacement" },
+        output: nodeOutput("Replacement"),
       }),
     "record_exists",
   );
@@ -173,6 +180,79 @@ test("validates diagnostics from untyped callers before publication", async (t) 
   );
 });
 
+test("rejects malformed structured reports from untyped callers", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  await writeNodeState(root, manifest.runId, "task", "running");
+
+  await rejectsWithCode(
+    () =>
+      publishNodeOutput(root, manifest.runId, {
+        taskId: "task",
+        status: "succeeded",
+        output: { summary: "incomplete" } as unknown as NodeOutput,
+      }),
+    "invalid_argument",
+  );
+  await rejectsWithCode(
+    () =>
+      publishNodeOutput(root, manifest.runId, {
+        taskId: "task",
+        status: "succeeded",
+        output: { ...nodeOutput(), blockers: ["Not complete"] },
+      }),
+    "invalid_argument",
+  );
+  await rejectsWithCode(
+    () => readNodeOutput(root, manifest.runId, "task"),
+    "not_found",
+  );
+});
+
+test("rejects incompatible and unknown node-output envelope fields", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  await writeNodeState(root, manifest.runId, "task", "running");
+  await publishNodeOutput(root, manifest.runId, {
+    taskId: "task",
+    status: "succeeded",
+    output: nodeOutput(),
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  const outputPath = join(
+    root,
+    "runs",
+    manifest.runId,
+    "outputs",
+    `${task.key}.json`,
+  );
+  const original = JSON.parse(await readFile(outputPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+
+  await writeFile(
+    outputPath,
+    JSON.stringify({ ...original, schemaVersion: 2 }),
+  );
+  await rejectsWithCode(
+    () => readNodeOutput(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+  await writeFile(outputPath, JSON.stringify({ ...original, extra: true }));
+  await rejectsWithCode(
+    () => readNodeOutput(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+});
+
 test("rejects output that conflicts with terminal node state", async (t) => {
   const root = await temporaryStateRoot(t);
   const manifest = await createRun(
@@ -190,6 +270,7 @@ test("rejects output that conflicts with terminal node state", async (t) => {
       publishNodeOutput(root, manifest.runId, {
         taskId: "task",
         status: "succeeded",
+        output: nodeOutput(),
       }),
     "invalid_record",
   );
@@ -221,6 +302,7 @@ test("enforces graph transitions and requires output before terminal state", asy
   await publishNodeOutput(root, manifest.runId, {
     taskId: "first",
     status: "succeeded",
+    output: nodeOutput(),
   });
   await writeNodeState(root, manifest.runId, "first", "succeeded");
   assert.equal(
@@ -239,6 +321,7 @@ test("does not let terminal state disagree with a published output", async (t) =
   await publishNodeOutput(root, manifest.runId, {
     taskId: "task",
     status: "succeeded",
+    output: nodeOutput(),
   });
 
   await rejectsWithCode(
@@ -290,7 +373,7 @@ test("rejects invalid and unknown identifiers before constructing record paths",
   );
 });
 
-test("bounds records on both write and read", async (t) => {
+test("bounds diagnostics and records on write and read", async (t) => {
   const root = await temporaryStateRoot(t);
   const manifest = await createRun(
     root,
@@ -304,7 +387,7 @@ test("bounds records on both write and read", async (t) => {
         status: "failed",
         diagnostics: "x".repeat(RUN_STORE_MAX_RECORD_BYTES),
       }),
-    "record_too_large",
+    "invalid_argument",
   );
 
   const task = manifest.graph.tasks[0];
@@ -471,6 +554,23 @@ test("rejects non-JSON graph payloads", async (t) => {
   const graph = normalizeGraph({
     tasks: [{ id: "task", payload: { createdAt: new Date() } }],
   });
-
   await rejectsWithCode(() => createRun(root, graph), "invalid_argument");
+
+  class ArrayWithCustomSerialization extends Array<string> {
+    toJSON(): object {
+      return { replaced: true };
+    }
+  }
+  const customArrayGraph = normalizeGraph({
+    tasks: [
+      {
+        id: "task",
+        payload: new ArrayWithCustomSerialization("original"),
+      },
+    ],
+  });
+  await rejectsWithCode(
+    () => createRun(root, customArrayGraph),
+    "invalid_argument",
+  );
 });

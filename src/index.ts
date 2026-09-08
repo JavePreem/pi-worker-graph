@@ -18,6 +18,13 @@ export {
   settleBlocked,
   validateGraph,
 } from "./graph.js";
+export type { NodeOutput, NodeOutputValidationErrorCode } from "./output.js";
+export {
+  NODE_OUTPUT_LIMITS,
+  NODE_OUTPUT_SCHEMA_VERSION,
+  NodeOutputValidationError,
+  parseNodeOutput,
+} from "./output.js";
 export type {
   GraphRunResult,
   GraphRunStatus,

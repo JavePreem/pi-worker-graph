@@ -10,6 +10,8 @@ import {
 } from "./graph.js";
 import type { JsonValue } from "./json.js";
 import { isJsonValue, jsonByteLength } from "./json.js";
+import type { NodeOutput } from "./output.js";
+import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
 import type { NodeStateRecord, RunManifest } from "./store.js";
 import {
   createRun,
@@ -59,7 +61,7 @@ export class RunGraphValidationError extends Error {
 
 export interface PrerequisiteOutput {
   readonly taskId: string;
-  readonly output: JsonValue | undefined;
+  readonly output: NodeOutput;
 }
 
 export interface TaskExecutionInput {
@@ -72,7 +74,7 @@ export interface TaskExecutionInput {
 }
 
 export interface TaskExecutionResult {
-  readonly output?: JsonValue;
+  readonly output: NodeOutput;
   readonly diagnostics?: string;
 }
 
@@ -102,12 +104,24 @@ export interface GraphRunResult {
   readonly nodes: readonly NodeStateRecord[];
 }
 
-interface SettledTask {
-  readonly taskId: string;
-  readonly status: "succeeded" | "failed" | "aborted";
-  readonly output?: JsonValue;
-  readonly diagnostics?: string;
-}
+type SettledTask =
+  | {
+      readonly taskId: string;
+      readonly status: "succeeded";
+      readonly output: NodeOutput;
+      readonly diagnostics?: string;
+    }
+  | {
+      readonly taskId: string;
+      readonly status: "failed";
+      readonly output?: NodeOutput;
+      readonly diagnostics?: string;
+    }
+  | {
+      readonly taskId: string;
+      readonly status: "aborted";
+      readonly diagnostics?: string;
+    };
 
 function validateRun<TPayload>(
   graph: GraphRequest<TPayload>,
@@ -194,43 +208,65 @@ function invalidExecutorResult(taskId: string): SettledTask {
 
 function validateExecutorResult(taskId: string, value: unknown): SettledTask {
   try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return invalidExecutorResult(taskId);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return invalidExecutorResult(taskId);
+    }
+    const keys = Reflect.ownKeys(value);
     if (
-      typeof value !== "object" ||
-      value === null ||
-      Array.isArray(value) ||
-      !isJsonValue(value)
+      keys.length === 0 ||
+      keys.length > 2 ||
+      !keys.includes("output") ||
+      !keys.every(
+        (key) =>
+          typeof key === "string" &&
+          (key === "output" || key === "diagnostics"),
+      )
     ) {
       return invalidExecutorResult(taskId);
     }
-    const candidate = value as Record<string, JsonValue>;
+    const outputDescriptor = Object.getOwnPropertyDescriptor(value, "output");
+    const diagnosticsDescriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "diagnostics",
+    );
     if (
-      !Object.keys(candidate).every(
-        (key) => key === "output" || key === "diagnostics",
-      ) ||
-      (candidate.output !== undefined && !isJsonValue(candidate.output)) ||
-      (candidate.diagnostics !== undefined &&
-        typeof candidate.diagnostics !== "string")
+      outputDescriptor === undefined ||
+      !outputDescriptor.enumerable ||
+      !("value" in outputDescriptor) ||
+      (diagnosticsDescriptor !== undefined &&
+        (!diagnosticsDescriptor.enumerable ||
+          !("value" in diagnosticsDescriptor)))
     ) {
       return invalidExecutorResult(taskId);
     }
 
-    const boundedValue: { output?: JsonValue; diagnostics?: string } = {
-      ...(candidate.output === undefined ? {} : { output: candidate.output }),
-      ...(candidate.diagnostics === undefined
-        ? {}
-        : { diagnostics: candidate.diagnostics }),
+    const output = parseNodeOutput(outputDescriptor.value);
+    const diagnostics = parseNodeDiagnostics(diagnosticsDescriptor?.value);
+    const boundedValue = {
+      output,
+      ...(diagnostics === undefined ? {} : { diagnostics }),
     };
     if (
-      jsonByteLength(boundedValue as JsonValue) >
+      jsonByteLength(boundedValue as unknown as JsonValue) >
       RUN_GRAPH_LIMITS.maxOutputBytes
     ) {
       return invalidExecutorResult(taskId);
     }
-    return {
-      taskId,
-      status: "succeeded",
-      ...boundedValue,
-    };
+    return output.blockers.length > 0
+      ? {
+          taskId,
+          status: "failed",
+          ...boundedValue,
+        }
+      : {
+          taskId,
+          status: "succeeded",
+          ...boundedValue,
+        };
   } catch {
     return invalidExecutorResult(taskId);
   }
@@ -317,6 +353,11 @@ async function prerequisiteOutputs(
         manifest.runId,
         dependency,
       );
+      if (record.status !== "succeeded") {
+        throw new Error(
+          `Prerequisite ${JSON.stringify(dependency)} did not succeed`,
+        );
+      }
       return {
         taskId: dependency,
         output: record.output,
@@ -348,14 +389,37 @@ async function persistCompletion(
   runId: string,
   completion: SettledTask,
 ): Promise<void> {
-  await publishNodeOutput(stateRoot, runId, {
-    taskId: completion.taskId,
-    status: completion.status,
-    ...(completion.output === undefined ? {} : { output: completion.output }),
-    ...(completion.diagnostics === undefined
-      ? {}
-      : { diagnostics: completion.diagnostics }),
-  });
+  await publishNodeOutput(
+    stateRoot,
+    runId,
+    completion.status === "succeeded"
+      ? {
+          taskId: completion.taskId,
+          status: completion.status,
+          output: completion.output,
+          ...(completion.diagnostics === undefined
+            ? {}
+            : { diagnostics: completion.diagnostics }),
+        }
+      : completion.status === "failed"
+        ? {
+            taskId: completion.taskId,
+            status: completion.status,
+            ...(completion.output === undefined
+              ? {}
+              : { output: completion.output }),
+            ...(completion.diagnostics === undefined
+              ? {}
+              : { diagnostics: completion.diagnostics }),
+          }
+        : {
+            taskId: completion.taskId,
+            status: completion.status,
+            ...(completion.diagnostics === undefined
+              ? {}
+              : { diagnostics: completion.diagnostics }),
+          },
+  );
   await writeNodeState(stateRoot, runId, completion.taskId, completion.status);
 }
 
@@ -448,10 +512,8 @@ export async function runGraph<TPayload>(
           );
           const contextValue = prerequisites.map((prerequisite) => ({
             taskId: prerequisite.taskId,
-            ...(prerequisite.output === undefined
-              ? {}
-              : { output: prerequisite.output }),
-          })) as JsonValue;
+            output: prerequisite.output,
+          })) as unknown as JsonValue;
           const contextTooLarge =
             jsonByteLength(contextValue) >
             RUN_GRAPH_LIMITS.maxPrerequisiteBytes;

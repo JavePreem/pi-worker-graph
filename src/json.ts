@@ -27,6 +27,10 @@ function isJsonValueAtDepth(
   ancestors.add(value);
   let valid = true;
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      ancestors.delete(value);
+      return false;
+    }
     const keys = Reflect.ownKeys(value);
     valid = keys.length === value.length + 1 && keys.includes("length");
     for (let index = 0; valid && index < value.length; index += 1) {

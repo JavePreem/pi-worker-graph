@@ -6,18 +6,21 @@ import test from "node:test";
 import type {
   GraphRequest,
   GraphRunResult,
+  NodeOutput,
   TaskExecutionInput,
   TaskExecutionResult,
   TaskExecutor,
 } from "../src/index.js";
 import {
   GraphValidationError,
+  NODE_OUTPUT_LIMITS,
   RUN_GRAPH_LIMITS,
   RunGraphValidationError,
   readNodeOutput,
   readNodeState,
   runGraph,
 } from "../src/index.js";
+import { nodeOutput } from "./fixtures.js";
 
 async function temporaryStateRoot(t: test.TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-worker-graph-run-"));
@@ -49,7 +52,7 @@ test("runs independent tasks concurrently up to the configured limit", async (t)
     if (active === 2) releaseOverlap();
     await overlap;
     active -= 1;
-    return { output: { task: input.taskId } };
+    return { output: nodeOutput(`Completed ${input.taskId}`) };
   };
 
   const result = await runGraph({
@@ -96,7 +99,7 @@ test("passes only durable direct-prerequisite outputs", async (t) => {
         prerequisite.output,
       );
     }
-    return { output: { from: input.taskId } };
+    return { output: nodeOutput(`Completed ${input.taskId}`) };
   };
 
   const result = await runGraph({
@@ -120,11 +123,11 @@ test("passes only durable direct-prerequisite outputs", async (t) => {
     assignment: "root work",
   });
   assert.deepEqual(received.get("middle")?.prerequisites, [
-    { taskId: "root", output: { from: "root" } },
+    { taskId: "root", output: nodeOutput("Completed root") },
   ]);
   assert.deepEqual(received.get("leaf")?.prerequisites, [
-    { taskId: "middle", output: { from: "middle" } },
-    { taskId: "side", output: { from: "side" } },
+    { taskId: "middle", output: nodeOutput("Completed middle") },
+    { taskId: "side", output: nodeOutput("Completed side") },
   ]);
   assert.equal(
     received.get("leaf")?.workingDirectory,
@@ -139,7 +142,7 @@ test("fails thrown executions, blocks descendants, and continues unrelated work"
     called.push(input.taskId);
     if (input.taskId === "bad")
       throw new Error("provider secret must not persist");
-    return { output: { completed: input.taskId } };
+    return { output: nodeOutput(`Completed ${input.taskId}`) };
   };
 
   const result = await runGraph({
@@ -164,6 +167,45 @@ test("fails thrown executions, blocks descendants, and continues unrelated work"
   assert.equal(JSON.stringify(failed).includes("provider secret"), false);
 });
 
+test("treats reported blockers as failure and retains the report", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const called: string[] = [];
+  const executor: TaskExecutor = async (input) => {
+    called.push(input.taskId);
+    return {
+      output:
+        input.taskId === "blocked-root"
+          ? { ...nodeOutput("Could not finish"), blockers: ["Missing API"] }
+          : nodeOutput(`Completed ${input.taskId}`),
+    };
+  };
+
+  const result = await runGraph({
+    stateRoot,
+    graph: {
+      tasks: [
+        { id: "blocked-root" },
+        { id: "child", needs: ["blocked-root"] },
+        { id: "unrelated" },
+      ],
+      concurrency: 2,
+    },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(new Set(called), new Set(["blocked-root", "unrelated"]));
+  assert.deepEqual(statuses(result), {
+    "blocked-root": "failed",
+    child: "blocked",
+    unrelated: "succeeded",
+  });
+  const output = await readNodeOutput(stateRoot, result.runId, "blocked-root");
+  assert.equal(output.status, "failed");
+  assert.deepEqual(output.output?.blockers, ["Missing API"]);
+});
+
 test("aborts running and pending work while blocking descendants", async (t) => {
   const stateRoot = await temporaryStateRoot(t);
   const controller = new AbortController();
@@ -177,7 +219,7 @@ test("aborts running and pending work while blocking descendants", async (t) => 
         "abort",
         () => {
           executorObservedAbort = true;
-          resolveExecution({ output: { ignored: true } });
+          resolveExecution({ output: nodeOutput("Ignored") });
         },
         { once: true },
       );
@@ -218,7 +260,7 @@ test("bounds task runtime and aborts the executor signal on timeout", async (t) 
         "abort",
         () => {
           observedAbort = true;
-          resolveExecution({});
+          resolveExecution({ output: nodeOutput("Stopped") });
         },
         { once: true },
       );
@@ -263,19 +305,19 @@ test("aborts other executors when runner persistence fails", async (t) => {
         recursive: true,
         force: true,
       });
-      return {};
+      return { output: nodeOutput("Removed run state") };
     }
     return new Promise((resolveExecution) => {
       if (input.signal.aborted) {
         siblingObservedAbort = true;
-        resolveExecution({});
+        resolveExecution({ output: nodeOutput("Stopped") });
         return;
       }
       input.signal.addEventListener(
         "abort",
         () => {
           siblingObservedAbort = true;
-          resolveExecution({});
+          resolveExecution({ output: nodeOutput("Stopped") });
         },
         { once: true },
       );
@@ -299,7 +341,7 @@ test("rejects structurally invalid graphs before creating a run", async (t) => {
   let calls = 0;
   const executor: TaskExecutor = async () => {
     calls += 1;
-    return {};
+    return { output: nodeOutput() };
   };
   const invalidGraphs: readonly GraphRequest[] = [
     { tasks: [{ id: "same" }, { id: "same" }] },
@@ -335,7 +377,7 @@ test("rejects runtime bounds before creating a run or calling the executor", asy
   let calls = 0;
   const executor: TaskExecutor = async () => {
     calls += 1;
-    return {};
+    return { output: nodeOutput() };
   };
   const roots = Array.from(
     { length: RUN_GRAPH_LIMITS.maxDependenciesPerTask + 1 },
@@ -422,8 +464,11 @@ test("turns oversized executor output into a bounded node failure", async (t) =>
   const executor: TaskExecutor = async (input) => {
     called.push(input.taskId);
     return {
-      output: { text: "x".repeat(RUN_GRAPH_LIMITS.maxOutputBytes) },
-    };
+      output: {
+        ...nodeOutput(),
+        summary: "x".repeat(RUN_GRAPH_LIMITS.maxOutputBytes),
+      },
+    } as TaskExecutionResult;
   };
 
   const result = await runGraph({
@@ -463,15 +508,33 @@ test("turns hostile and malformed executor results into bounded failures", async
   });
   let deepOutput: unknown = "leaf";
   for (let depth = 0; depth < 110; depth += 1) deepOutput = [deepOutput];
+  const { blockers: _blockers, ...incompleteReport } = nodeOutput();
   const malformed = new Map<string, unknown>([
     ["array", []],
     ["custom-serialization", customSerialization],
     ["deep", { output: deepOutput }],
     ["getter", throwingResult],
+    ["incomplete-report", { output: incompleteReport }],
+    [
+      "invalid-report-section",
+      { output: { ...nodeOutput(), validation: ["npm test"] } },
+    ],
+    ["missing-output", {}],
     ["null", null],
     ["number", 1],
+    [
+      "oversized-diagnostics",
+      {
+        output: nodeOutput(),
+        diagnostics: "x".repeat(NODE_OUTPUT_LIMITS.maxDiagnosticsBytes + 1),
+      },
+    ],
     ["string", "ok"],
-    ["unknown-field", { summary: "not the result envelope" }],
+    [
+      "undeclared-report-field",
+      { output: { ...nodeOutput(), transcript: "must not propagate" } },
+    ],
+    ["unknown-envelope-field", { summary: "not the result envelope" }],
   ]);
   const executor: TaskExecutor = async (input) =>
     malformed.get(input.taskId) as TaskExecutionResult;
@@ -501,13 +564,20 @@ test("turns hostile and malformed executor results into bounded failures", async
 test("fails a task instead of passing oversized prerequisite context", async (t) => {
   const stateRoot = await temporaryStateRoot(t);
   const called: string[] = [];
+  const largeReport = (taskId: string): NodeOutput => {
+    const text = `${taskId}:${"x".repeat(15 * 1024)}`;
+    return {
+      ...nodeOutput(text),
+      changedFiles: [{ path: `${taskId}.ts`, description: text }],
+      interfaces: [text],
+      decisions: [text],
+      validation: [{ command: text, result: text }],
+      blockers: [],
+    };
+  };
   const executor: TaskExecutor = async (input) => {
     called.push(input.taskId);
-    return {
-      output: {
-        text: "x".repeat(Math.floor(RUN_GRAPH_LIMITS.maxOutputBytes * 0.75)),
-      },
-    };
+    return { output: largeReport(input.taskId) };
   };
 
   const result = await runGraph({
@@ -544,7 +614,7 @@ test("completes an empty graph without invoking the executor", async (t) => {
     workingDirectory: stateRoot,
     executor: async () => {
       called = true;
-      return {};
+      return { output: nodeOutput() };
     },
   });
 

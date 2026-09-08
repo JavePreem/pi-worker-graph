@@ -12,6 +12,10 @@ The repository now has a small end-to-end core independent of Pi and providers:
 - restrictive permissions and atomic filesystem publication;
 - bounded UTF-8 JSON records with explicit read and identity errors;
 - an injected asynchronous task-executor interface;
+- a strict versioned structured worker-report contract;
+- defensive report validation and immutable JSON snapshots;
+- normalized repository-relative changed-file paths and bounded diagnostics;
+- blocker-bearing report failure with retained parent-visible output;
 - bounded concurrent DAG execution with deterministic frontier selection;
 - durable terminal output before dependent activation;
 - direct-prerequisite-only output propagation;
@@ -32,33 +36,29 @@ npm run build
 pi -e .
 ```
 
-`npm run check` currently runs 46 graph, store, and runner tests. Loading the
-package in Pi should have no visible effect because the extension entry point is
-intentionally inert.
+`npm run check` currently runs 54 graph, report, store, and runner tests. Loading
+the package in Pi should have no visible effect because the extension entry point
+is intentionally inert.
 
 ## Next implementation slice
 
-Define the worker-facing result contract before selecting a real Pi transport:
+Finish the deterministic edge-context boundary before selecting a real Pi
+transport:
 
-1. Implement the versioned structured `NodeOutput` shape documented in
-   [`DESIGN.md`](DESIGN.md): summary, changed files, interfaces, decisions,
-   validation, and blockers.
-2. Validate untyped executor results at runtime before publication.
-3. Serialize direct-prerequisite output blocks deterministically within the
+1. Serialize direct-prerequisite reports into canonical named blocks within the
    existing context limit.
-4. Define explicit overflow metadata and retained-artifact references without
-   silently truncating JSON.
-5. Keep the generic graph domain unchanged and keep all tests provider-free.
+2. Keep oversized reports and edge context as explicit node failures; add
+   truncation and retained-artifact references only with the artifact consumer.
+3. Keep the generic graph domain unchanged and keep all tests provider-free.
 
 Acceptance tests should prove:
 
-- malformed worker reports become bounded node failures;
-- each downstream task sees exactly its declared prerequisite reports;
+- each downstream task receives exactly its declared prerequisite reports;
 - report and prerequisite ordering is deterministic;
-- oversized text is rejected or explicitly represented as truncated;
-- full transcripts and undeclared outputs are never propagated.
+- serialized context is byte-bounded and never silently truncated;
+- full transcripts and undeclared output fields are never propagated.
 
-After that contract is stable, review Pi's subprocess and SDK examples, choose the
+After that boundary is stable, review Pi's subprocess and SDK examples, choose the
 narrow execution adapter strategy, and set the package's Pi compatibility range.
 
 ## Deferred run-store work

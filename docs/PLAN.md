@@ -111,7 +111,8 @@ Connect the scheduler to worker execution:
 - [x] pass named direct-prerequisite outputs to downstream execution;
 - [x] block descendants of failed prerequisites;
 - [x] return deterministic aggregate graph and node status;
-- [ ] validate the versioned structured worker output contract;
+- [x] validate the versioned structured worker output contract;
+- [ ] serialize canonical named prerequisite-report blocks;
 - [ ] return retained artifact references when truncation is implemented.
 
 Acceptance tests:
