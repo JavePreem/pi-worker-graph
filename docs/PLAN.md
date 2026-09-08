@@ -44,16 +44,22 @@ Acceptance tests cover:
 
 ## Phase 2 — Run store
 
+The basic record lifecycle is complete. Ownership, coordination, artifacts, and
+cleanup remain incremental follow-up work rather than prerequisites for the
+fake-backed scheduler core.
+
 Implement run-scoped persistence outside the target checkout:
 
-- immutable versioned graph definition;
-- parent-owned node and attempt status;
-- immutable node outputs;
-- bounded text artifacts;
-- immutable events and directed messages;
-- restrictive permissions and atomic publication;
-- run ownership, bounded reads, and explicit truncation;
-- cleanup by age and terminal status.
+- [x] immutable versioned graph definition;
+- [x] parent-owned node and attempt status;
+- [x] immutable node outputs;
+- [ ] bounded text artifacts;
+- [ ] immutable events and directed messages;
+- [x] restrictive permissions and atomic publication;
+- [ ] run ownership;
+- [x] bounded reads with explicit malformed and overflow errors;
+- [ ] explicit text truncation and retained artifact references;
+- [ ] cleanup by age and terminal status.
 
 Acceptance tests:
 
@@ -65,6 +71,9 @@ Acceptance tests:
 - the default state root is outside the target checkout.
 
 ## Phase 3 — Worker execution adapter
+
+**Current focus.** Define and verify the interface with a fake executor before
+selecting or implementing a Pi transport.
 
 Implement one bounded execution path behind a testable interface:
 

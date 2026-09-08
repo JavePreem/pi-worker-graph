@@ -11,9 +11,10 @@ discovered while work is in progress.
 ## Status
 
 Early implementation. The package currently provides tested, dependency-free
-graph validation and scheduling primitives. The included Pi extension entry point
-is intentionally inert while worker execution, persistence, and opt-in mode
-integration are developed.
+graph primitives plus an explicit-root filesystem store for run manifests, node
+state, and terminal outputs. The included Pi extension entry point is
+intentionally inert while worker execution and opt-in mode integration are
+developed.
 
 No `/swarm` commands or worker processes are registered yet.
 
@@ -62,11 +63,11 @@ work. Payload serialization and size limits likewise belong to that executor.
 
 ## Planned runtime
 
-The runtime will add:
+The remaining runtime will add:
 
 - bounded concurrent execution of ready tasks;
 - compact outputs passed only across declared dependency edges;
-- run state stored outside the target checkout;
+- Pi-specific state-root resolution outside the target checkout;
 - child-only coordination and reporting tools;
 - explicit `/swarm on`, `/swarm status`, and `/swarm off` activation;
 - configurable worker profiles, models, providers, limits, and state paths;
@@ -92,7 +93,8 @@ The package can be loaded locally by Pi while the extension is under development
 pi -e .
 ```
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence and
+See [`docs/NEXT.md`](docs/NEXT.md) for current development status,
+[`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence, and
 [`docs/DESIGN.md`](docs/DESIGN.md) for the proposed runtime contract.
 
 ## Security
