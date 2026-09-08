@@ -12,12 +12,12 @@ discovered while work is in progress.
 
 Early implementation. The package currently provides tested graph primitives,
 a versioned structured worker-report contract, canonical byte-bounded
-prerequisite context, an explicit-root filesystem store, and a bounded DAG
-runner behind an injected execution function. The included Pi extension entry
-point is intentionally inert while real worker execution and opt-in mode
-integration are developed.
+prerequisite context, an explicit-root filesystem store, a bounded DAG runner,
+and a one-shot Pi subprocess adapter with a child-only final-report tool. The Pi
+extension remains inert in normal parent sessions while graph tooling and opt-in
+mode integration are developed.
 
-No `/swarm` commands or worker processes are registered yet.
+No `/swarm` commands or parent orchestration tools are registered yet.
 
 ## Graph semantics
 
@@ -79,14 +79,91 @@ untrusted-worker-data warning, is measured against a hard byte limit. Oversized
 context fails the downstream node and is never silently truncated. Only the
 validated reports of declared direct prerequisites are included.
 
+## Pi worker adapter
+
+`createPiSubprocessExecutor()` selects an explicitly named worker profile for
+each task. It starts one ephemeral Pi JSON-mode child in the target checkout,
+disables discovered extensions, skills, prompts, and session persistence, and
+applies a strict built-in tool allowlist plus the child-only report tool. Task
+assignments and edge context are written to stdin and never added to child-process
+arguments.
+
+```ts
+import { createPiSubprocessExecutor, runGraph } from "pi-worker-graph";
+
+const executor = createPiSubprocessExecutor({
+  profiles: {
+    writer: {
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      thinkingLevel: "high",
+      tools: ["read", "bash", "edit", "write"],
+    },
+  },
+});
+
+await runGraph({
+  stateRoot: "/path/outside/the/checkout",
+  workingDirectory: process.cwd(),
+  executor,
+  graph: {
+    tasks: [
+      {
+        id: "implementation",
+        payload: {
+          profile: "writer",
+          assignment: "Implement the requested change",
+          acceptanceCriteria: ["Tests pass"],
+          expectedPaths: ["src/"],
+        },
+      },
+    ],
+  },
+});
+```
+
+The adapter requires a valid terminating `worker_graph_report` call, maps
+process/provider/report failures to fixed safe diagnostics, and terminates the
+child process group on cancellation. Automated tests use fake subprocesses and
+make no provider calls.
+
+Event-stream handling is deliberately tolerant of normal worker behaviour. Pi's
+JSON mode reports every session event, so single lines carry whole tool results
+and whole assistant messages; lines too large to parse are skipped rather than
+failing the task, and the framing bound is derived from the report envelope so a
+valid report can never be skipped. A rejected report is recoverable: the worker
+may correct and resubmit it, and only a worker that never produces a valid
+report fails on that signal. Once a report is captured, a provider error or a
+nonzero exit afterwards does not discard it — the structured report is the task
+contract. Cancellation still outranks a captured report.
+
+The report must also be the worker's *last* action. Pi executes the tool calls
+of one assistant message as a batch, and a terminating result only ends the
+session when every result in that batch terminates, so a report called alongside
+`write` or `bash` leaves the worker running. The adapter tracks the batch the
+report belonged to and any tool that runs afterwards, and fails such a task
+instead of accepting a report that work outlived.
+
+With no explicit `command`, the adapter locates Pi's CLI entry point through
+this package's dependency on Pi and runs it under the current JavaScript
+runtime. Nothing is inferred from `PI_CODING_AGENT`, which Pi exports to every
+process it launches, and no command interpreter is involved on any platform.
+Supply `command` when Pi cannot be resolved that way.
+
+An executor rejects with `TaskExecutionFailure`, whose diagnostics come from a
+fixed allowlist, so no provider text or repository content reaches persisted run
+state. `runGraph` reports a graph the executor refuses through
+`RunGraphValidationError` with an `adapter_validation` issue, the same error type
+as every other pre-run rejection.
+
 ## Planned runtime
 
 The remaining runtime will add:
 
-- a real Pi worker execution adapter and worker profiles;
+- bounded worker progress and usage reporting;
 - retained report artifacts if explicit truncation is added;
 - Pi-specific state-root resolution outside the target checkout;
-- child-only coordination and reporting tools;
+- additional child-only coordination tools if required after MVP;
 - explicit `/swarm on`, `/swarm status`, and `/swarm off` activation;
 - configurable worker profiles, models, providers, limits, and state paths;
 - cancellation, failure propagation, review, and recovery behavior.
@@ -97,7 +174,9 @@ restores, cleans, or pushes.
 
 ## Development
 
-Requires Node.js 22.19 or newer.
+Requires Node.js 22.19 or newer. Pi integration is currently tested against
+`@earendil-works/pi-coding-agent` 0.85.1; the peer dependency follows Pi package
+conventions and compatibility outside the tested version is not yet guaranteed.
 
 ```bash
 npm install

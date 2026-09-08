@@ -19,6 +19,7 @@ import {
   readNodeOutput,
   readNodeState,
   runGraph,
+  TaskExecutionFailure,
 } from "../src/index.js";
 import { nodeOutput } from "./fixtures.js";
 
@@ -179,6 +180,61 @@ test("fails thrown executions, blocks descendants, and continues unrelated work"
   assert.equal(JSON.stringify(failed).includes("provider secret"), false);
 });
 
+test("persists only allowlisted adapter failure diagnostics", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "worker" }] },
+    workingDirectory: stateRoot,
+    executor: async () => {
+      throw new TaskExecutionFailure("startup");
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(
+    (await readNodeOutput(stateRoot, result.runId, "worker")).diagnostics,
+    "Pi worker process failed to start",
+  );
+});
+
+test("resolves allowlisted diagnostics across duplicate module copies", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+
+  // An executor bundled against its own copy of the failure class defeats
+  // `instanceof`. The reported code still resolves against the allowlist, and
+  // nothing the caller attaches to the error may reach persisted state.
+  const foreign = Object.assign(new Error("provider secret"), {
+    name: "TaskExecutionFailure",
+    code: "provider",
+    diagnostics: "provider secret",
+  });
+  const spoofed = Object.assign(new Error("spoof"), {
+    name: "TaskExecutionFailure",
+    code: "toString",
+  });
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "foreign" }, { id: "spoofed" }] },
+    workingDirectory: stateRoot,
+    executor: async (execution) => {
+      throw execution.taskId === "foreign" ? foreign : spoofed;
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(
+    (await readNodeOutput(stateRoot, result.runId, "foreign")).diagnostics,
+    "Pi worker provider request failed",
+  );
+  assert.equal(
+    (await readNodeOutput(stateRoot, result.runId, "spoofed")).diagnostics,
+    "Task executor failed",
+  );
+});
+
 test("treats reported blockers as failure and retains the report", async (t) => {
   const stateRoot = await temporaryStateRoot(t);
   const called: string[] = [];
@@ -223,6 +279,7 @@ test("aborts running and pending work while blocking descendants", async (t) => 
   const controller = new AbortController();
   const called: string[] = [];
   let executorObservedAbort = false;
+  let executorCleanupComplete = false;
   const executor: TaskExecutor = (input) => {
     called.push(input.taskId);
     queueMicrotask(() => controller.abort());
@@ -231,7 +288,10 @@ test("aborts running and pending work while blocking descendants", async (t) => 
         "abort",
         () => {
           executorObservedAbort = true;
-          resolveExecution({ output: nodeOutput("Ignored") });
+          setTimeout(() => {
+            executorCleanupComplete = true;
+            resolveExecution({ output: nodeOutput("Ignored") });
+          }, 20);
         },
         { once: true },
       );
@@ -256,6 +316,7 @@ test("aborts running and pending work while blocking descendants", async (t) => 
   assert.equal(result.status, "aborted");
   assert.deepEqual(called, ["first"]);
   assert.equal(executorObservedAbort, true);
+  assert.equal(executorCleanupComplete, true);
   assert.deepEqual(statuses(result), {
     first: "aborted",
     second: "aborted",
@@ -467,6 +528,98 @@ test("rejects runtime bounds before creating a run or calling the executor", asy
   }
 
   assert.equal(calls, 0);
+  await assert.rejects(() => stat(join(stateRoot, "runs")));
+});
+
+test("runs adapter-specific validation for the complete graph before creating a run", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  let calls = 0;
+  const executor = Object.assign(
+    async () => {
+      calls += 1;
+      return { output: nodeOutput() };
+    },
+    {
+      validateTasks(tasks: readonly { id: string; payload: unknown }[]) {
+        assert.deepEqual(
+          tasks.map((task) => task.id),
+          ["bad", "good"],
+        );
+        throw new TaskExecutionFailure("invalid_assignment", "bad");
+      },
+    },
+  ) satisfies TaskExecutor;
+
+  await assert.rejects(
+    () =>
+      runGraph({
+        stateRoot,
+        graph: { tasks: [{ id: "bad" }, { id: "good" }] },
+        workingDirectory: stateRoot,
+        executor,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof RunGraphValidationError);
+      assert.deepEqual(error.issues, [
+        {
+          code: "adapter_validation",
+          taskId: "bad",
+          message:
+            'Task "bad" rejected by the executor: Worker assignment is invalid',
+        },
+      ]);
+      return true;
+    },
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(() => stat(join(stateRoot, "runs")));
+});
+
+test("surfaces adapter validation failures that carry no task", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const executor = Object.assign(async () => ({ output: nodeOutput() }), {
+    validateTasks() {
+      throw new TaskExecutionFailure("invalid_profile");
+    },
+  }) satisfies TaskExecutor;
+
+  await assert.rejects(
+    () =>
+      runGraph({
+        stateRoot,
+        graph: { tasks: [{ id: "only" }] },
+        workingDirectory: stateRoot,
+        executor,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof RunGraphValidationError);
+      assert.deepEqual(error.issues, [
+        { code: "adapter_validation", message: "Worker profile is invalid" },
+      ]);
+      return true;
+    },
+  );
+});
+
+test("does not disguise unrecognized adapter validation errors", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const failure = new Error("adapter secret");
+  const executor = Object.assign(async () => ({ output: nodeOutput() }), {
+    validateTasks() {
+      throw failure;
+    },
+  }) satisfies TaskExecutor;
+
+  await assert.rejects(
+    () =>
+      runGraph({
+        stateRoot,
+        graph: { tasks: [{ id: "only" }] },
+        workingDirectory: stateRoot,
+        executor,
+      }),
+    (error: unknown) => error === failure,
+  );
   await assert.rejects(() => stat(join(stateRoot, "runs")));
 });
 

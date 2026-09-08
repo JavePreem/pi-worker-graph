@@ -196,9 +196,38 @@ not graph-spawning tools or orchestrator commands. Secrets are not added to chil
 arguments, prompts, environment metadata persisted by the runtime, or graph
 state.
 
-The exact subprocess or SDK transport remains behind an execution adapter. That
-adapter owns cancellation, process cleanup, progress events, timeout enforcement,
-output bounds, and exit classification.
+The MVP transport is a one-shot Pi JSON-mode subprocess behind the execution
+adapter. It runs without session persistence or discovered extensions, skills,
+and prompt templates; only an explicit built-in tool allowlist and the child
+report extension are active. Repository context files remain enabled as trusted
+worker instructions. Task content is sent over stdin rather than argv.
+The adapter owns process-group cancellation, forced cleanup, event-stream
+framing bounds, and bounded exit classification. Progress and usage projection
+into parent tools remain follow-up work.
+
+Classification favours completed work over incidental process noise. A captured,
+validated report outranks a provider error or a nonzero exit reported after it,
+because the report is the task contract and the child is already finished by
+then. Cancellation and a distrusted event stream still outrank a report, since
+neither leaves it trustworthy. Bounds that protect the parent are framing bounds:
+an unparseable line is skipped, never fatal, so a worker that legitimately emits
+a large transcript is not failed after its edits have landed.
+
+A report only counts when it was genuinely the worker's last action. Pi batches
+the tool calls of one assistant message and honours a terminating result only
+when the whole batch terminates, so the adapter reconstructs the batch the
+report belonged to from the assistant `message_end` event and watches for tool
+executions after it. A report that shared its batch, or that work outlived, is
+rejected rather than reported as success.
+
+The worker executable is identified positively rather than inferred. The adapter
+resolves Pi's CLI entry point through this package's dependency on Pi and runs it
+with the current JavaScript runtime, so there is no `PATH` search and no command
+interpreter on any platform. `PI_CODING_AGENT` is not evidence of identity — Pi
+exports it into every process it starts, including programs run by its own `bash`
+tool — so it only corroborates the single-file-build case, where the running
+executable is neither `node` nor `bun`. When neither route identifies Pi, the
+adapter requires an explicit command instead of guessing through a shell.
 
 ## Planned mode lifecycle
 

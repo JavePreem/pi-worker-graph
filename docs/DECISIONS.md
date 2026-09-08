@@ -72,6 +72,24 @@ The graph is immutable after execution starts. Coordination events and directed
 messages are read explicitly rather than injected globally or delivered as live
 steering messages.
 
+### D13 — Pi workers use isolated subprocesses
+
+The MVP runs each worker as a one-shot Pi JSON-mode subprocess. The parent sends
+task content over stdin, applies an explicit provider/model profile and strict
+tool allowlist, disables discovered extensions, skills, prompts, and session
+persistence, and loads only the child report extension. This provides a clear
+process-tree cancellation boundary and keeps worker failures isolated from the
+orchestrator. SDK sessions remain a possible post-MVP optimization, not a second
+MVP transport.
+
+### D14 — Pi compatibility follows package peer conventions
+
+Pi-facing code is currently tested against `@earendil-works/pi-coding-agent`
+0.85.1. The package declares Pi's extension-provided imports as `"*"` peers, as
+required by Pi package conventions, while pinning the tested versions in
+development dependencies. Compatibility outside the tested version is not
+claimed until a broader matrix exists.
+
 ## Open decisions
 
 1. Whether review feedback resumes a persisted child session or starts a fresh
@@ -80,5 +98,3 @@ steering messages.
 3. Retention defaults and cleanup policy for completed run state.
 4. Whether the extension exposes one multi-action tool or several focused tools.
 5. Whether graph execution pauses at explicit review barriers between frontiers.
-6. Whether worker execution uses subprocesses, SDK sessions, or a narrow adapter
-   supporting both.

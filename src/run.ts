@@ -4,6 +4,10 @@ import {
   PrerequisiteContextOverflowError,
   serializePrerequisiteReports,
 } from "./context.js";
+import {
+  taskExecutionDiagnostics,
+  taskExecutionFailureTaskId,
+} from "./execution-failure.js";
 import type { GraphRequest, GraphState, NormalizedGraph } from "./graph.js";
 import {
   createInitialState,
@@ -35,6 +39,7 @@ export const RUN_GRAPH_LIMITS = Object.freeze({
   maxOutputBytes: 128 * 1024,
   maxPrerequisiteBytes: 256 * 1024,
   maxTaskRuntimeMs: 10 * 60 * 1000,
+  maxExecutorCleanupMs: 5_000,
 });
 
 export type RunGraphIssueCode =
@@ -44,7 +49,8 @@ export type RunGraphIssueCode =
   | "dependency_limit"
   | "concurrency_limit"
   | "invalid_payload"
-  | "payload_limit";
+  | "payload_limit"
+  | "adapter_validation";
 
 export interface RunGraphIssue {
   readonly code: RunGraphIssueCode;
@@ -80,14 +86,25 @@ export interface TaskExecutionResult {
   readonly diagnostics?: string;
 }
 
+export interface TaskExecutorTask {
+  readonly id: string;
+  readonly payload: unknown;
+}
+
 /**
  * Executors must stop all underlying work promptly when `input.signal` aborts.
  * Ignoring the signal violates the adapter contract and may allow work to outlive
- * the graph run.
+ * the graph run. Adapter-specific task validation must be exposed through
+ * `validateTasks` so the complete graph is rejected before any worker starts.
+ *
+ * `validateTasks` reports a rejected graph by throwing. `runGraph` converts that
+ * into a `RunGraphValidationError` carrying an `adapter_validation` issue, so
+ * callers handle every pre-run rejection through one error type.
  */
-export type TaskExecutor = (
-  input: TaskExecutionInput,
-) => Promise<TaskExecutionResult>;
+export interface TaskExecutor {
+  (input: TaskExecutionInput): Promise<TaskExecutionResult>;
+  readonly validateTasks?: (tasks: readonly TaskExecutorTask[]) => void;
+}
 
 export interface RunGraphOptions<TPayload = unknown> {
   readonly stateRoot: string;
@@ -200,6 +217,36 @@ function validateRun<TPayload>(
   return issues;
 }
 
+/**
+ * Runs the executor's own whole-graph validation and normalizes its rejection
+ * into the same structured error the runtime bounds use. Only allowlisted
+ * adapter diagnostics are surfaced, so a rejected graph cannot leak adapter
+ * internals into the caller's error path.
+ */
+function validateAdapterTasks(
+  executor: TaskExecutor,
+  tasks: readonly TaskExecutorTask[],
+): void {
+  if (!executor.validateTasks) return;
+  try {
+    executor.validateTasks(tasks);
+  } catch (error) {
+    const diagnostics = taskExecutionDiagnostics(error);
+    if (diagnostics === undefined) throw error;
+    const taskId = taskExecutionFailureTaskId(error);
+    throw new RunGraphValidationError([
+      {
+        code: "adapter_validation",
+        message:
+          taskId === undefined
+            ? diagnostics
+            : `Task ${JSON.stringify(taskId)} rejected by the executor: ${diagnostics}`,
+        ...(taskId === undefined ? {} : { taskId }),
+      },
+    ]);
+  }
+}
+
 function invalidExecutorResult(taskId: string): SettledTask {
   return {
     taskId,
@@ -288,6 +335,8 @@ function executeTask(
     };
     let settled = false;
     let timedOut = false;
+    let abortResult: SettledTask | undefined;
+    let cleanupTimeout: NodeJS.Timeout | undefined;
     const parentAbort = () => controller.abort();
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -297,42 +346,51 @@ function executeTask(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      if (cleanupTimeout) clearTimeout(cleanupTimeout);
       parentSignal.removeEventListener("abort", parentAbort);
       controller.signal.removeEventListener("abort", abort);
       resolveTask(result);
     };
     const abort = () => {
-      settle(
-        timedOut
-          ? {
-              taskId: input.taskId,
-              status: "failed",
-              diagnostics: "Task executor timed out",
-            }
-          : {
-              taskId: input.taskId,
-              status: "aborted",
-              diagnostics: "Graph run was aborted",
-            },
+      const result: SettledTask = timedOut
+        ? {
+            taskId: input.taskId,
+            status: "failed",
+            diagnostics: "Task executor timed out",
+          }
+        : {
+            taskId: input.taskId,
+            status: "aborted",
+            diagnostics: "Graph run was aborted",
+          };
+      abortResult = result;
+      cleanupTimeout = setTimeout(
+        () => settle(result),
+        RUN_GRAPH_LIMITS.maxExecutorCleanupMs,
       );
     };
 
     controller.signal.addEventListener("abort", abort, { once: true });
     if (parentSignal.aborted) {
       parentAbort();
+      if (abortResult) settle(abortResult);
       return;
     }
     parentSignal.addEventListener("abort", parentAbort, { once: true });
     Promise.resolve()
       .then(() => executor(executionInput))
       .then(
-        (result) => settle(validateExecutorResult(input.taskId, result)),
-        () => {
-          settle({
-            taskId: input.taskId,
-            status: "failed",
-            diagnostics: "Task executor failed",
-          });
+        (result) =>
+          settle(abortResult ?? validateExecutorResult(input.taskId, result)),
+        (error: unknown) => {
+          settle(
+            abortResult ?? {
+              taskId: input.taskId,
+              status: "failed",
+              diagnostics:
+                taskExecutionDiagnostics(error) ?? "Task executor failed",
+            },
+          );
         },
       );
   });
@@ -473,6 +531,7 @@ export async function runGraph<TPayload>(
   );
   if (issues.length > 0) throw new RunGraphValidationError(issues);
   const graph = normalizeGraph(options.graph);
+  validateAdapterTasks(options.executor, graph.tasks);
 
   const workingDirectory = resolve(options.workingDirectory);
   const created = await createRun(options.stateRoot, graph);

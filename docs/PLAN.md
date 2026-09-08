@@ -14,9 +14,8 @@ the parent orchestrator review and request revisions.
       scripts.
 - [x] Add an inert Pi extension entry point for safe local package loading.
 - [x] Document one command for formatting, linting, typechecking, and tests.
-- [ ] Set a Pi compatibility range when the extension first imports Pi APIs.
-- [ ] Decide whether worker execution adapts the bundled subprocess example or
-      uses SDK sessions behind an execution adapter.
+- [x] Document the tested Pi version when the extension first imports Pi APIs.
+- [x] Select one-shot JSON-mode subprocesses for MVP worker execution.
 
 Acceptance:
 
@@ -82,12 +81,12 @@ Implement one bounded execution path behind a testable interface:
 - [x] enforce task, dependency, concurrency, payload, output, context, and time
       limits;
 - [x] propagate abort signals and sanitize thrown executor failures;
-- [ ] resolve configurable worker profiles and authentication through Pi;
-- [ ] start isolated child contexts in the requested working directory;
-- [ ] apply explicit worker tool allowlists;
+- [x] resolve explicit worker profiles and authentication through Pi;
+- [x] start isolated child contexts in the requested working directory;
+- [x] apply explicit worker tool allowlists;
 - [ ] stream progress and capture usage;
-- [ ] clean up child processes through the selected adapter;
-- [ ] prevent recursive graph spawning.
+- [x] clean up child process trees through the selected adapter;
+- [x] prevent recursive graph spawning.
 
 Transport-independent tests use fake executors and verify:
 
@@ -130,7 +129,7 @@ Register child-only tools for:
 - publishing decisions, interfaces, risks, conflicts, handoffs, and progress;
 - querying relevant events with cursors;
 - sending and reading directed messages;
-- submitting a structured final report.
+- [x] submitting a structured final report.
 
 Acceptance tests:
 

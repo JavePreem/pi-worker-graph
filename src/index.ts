@@ -1,4 +1,6 @@
 export type { PrerequisiteOutput } from "./context.js";
+export type { TaskExecutionFailureCode } from "./execution-failure.js";
+export { TaskExecutionFailure } from "./execution-failure.js";
 export type {
   GraphIssue,
   GraphIssueCode,
@@ -27,6 +29,14 @@ export {
   parseNodeOutput,
 } from "./output.js";
 export type {
+  PiSubprocessExecutorOptions,
+  PiThinkingLevel,
+  PiWorkerProfile,
+  PiWorkerTaskPayload,
+  PiWorkerTool,
+} from "./pi-subprocess.js";
+export { createPiSubprocessExecutor } from "./pi-subprocess.js";
+export type {
   GraphRunResult,
   GraphRunStatus,
   RunGraphIssue,
@@ -35,6 +45,7 @@ export type {
   TaskExecutionInput,
   TaskExecutionResult,
   TaskExecutor,
+  TaskExecutorTask,
 } from "./run.js";
 export {
   RUN_GRAPH_LIMITS,
