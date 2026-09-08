@@ -13,11 +13,9 @@ discovered while work is in progress.
 Early implementation. The package currently provides tested graph primitives,
 a versioned structured worker-report contract, canonical byte-bounded
 prerequisite context, an explicit-root filesystem store, a bounded DAG runner,
-and a one-shot Pi subprocess adapter with a child-only final-report tool. The Pi
-extension remains inert in normal parent sessions while graph tooling and opt-in
-mode integration are developed.
-
-No `/swarm` commands or parent orchestration tools are registered yet.
+a one-shot Pi subprocess adapter, and an explicitly activated parent
+orchestration tool. The parent tool is inactive by default; worker children
+receive only the final-report tool.
 
 ## Graph semantics
 
@@ -156,17 +154,58 @@ state. `runGraph` reports a graph the executor refuses through
 `RunGraphValidationError` with an `adapter_validation` issue, the same error type
 as every other pre-run rejection.
 
+The adapter projects bounded progress snapshots containing only task identity,
+phase, allowlisted tool name, and numeric usage. Worker text, tool arguments,
+tool results, and stderr are never included. Progress callbacks are capped and
+cannot alter worker execution if an observer throws.
+
+## Orchestrator tool
+
+The extension reads `worker-graph.json` from Pi's agent directory (normally
+`~/.pi/agent`). The configuration is byte-bounded, rejects unknown fields, and
+requires every worker profile to select its provider, model, thinking level, and
+tool allowlist explicitly:
+
+```json
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "writer": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "thinkingLevel": "high",
+      "tools": ["read", "bash", "edit", "write"]
+    }
+  }
+}
+```
+
+Run state defaults to the `worker-graph` subdirectory of Pi's agent directory.
+An optional `stateRoot` may be absolute or relative to the agent directory, but
+the extension rejects the filesystem root and any path that is inside the target
+checkout, including through an existing symlink.
+
+Load the package and activate orchestration explicitly:
+
+```text
+/swarm on
+/swarm status
+/swarm off
+```
+
+The `--swarm` extension flag enables the mode at startup. While the mode is off,
+the `worker_graph` tool is excluded from the active tool set. While it runs, the
+tool streams bounded status and returns deterministic node statuses plus
+aggregate usage; worker transcripts never enter the parent model context.
+
 ## Planned runtime
 
 The remaining runtime will add:
 
-- bounded worker progress and usage reporting;
 - retained report artifacts if explicit truncation is added;
-- Pi-specific state-root resolution outside the target checkout;
 - additional child-only coordination tools if required after MVP;
-- explicit `/swarm on`, `/swarm status`, and `/swarm off` activation;
-- configurable worker profiles, models, providers, limits, and state paths;
-- cancellation, failure propagation, review, and recovery behavior.
+- complete orchestrator-mode tool suppression and session restoration;
+- review, repair, and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not
 create worktrees or perform automatic branches, commits, merges, stashes, resets,

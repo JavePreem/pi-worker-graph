@@ -651,6 +651,219 @@ test("accepts a report that was the sole call of its final batch", async () => {
   );
 });
 
+test("projects bounded progress and usage without forwarding worker content", async () => {
+  const child = new FakeChild();
+  const progress: unknown[] = [];
+  const secret = "provider transcript secret";
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "tool_execution_start",
+          toolName: "read",
+          args: { path: secret },
+        })}\n`,
+      );
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "tool_execution_end",
+          toolName: "read",
+          isError: false,
+          result: { content: [{ type: "text", text: secret }] },
+        })}\n`,
+      );
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: "toolUse",
+            content: [{ type: "text", text: secret }],
+            usage: {
+              input: 10,
+              output: 4,
+              cacheRead: 3,
+              cacheWrite: 2,
+              totalTokens: 19,
+              cost: {
+                input: 0.01,
+                output: 0.02,
+                cacheRead: 0.003,
+                cacheWrite: 0.004,
+                total: 0.037,
+              },
+            },
+          },
+        })}\n`,
+      );
+      child.stdout.end(`${reportEvent(nodeOutput())}\n`);
+      child.close(0);
+    });
+  });
+
+  await runPiWorkerProcess(
+    input(new AbortController().signal),
+    {
+      ...options,
+      onProgress: (update) => progress.push(update),
+    },
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.deepEqual(
+    progress.map((value) => (value as { phase: string }).phase),
+    [
+      "started",
+      "tool_started",
+      "tool_completed",
+      "turn_completed",
+      "tool_completed",
+      "finished",
+    ],
+  );
+  const terminal = progress.at(-1) as {
+    status: string;
+    usage: { turns: number; totalTokens: number; cost: { total: number } };
+  };
+  assert.equal(terminal.status, "succeeded");
+  assert.equal(terminal.usage.turns, 1);
+  assert.equal(terminal.usage.totalTokens, 19);
+  assert.equal(terminal.usage.cost.total, 0.037);
+  assert.equal(JSON.stringify(progress).includes(secret), false);
+  assert.ok(Object.isFrozen(terminal.usage));
+  assert.ok(Object.isFrozen(terminal.usage.cost));
+});
+
+test("captures delta-event usage when an oversized final message is skipped", async () => {
+  const child = new FakeChild();
+  const progress: Array<{ phase: string; usage: { totalTokens: number } }> = [];
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "message_update",
+          usage: {
+            input: 7,
+            output: 3,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 10,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          assistantMessageEvent: {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "worker text is ignored",
+          },
+        })}\n`,
+      );
+      child.stdout.write(
+        `${JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "x".repeat(4 * 1024 * 1024) }],
+          },
+        })}\n`,
+      );
+      child.stdout.end(`${reportEvent(nodeOutput())}\n`);
+      child.close(0);
+    });
+  });
+
+  await runPiWorkerProcess(
+    input(new AbortController().signal),
+    {
+      ...options,
+      onProgress: (update) => progress.push(update),
+    },
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.equal(progress.at(-1)?.usage.totalTokens, 10);
+  assert.equal(
+    progress.filter((update) => update.phase === "turn_completed").length,
+    1,
+  );
+});
+
+test("caps progress callbacks and reserves a terminal update", async () => {
+  const child = new FakeChild();
+  const phases: string[] = [];
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      for (let index = 0; index < 400; index += 1) {
+        child.stdout.write(
+          `${JSON.stringify({
+            type: "tool_execution_start",
+            toolName: "read",
+            args: { index },
+          })}\n`,
+        );
+      }
+      child.stdout.end(`${reportEvent(nodeOutput())}\n`);
+      child.close(0);
+    });
+  });
+
+  await runPiWorkerProcess(
+    input(new AbortController().signal),
+    {
+      ...options,
+      onProgress: (update) => phases.push(update.phase),
+    },
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.equal(phases.length, 256);
+  assert.equal(phases.at(-1), "finished");
+});
+
+test("ignores progress observer failures", async () => {
+  const child = new FakeChild();
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.end(`${reportEvent(nodeOutput())}\n`);
+      child.close(0);
+    });
+  });
+
+  const result = await runPiWorkerProcess(
+    input(new AbortController().signal),
+    {
+      ...options,
+      onProgress: () => {
+        throw new Error("observer failure");
+      },
+    },
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.deepEqual(result, { output: nodeOutput() });
+});
+
 test("resolves the worker command without a shell on every platform", async () => {
   const child = new FakeChild();
   let invocation: { command: string; args: readonly string[] } | undefined;

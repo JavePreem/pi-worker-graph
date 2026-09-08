@@ -43,6 +43,9 @@ const TERMINATION_GRACE_MS = 2_000;
 const MAX_PROFILE_TEXT_BYTES = 256;
 const MAX_COMMAND_PATH_BYTES = 4 * 1024;
 const MAX_PAYLOAD_ITEMS = 32;
+const MAX_PROGRESS_EVENTS = 256;
+const MAX_USAGE_TOKENS = 1_000_000_000_000;
+const MAX_USAGE_COST = 1_000_000_000;
 const MAX_WORKER_PROMPT_BYTES =
   RUN_GRAPH_LIMITS.maxPayloadBytes +
   RUN_GRAPH_LIMITS.maxPrerequisiteBytes +
@@ -94,10 +97,42 @@ export interface PiWorkerProfile {
   readonly tools: readonly PiWorkerTool[];
 }
 
+export interface PiWorkerUsage {
+  readonly turns: number;
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+  readonly totalTokens: number;
+  readonly cost: {
+    readonly input: number;
+    readonly output: number;
+    readonly cacheRead: number;
+    readonly cacheWrite: number;
+    readonly total: number;
+  };
+}
+
+export type PiWorkerProgressPhase =
+  | "started"
+  | "turn_completed"
+  | "tool_started"
+  | "tool_completed"
+  | "finished";
+
+export interface PiWorkerProgress {
+  readonly taskId: string;
+  readonly phase: PiWorkerProgressPhase;
+  readonly tool?: PiWorkerTool | typeof REPORT_TOOL_NAME;
+  readonly status?: "succeeded" | "failed" | "aborted";
+  readonly usage: PiWorkerUsage;
+}
+
 export interface PiSubprocessExecutorOptions {
   readonly profiles: Readonly<Record<string, PiWorkerProfile>>;
   readonly command?: string;
   readonly extensionPath?: string;
+  readonly onProgress?: (progress: PiWorkerProgress) => void;
 }
 
 export interface PiWorkerTaskPayload {
@@ -112,6 +147,7 @@ interface NormalizedExecutorOptions {
   readonly command: string;
   readonly baseArgs: readonly string[];
   readonly extensionPath: string;
+  readonly onProgress: ((progress: PiWorkerProgress) => void) | undefined;
 }
 
 interface ProcessDependencies {
@@ -167,6 +203,13 @@ function normalizeProfile(name: string, value: unknown): PiWorkerProfile {
   if (
     !boundedIdentifier(name) ||
     !isRecord(value) ||
+    Object.keys(value).some(
+      (field) =>
+        field !== "provider" &&
+        field !== "model" &&
+        field !== "thinkingLevel" &&
+        field !== "tools",
+    ) ||
     !boundedIdentifier(value.provider) ||
     !boundedIdentifier(value.model) ||
     typeof value.thinkingLevel !== "string" ||
@@ -192,6 +235,22 @@ function normalizeProfile(name: string, value: unknown): PiWorkerProfile {
     thinkingLevel: value.thinkingLevel as PiThinkingLevel,
     tools: Object.freeze(tools as PiWorkerTool[]),
   });
+}
+
+/** Internal strict profile parser shared with the Pi configuration layer. */
+export function parsePiWorkerProfiles(
+  value: unknown,
+): Readonly<Record<string, PiWorkerProfile>> {
+  if (!isRecord(value)) throw new TaskExecutionFailure("invalid_profile");
+  const entries = Object.entries(value);
+  if (entries.length === 0 || entries.length > RUN_GRAPH_LIMITS.maxTasks) {
+    throw new TaskExecutionFailure("invalid_profile");
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      entries.map(([name, profile]) => [name, normalizeProfile(name, profile)]),
+    ),
+  );
 }
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -272,11 +331,9 @@ function normalizeOptions(
   if (!isRecord(options) || !isRecord(options.profiles)) {
     throw new TaskExecutionFailure("invalid_profile");
   }
-  const profiles = new Map<string, PiWorkerProfile>();
-  for (const [name, profile] of Object.entries(options.profiles)) {
-    profiles.set(name, normalizeProfile(name, profile));
-  }
-  if (profiles.size === 0) throw new TaskExecutionFailure("invalid_profile");
+  const profiles = new Map(
+    Object.entries(parsePiWorkerProfiles(options.profiles)),
+  );
 
   const invocation =
     options.command === undefined
@@ -298,6 +355,8 @@ function normalizeOptions(
     command: invocation.command,
     baseArgs: Object.freeze([...invocation.baseArgs]),
     extensionPath,
+    onProgress:
+      typeof options.onProgress === "function" ? options.onProgress : undefined,
   });
 }
 
@@ -426,6 +485,109 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function emptyUsage(): PiWorkerUsage {
+  return {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function boundedUsageNumber(
+  value: unknown,
+  maximum: number,
+  integer: boolean,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > maximum ||
+    (integer && !Number.isSafeInteger(value))
+  ) {
+    return 0;
+  }
+  return value;
+}
+
+function addBounded(left: number, right: number, maximum: number): number {
+  return Math.min(maximum, left + right);
+}
+
+function addAssistantUsage(
+  aggregate: PiWorkerUsage,
+  value: unknown,
+): PiWorkerUsage {
+  const usage = isRecord(value) ? value : {};
+  const cost = isRecord(usage.cost) ? usage.cost : {};
+  return {
+    turns: Math.min(MAX_PROGRESS_EVENTS, aggregate.turns + 1),
+    input: addBounded(
+      aggregate.input,
+      boundedUsageNumber(usage.input, MAX_USAGE_TOKENS, true),
+      MAX_USAGE_TOKENS,
+    ),
+    output: addBounded(
+      aggregate.output,
+      boundedUsageNumber(usage.output, MAX_USAGE_TOKENS, true),
+      MAX_USAGE_TOKENS,
+    ),
+    cacheRead: addBounded(
+      aggregate.cacheRead,
+      boundedUsageNumber(usage.cacheRead, MAX_USAGE_TOKENS, true),
+      MAX_USAGE_TOKENS,
+    ),
+    cacheWrite: addBounded(
+      aggregate.cacheWrite,
+      boundedUsageNumber(usage.cacheWrite, MAX_USAGE_TOKENS, true),
+      MAX_USAGE_TOKENS,
+    ),
+    totalTokens: addBounded(
+      aggregate.totalTokens,
+      boundedUsageNumber(usage.totalTokens, MAX_USAGE_TOKENS, true),
+      MAX_USAGE_TOKENS,
+    ),
+    cost: {
+      input: addBounded(
+        aggregate.cost.input,
+        boundedUsageNumber(cost.input, MAX_USAGE_COST, false),
+        MAX_USAGE_COST,
+      ),
+      output: addBounded(
+        aggregate.cost.output,
+        boundedUsageNumber(cost.output, MAX_USAGE_COST, false),
+        MAX_USAGE_COST,
+      ),
+      cacheRead: addBounded(
+        aggregate.cost.cacheRead,
+        boundedUsageNumber(cost.cacheRead, MAX_USAGE_COST, false),
+        MAX_USAGE_COST,
+      ),
+      cacheWrite: addBounded(
+        aggregate.cost.cacheWrite,
+        boundedUsageNumber(cost.cacheWrite, MAX_USAGE_COST, false),
+        MAX_USAGE_COST,
+      ),
+      total: addBounded(
+        aggregate.cost.total,
+        boundedUsageNumber(cost.total, MAX_USAGE_COST, false),
+        MAX_USAGE_COST,
+      ),
+    },
+  };
+}
+
+function immutableUsage(usage: PiWorkerUsage): PiWorkerUsage {
+  return Object.freeze({
+    ...usage,
+    cost: Object.freeze({ ...usage.cost }),
+  });
+}
+
 /**
  * Reports whether an assistant message called the report tool alongside other
  * tools.
@@ -544,6 +706,46 @@ async function runNormalizedPiWorkerProcess(
     let terminationStarted = false;
     let forceSent = false;
     let forceTimer: NodeJS.Timeout | undefined;
+    let usage = emptyUsage();
+    let pendingUsage: PiWorkerUsage | undefined;
+    let progressEvents = 0;
+    let terminalProgressEmitted = false;
+
+    const emitProgress = (
+      phase: PiWorkerProgressPhase,
+      fields: Pick<PiWorkerProgress, "tool" | "status"> = {},
+    ) => {
+      const terminal = phase === "finished";
+      if (
+        options.onProgress === undefined ||
+        (terminal
+          ? terminalProgressEmitted
+          : progressEvents >= MAX_PROGRESS_EVENTS - 1)
+      ) {
+        return;
+      }
+      if (terminal) terminalProgressEmitted = true;
+      progressEvents += 1;
+      const progress = Object.freeze({
+        taskId: input.taskId,
+        phase,
+        ...fields,
+        usage: immutableUsage(usage),
+      });
+      try {
+        options.onProgress(progress);
+      } catch {
+        // Observability must never alter worker execution.
+      }
+    };
+
+    emitProgress("started");
+
+    const commitAssistantUsage = (value?: unknown) => {
+      usage = addAssistantUsage(usage, value ?? pendingUsage);
+      pendingUsage = undefined;
+      emitProgress("turn_completed");
+    };
 
     /**
      * Asks the worker tree to stop, then escalates once. Settling always waits
@@ -580,17 +782,45 @@ async function runNormalizedPiWorkerProcess(
         return;
       }
 
+      if (event.type === "message_update") {
+        pendingUsage = addAssistantUsage(emptyUsage(), event.usage);
+        return;
+      }
+
       if (
         event.type === "message_end" &&
         isRecord(event.message) &&
         event.message.role === "assistant"
       ) {
+        commitAssistantUsage(event.message.usage);
         if (event.message.stopReason === "error") providerFailed = true;
         if (batchCallsReportWithSiblings(event.message.content)) {
           reportNotFinal = true;
         }
       }
+      if (
+        event.type === "tool_execution_start" &&
+        typeof event.toolName === "string" &&
+        (WORKER_TOOLS.has(event.toolName) ||
+          event.toolName === REPORT_TOOL_NAME)
+      ) {
+        if (pendingUsage !== undefined) commitAssistantUsage();
+        emitProgress("tool_started", {
+          tool: event.toolName as PiWorkerTool | typeof REPORT_TOOL_NAME,
+        });
+        return;
+      }
       if (event.type !== "tool_execution_end") return;
+      if (pendingUsage !== undefined) commitAssistantUsage();
+      if (
+        typeof event.toolName === "string" &&
+        (WORKER_TOOLS.has(event.toolName) ||
+          event.toolName === REPORT_TOOL_NAME)
+      ) {
+        emitProgress("tool_completed", {
+          tool: event.toolName as PiWorkerTool | typeof REPORT_TOOL_NAME,
+        });
+      }
       if (event.toolName !== REPORT_TOOL_NAME) {
         // Any tool that runs once a report exists proves the report was not
         // the worker's last action, whichever batch it belonged to.
@@ -682,6 +912,7 @@ async function runNormalizedPiWorkerProcess(
         if (!skippingLine && textBuffer.length > 0) {
           processLine(textBuffer.replace(/\r$/u, ""));
         }
+        if (pendingUsage !== undefined) commitAssistantUsage();
       } catch {
         failure ??= new TaskExecutionFailure("protocol");
       }
@@ -695,17 +926,33 @@ async function runNormalizedPiWorkerProcess(
       // validated report is the task contract: a provider error or a nonzero
       // exit after the terminating report call describes a child that is
       // already done, and must not discard work the worker completed.
-      if (input.signal.aborted) reject(new TaskExecutionFailure("process"));
-      else if (failure) reject(failure);
-      else if (output && reportNotFinal)
-        reject(new TaskExecutionFailure("report_not_final"));
-      else if (output) resolve({ output });
-      else if (reportToolFailed)
-        reject(new TaskExecutionFailure("report_tool"));
-      else if (providerFailed) reject(new TaskExecutionFailure("provider"));
-      else if (stdinFailed || code !== 0)
+      if (input.signal.aborted) {
+        emitProgress("finished", { status: "aborted" });
         reject(new TaskExecutionFailure("process"));
-      else reject(new TaskExecutionFailure("missing_report"));
+      } else if (failure) {
+        emitProgress("finished", { status: "failed" });
+        reject(failure);
+      } else if (output && reportNotFinal) {
+        emitProgress("finished", { status: "failed" });
+        reject(new TaskExecutionFailure("report_not_final"));
+      } else if (output) {
+        emitProgress("finished", {
+          status: output.blockers.length > 0 ? "failed" : "succeeded",
+        });
+        resolve({ output });
+      } else if (reportToolFailed) {
+        emitProgress("finished", { status: "failed" });
+        reject(new TaskExecutionFailure("report_tool"));
+      } else if (providerFailed) {
+        emitProgress("finished", { status: "failed" });
+        reject(new TaskExecutionFailure("provider"));
+      } else if (stdinFailed || code !== 0) {
+        emitProgress("finished", { status: "failed" });
+        reject(new TaskExecutionFailure("process"));
+      } else {
+        emitProgress("finished", { status: "failed" });
+        reject(new TaskExecutionFailure("missing_report"));
+      }
     });
     child.stdin.once("error", () => {
       // Pi consumes the whole prompt before it starts working, so a write

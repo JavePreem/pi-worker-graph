@@ -17,6 +17,17 @@ activity still handle repository data. Repository `AGENTS.md`/`CLAUDE.md` contex
 files remain enabled intentionally and must be treated as trusted worker
 instructions.
 
+Worker profiles are loaded from the global Pi agent directory, not from the
+target checkout. The configuration must not contain provider credentials or
+other secrets. Progress projection retains only bounded task status, allowlisted
+tool names, and numeric usage; worker messages, tool arguments, tool results, and
+stderr are not forwarded into the parent model context.
+
+Run state defaults beneath the global Pi agent directory. Explicit state roots
+cannot be the filesystem root or resolve into the target checkout through an
+existing symlink; operators should still choose a private, access-controlled
+directory outside repositories.
+
 Workers are started without a command interpreter: the executable is Pi's own
 CLI entry point, resolved through this package's dependency on Pi, and every
 argument is passed through `spawn` with `shell: false`. Configured provider and

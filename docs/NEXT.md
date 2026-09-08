@@ -40,12 +40,19 @@ adapter. Automated tests remain provider-free:
   collection of orphaned grandchildren;
 - sanitized executor failures, cancellation, and task timeouts;
 - task, dependency, concurrency, payload, output, and context limits;
+- bounded, redacted worker progress projection and aggregate usage accounting;
+- a strict global `worker-graph.json` profile configuration;
+- a default state root beneath Pi's agent directory, with checkout-local roots
+  rejected by the extension;
+- one static, fully bounded `worker_graph` parent tool;
+- explicit `/swarm on`, `/swarm status`, `/swarm off`, and `--swarm` activation;
 - behavioral coverage using `node:test`, fakes, and temporary directories.
 
-Normal parent sessions still register no commands or tools. The public subprocess
-adapter can start real workers when called, and the report tool is registered only
-inside explicitly marked worker children. The store requires one parent to
-serialize state transitions; cross-process run ownership is not implemented yet.
+Normal parent sessions register the `/swarm` control command, but the
+`worker_graph` tool is inactive until explicitly enabled. The report tool is
+registered only inside explicitly marked worker children. The store requires one
+parent to serialize state transitions; cross-process run ownership is not
+implemented yet.
 
 ## Verify the baseline
 
@@ -56,38 +63,37 @@ npm run build
 pi -e .
 ```
 
-`npm run check` currently runs the adapter, context, extension, graph, report,
-store, and runner suites. `npm run build` must run before `pi -e .`, because
+`npm run check` currently runs the adapter, configuration, context, extension,
+graph, orchestrator, report, store, and runner suites. `npm run build` must run
+before `pi -e .`, because
 `extensions/index.ts` re-exports the compiled entry point from `dist/`.
-Loading the package in Pi should have no visible effect: the entry point
-registers the worker report tool only when `PI_WORKER_GRAPH_ROLE=worker`, which
-the parent sets on worker subprocesses and never on its own session.
+Loading the package in Pi adds the `/swarm` control command but leaves the parent
+tool set unchanged. The entry point registers the worker report tool only when
+`PI_WORKER_GRAPH_ROLE=worker`, which the parent sets on worker subprocesses and
+never on its own session.
 
 ## Next implementation slice
 
-Finish transport observability, then add the smallest configuration and graph-tool
-layer:
+Exercise the new vertical slice, then complete orchestrator-mode policy:
 
-1. Add bounded worker progress and usage capture without forwarding transcripts to
-   the parent model context.
-2. Resolve the default state root beneath Pi's agent directory while allowing an
-   explicit override outside the checkout.
-3. Load a small profile map containing provider, model, thinking level, and tool
-   allowlist; keep profile selection explicit.
-4. Register one static `worker_graph` orchestrator tool that validates the full
-   graph and limits before invoking the subprocess-backed runner.
-5. Keep automated coverage provider-free behind the fake subprocess boundary.
-
-Provider-backed checks remain optional manual tests. Explicit orchestrator mode
-and parent tool suppression follow after the graph tool works end to end.
+1. Run an optional provider-backed smoke test with two independent workers and a
+   dependent validation node; confirm profile routing, progress, aggregate usage,
+   cancellation, and state placement.
+2. When `/swarm on` is active, suppress parent tools that can write directly and
+   restore the exact prior active-tool set on `/swarm off`.
+3. Persist and restore mode state across Pi session replacement and resume without
+   ever enabling orchestrator mode in worker children.
+4. Add focused orchestrator guidance and a compact result renderer for integrated
+   checkout review and repair delegation.
+5. Keep every automated path provider-free behind the existing fake subprocess
+   and injected orchestrator boundaries.
 
 ## Deferred run-store work
 
 Before a resumable or externally addressable run API is added, implement run
 ownership so two orchestrators cannot advance one run. Add events, inboxes,
-retention cleanup, and Pi-specific default-path resolution only with their
-consumers. Bounded text artifacts can be added with structured-output overflow
-handling.
+and retention cleanup only with their consumers. Bounded text artifacts can be
+added with structured-output overflow handling.
 
 ## Constraints to preserve
 

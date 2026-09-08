@@ -34,18 +34,133 @@ function restoreWorkerRole(value: string | undefined): void {
   else process.env.PI_WORKER_GRAPH_ROLE = value;
 }
 
-test("registers a terminating final-report tool only in worker mode", async (t) => {
+test("keeps the parent graph tool inactive until explicitly enabled", async (t) => {
   const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
   t.after(() => restoreWorkerRole(previousRole));
 
   delete process.env.PI_WORKER_GRAPH_ROLE;
-  let parentRegistrations = 0;
+  const tools: string[] = [];
+  const commands: string[] = [];
+  const flags: string[] = [];
+  let active = ["read", "edit", "write"];
+  let sessionStart: (() => void) | undefined;
   registerWorkerGraph({
-    registerTool() {
-      parentRegistrations += 1;
+    registerTool(tool: { name: string }) {
+      tools.push(tool.name);
+      active.push(tool.name);
+    },
+    registerCommand(name: string) {
+      commands.push(name);
+    },
+    registerFlag(name: string) {
+      flags.push(name);
+    },
+    getFlag() {
+      return false;
+    },
+    getActiveTools() {
+      return [...active];
+    },
+    setActiveTools(names: string[]) {
+      active = [...names];
+    },
+    on(event: string, handler: () => void) {
+      if (event === "session_start") sessionStart = handler;
     },
   } as never);
-  assert.equal(parentRegistrations, 0);
+  if (!sessionStart) throw new Error("session_start was not registered");
+  assert.deepEqual(active, ["read", "edit", "write", "worker_graph"]);
+  sessionStart();
+  assert.deepEqual(tools, ["worker_graph"]);
+  assert.deepEqual(commands, ["swarm"]);
+  assert.deepEqual(flags, ["swarm"]);
+  assert.deepEqual(active, ["read", "edit", "write"]);
+
+  process.env.PI_WORKER_GRAPH_ROLE = "worker";
+  let workerCommands = 0;
+  let workerFlags = 0;
+  const workerTools: string[] = [];
+  registerWorkerGraph({
+    registerTool(tool: { name: string }) {
+      workerTools.push(tool.name);
+    },
+    registerCommand() {
+      workerCommands += 1;
+    },
+    registerFlag() {
+      workerFlags += 1;
+    },
+  } as never);
+  assert.deepEqual(workerTools, ["worker_graph_report"]);
+  assert.equal(workerCommands, 0);
+  assert.equal(workerFlags, 0);
+});
+
+test("activates from the startup flag and preserves other tool changes", async (t) => {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
+  delete process.env.PI_WORKER_GRAPH_ROLE;
+
+  let active = ["read", "edit", "worker_graph"];
+  let command:
+    | ((
+        args: string,
+        ctx: { ui: { notify(message: string): void } },
+      ) => Promise<void>)
+    | undefined;
+  let sessionStart: (() => void) | undefined;
+  const notifications: string[] = [];
+  registerWorkerGraph({
+    registerTool() {},
+    registerFlag() {},
+    getFlag() {
+      return true;
+    },
+    getActiveTools() {
+      return [...active];
+    },
+    setActiveTools(names: string[]) {
+      active = [...names];
+    },
+    on(event: string, handler: () => void) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    registerCommand(
+      _name: string,
+      options: {
+        handler: (
+          args: string,
+          ctx: { ui: { notify(message: string): void } },
+        ) => Promise<void>;
+      },
+    ) {
+      command = options.handler;
+    },
+  } as never);
+
+  if (!sessionStart) throw new Error("session_start was not registered");
+  sessionStart();
+  assert.deepEqual(active, ["read", "edit", "worker_graph"]);
+  assert.ok(command);
+  const ctx = {
+    ui: { notify: (message: string) => notifications.push(message) },
+  };
+  active = ["read", "custom", "worker_graph"];
+  await command("off", ctx);
+  assert.deepEqual(active, ["read", "custom"]);
+  await command("on", ctx);
+  assert.deepEqual(active, ["read", "custom", "worker_graph"]);
+  await command("status", ctx);
+  assert.deepEqual(notifications, [
+    "Worker-graph mode disabled",
+    "Worker-graph mode enabled",
+    "Worker-graph mode is enabled",
+  ]);
+});
+
+test("registers a terminating final-report tool in worker mode", async (t) => {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
 
   process.env.PI_WORKER_GRAPH_ROLE = "worker";
   const definition = captureWorkerTool();

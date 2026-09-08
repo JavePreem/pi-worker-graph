@@ -1,5 +1,13 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionAPI,
+  getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  registerWorkerGraphOrchestratorTool,
+  WORKER_GRAPH_TOOL_NAME,
+  type WorkerGraphOrchestratorDependencies,
+} from "./orchestrator.js";
 import {
   NODE_OUTPUT_LIMITS,
   NODE_OUTPUT_SCHEMA_VERSION,
@@ -9,6 +17,8 @@ import {
 const WORKER_ROLE_VARIABLE = "PI_WORKER_GRAPH_ROLE";
 const WORKER_ROLE = "worker";
 export const WORKER_REPORT_TOOL_NAME = "worker_graph_report";
+export const SWARM_COMMAND_NAME = "swarm";
+export const SWARM_FLAG_NAME = "swarm";
 
 /**
  * `parseNodeOutput` measures every limit in UTF-8 bytes, but JSON Schema can
@@ -73,10 +83,7 @@ const nodeOutputSchema = Type.Object(
   { additionalProperties: false },
 );
 
-/** Pi package entry point. Parent orchestration remains inert for this slice. */
-export default function registerWorkerGraph(pi: ExtensionAPI): void {
-  if (process.env[WORKER_ROLE_VARIABLE] !== WORKER_ROLE) return;
-
+function registerWorkerReportTool(pi: ExtensionAPI): void {
   let submitted = false;
   pi.registerTool({
     name: WORKER_REPORT_TOOL_NAME,
@@ -111,6 +118,85 @@ export default function registerWorkerGraph(pi: ExtensionAPI): void {
         },
         terminate: true,
       };
+    },
+  });
+}
+
+function orchestratorDependencies(
+  dependencies: Partial<WorkerGraphOrchestratorDependencies>,
+): WorkerGraphOrchestratorDependencies {
+  return {
+    getAgentDirectory: dependencies.getAgentDirectory ?? getAgentDir,
+    ...(dependencies.loadConfiguration === undefined
+      ? {}
+      : { loadConfiguration: dependencies.loadConfiguration }),
+    ...(dependencies.createExecutor === undefined
+      ? {}
+      : { createExecutor: dependencies.createExecutor }),
+    ...(dependencies.executeGraph === undefined
+      ? {}
+      : { executeGraph: dependencies.executeGraph }),
+  };
+}
+
+/** Pi package entry point with mutually exclusive worker and parent roles. */
+export default function registerWorkerGraph(
+  pi: ExtensionAPI,
+  dependencies: Partial<WorkerGraphOrchestratorDependencies> = {},
+): void {
+  if (process.env[WORKER_ROLE_VARIABLE] === WORKER_ROLE) {
+    registerWorkerReportTool(pi);
+    return;
+  }
+
+  pi.registerFlag(SWARM_FLAG_NAME, {
+    description: "Start with worker-graph orchestration enabled",
+    type: "boolean",
+    default: false,
+  });
+  registerWorkerGraphOrchestratorTool(
+    pi,
+    orchestratorDependencies(dependencies),
+  );
+
+  let enabled = false;
+  const activate = () => {
+    const active = pi.getActiveTools();
+    if (active.includes(WORKER_GRAPH_TOOL_NAME)) return;
+    pi.setActiveTools([...active, WORKER_GRAPH_TOOL_NAME]);
+  };
+  const deactivate = () => {
+    const active = pi.getActiveTools();
+    if (!active.includes(WORKER_GRAPH_TOOL_NAME)) return;
+    pi.setActiveTools(active.filter((name) => name !== WORKER_GRAPH_TOOL_NAME));
+  };
+
+  pi.on("session_start", () => {
+    enabled = pi.getFlag(SWARM_FLAG_NAME) === true;
+    if (enabled) activate();
+    else deactivate();
+  });
+
+  pi.registerCommand(SWARM_COMMAND_NAME, {
+    description: "Enable, disable, or inspect worker-graph orchestration",
+    async handler(args, ctx) {
+      const action = args.trim();
+      if (action === "on") {
+        enabled = true;
+        activate();
+        ctx.ui.notify("Worker-graph mode enabled", "info");
+      } else if (action === "off") {
+        enabled = false;
+        deactivate();
+        ctx.ui.notify("Worker-graph mode disabled", "info");
+      } else if (action === "status") {
+        ctx.ui.notify(
+          `Worker-graph mode is ${enabled ? "enabled" : "disabled"}`,
+          "info",
+        );
+      } else {
+        ctx.ui.notify("Usage: /swarm on|status|off", "warning");
+      }
     },
   });
 }

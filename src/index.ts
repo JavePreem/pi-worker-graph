@@ -32,8 +32,11 @@ export type {
   PiSubprocessExecutorOptions,
   PiThinkingLevel,
   PiWorkerProfile,
+  PiWorkerProgress,
+  PiWorkerProgressPhase,
   PiWorkerTaskPayload,
   PiWorkerTool,
+  PiWorkerUsage,
 } from "./pi-subprocess.js";
 export { createPiSubprocessExecutor } from "./pi-subprocess.js";
 export type {

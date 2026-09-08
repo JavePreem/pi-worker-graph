@@ -84,7 +84,7 @@ Implement one bounded execution path behind a testable interface:
 - [x] resolve explicit worker profiles and authentication through Pi;
 - [x] start isolated child contexts in the requested working directory;
 - [x] apply explicit worker tool allowlists;
-- [ ] stream progress and capture usage;
+- [x] stream bounded redacted progress and capture usage;
 - [x] clean up child process trees through the selected adapter;
 - [x] prevent recursive graph spawning.
 
@@ -143,12 +143,12 @@ Acceptance tests:
 
 Implement:
 
-- explicit on, status, and off commands;
-- an opt-in startup flag;
+- [x] explicit on, status, and off commands;
+- [x] an opt-in startup flag;
 - session setting snapshot and restoration;
 - orchestrator guidance for decomposition, bounded overlap, review, validation,
   and repair delegation;
-- graph progress UI.
+- [x] bounded graph progress through tool updates.
 
 Acceptance tests:
 

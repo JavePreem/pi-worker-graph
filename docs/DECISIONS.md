@@ -46,13 +46,14 @@ repair.
 
 ### D8 — Runtime activation is explicit
 
-The future extension will not alter normal Pi behavior until worker-graph mode is
-explicitly enabled. Leaving the mode restores the previous session settings.
+The extension does not activate its graph tool until worker-graph mode is
+explicitly enabled. Leaving the mode removes only that graph tool, preserving
+unrelated active-tool changes made during the session.
 
 ### D9 — Models and providers are configuration
 
 The graph domain has no provider dependency or model default. Runtime profiles
-will accept configurable model, provider, thinking-level, and tool settings.
+accept configurable model, provider, thinking-level, and tool settings.
 Tests use fakes and make no provider calls.
 
 ### D10 — No recursive delegation initially
@@ -90,11 +91,17 @@ required by Pi package conventions, while pinning the tested versions in
 development dependencies. Compatibility outside the tested version is not
 claimed until a broader matrix exists.
 
+### D15 — One explicitly activated parent graph tool
+
+The parent exposes one static `worker_graph` schema for complete DAG execution.
+It is inactive by default and enabled only through `/swarm on` or `--swarm`.
+Transport progress contains bounded status and usage metadata, never worker
+transcripts or tool payloads.
+
 ## Open decisions
 
 1. Whether review feedback resumes a persisted child session or starts a fresh
    attempt with the prior structured output.
 2. Whether advisory path and symbol claims belong in the MVP or a follow-up.
 3. Retention defaults and cleanup policy for completed run state.
-4. Whether the extension exposes one multi-action tool or several focused tools.
-5. Whether graph execution pauses at explicit review barriers between frontiers.
+4. Whether graph execution pauses at explicit review barriers between frontiers.

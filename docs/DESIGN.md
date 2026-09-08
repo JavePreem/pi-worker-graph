@@ -202,8 +202,9 @@ and prompt templates; only an explicit built-in tool allowlist and the child
 report extension are active. Repository context files remain enabled as trusted
 worker instructions. Task content is sent over stdin rather than argv.
 The adapter owns process-group cancellation, forced cleanup, event-stream
-framing bounds, and bounded exit classification. Progress and usage projection
-into parent tools remain follow-up work.
+framing bounds, and bounded exit classification. It projects capped progress
+snapshots containing only task identity, phase, allowlisted tool names, and
+numeric usage. Worker text and tool payloads are not forwarded to the parent.
 
 Classification favours completed work over incidental process noise. A captured,
 validated report outranks a provider error or a nonzero exit reported after it,
@@ -229,9 +230,9 @@ tool — so it only corroborates the single-file-build case, where the running
 executable is neither `node` nor `bun`. When neither route identifies Pi, the
 adapter requires an explicit command instead of guessing through a shell.
 
-## Planned mode lifecycle
+## Mode lifecycle
 
-The extension is expected to provide:
+The extension provides:
 
 ```text
 /swarm on
@@ -239,12 +240,14 @@ The extension is expected to provide:
 /swarm off
 ```
 
-and an opt-in startup flag. These controls are not implemented yet.
+and an opt-in startup flag. The parent `worker_graph` tool is registered once but
+removed from the active tool set until the mode is enabled. Worker children take
+a mutually exclusive extension path and receive only their final-report tool.
 
-Entering mode snapshots relevant parent session settings, selects configured
-orchestrator behavior, and enables graph and review tools. Leaving restores the
-snapshot. Mode state is session-scoped. Child sessions never enter orchestrator
-mode.
+The current activation layer adds or removes only `worker_graph`, preserving
+unrelated active-tool changes made while the mode is enabled. Removing direct
+parent write capabilities, adding richer orchestrator guidance, and restoring
+mode state across session replacement remain follow-up work.
 
 ## Failure semantics
 
