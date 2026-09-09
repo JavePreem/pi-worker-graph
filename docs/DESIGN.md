@@ -176,6 +176,7 @@ Per-run layout:
 ```text
 <state-root>/runs/<run-id>/
   run.json                    immutable graph and configuration
+  owner.json                  exclusive active lifecycle owner
   nodes/<task-key>.json       parent-owned current node state
   outputs/<task-key>.json     terminal structured output
   artifacts/<task-key>.md     bounded textual output
@@ -188,8 +189,12 @@ Task IDs are validated or encoded before use as path components. Immutable
 records are published by writing a same-directory temporary file with restrictive
 permissions and atomically renaming it. Mutable parent-owned state is replaced
 atomically. One extension instance permits only one graph lifecycle at a time.
-Cross-process run ownership remains required before an API can resume or
-externally advance an existing run.
+Active graph execution claims an exclusive owner record before mutating node
+state or outputs. Each mutation also holds a per-run filesystem lock through its
+full asynchronous read/validate/commit sequence, so ownership cannot be
+released and reassigned mid-mutation. Resumable or externally addressable runs
+still require an API that acquires and verifies that ownership before advancing
+an existing run.
 
 ## Child process contract
 

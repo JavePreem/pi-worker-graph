@@ -63,9 +63,9 @@ adapter. Automated tests remain provider-free:
 
 Normal parent sessions register the `/swarm` control command, but the
 `worker_graph` tool is inactive until explicitly enabled. The report tool is
-registered only inside explicitly marked worker children. The store requires one
-parent to serialize state transitions; cross-process run ownership is not
-implemented yet.
+registered only inside explicitly marked worker children. Active graph
+lifecycles claim an exclusive owner before mutating run state; resumable or
+externally addressable runs are not implemented yet.
 
 ## Verify the baseline
 
@@ -83,7 +83,9 @@ before `pi -e .`, because
 Loading the package in Pi adds the `/swarm` control command but leaves the parent
 tool set unchanged. The entry point registers the worker report tool only when
 `PI_WORKER_GRAPH_ROLE=worker`, which the parent sets on worker subprocesses and
-never on its own session.
+never on its own session. Active graph lifecycles claim an exclusive owner
+record before mutating run state; resumable or externally addressable runs are
+not implemented yet.
 
 ## Next implementation slice
 
@@ -101,11 +103,11 @@ Prepare the vertical slice for a prerelease:
 
 ## Deferred run-store work
 
-Before a resumable or externally addressable run API is added, implement run
-ownership so two orchestrators cannot advance one run. Add events, inboxes,
-and retention cleanup only with their consumers; cleanup must release a removed
-run's capacity slot together with its directory. Bounded text artifacts can be
-added with structured-output overflow handling.
+Before a resumable or externally addressable run API is added, retain the
+fail-closed ownership contract so two orchestrators cannot advance one run. Add
+events, inboxes, and retention cleanup only with their consumers; cleanup must
+release a removed run's capacity slot together with its directory. Bounded text
+artifacts can be added with structured-output overflow handling.
 
 ## Constraints to preserve
 

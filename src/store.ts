@@ -31,6 +31,7 @@ const RUN_ID_PATTERN =
 const RUN_SLOT_DIRECTORY = "slots";
 const RUN_SLOT_RECORD = "slot.json";
 const RUN_SLOT_PATTERN = /^(0|[1-9][0-9]*)\.json$/;
+const RUN_MUTATION_LOCK = "mutation.lock";
 const TASK_KEY_PATTERN =
   /^task-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NODE_STATUSES = new Set<NodeStatus>([
@@ -58,6 +59,13 @@ const NODE_OUTPUT_RECORD_FIELDS = new Set([
   "output",
   "diagnostics",
 ]);
+const RUN_OWNER_RECORD_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "runId",
+  "ownerId",
+  "acquiredAt",
+]);
 
 interface SlotClaim {
   readonly index: number;
@@ -73,7 +81,8 @@ export type RunStoreErrorCode =
   | "record_too_large"
   | "malformed_record"
   | "invalid_record"
-  | "retention_limit";
+  | "retention_limit"
+  | "ownership";
 
 export class RunStoreError extends Error {
   readonly code: RunStoreErrorCode;
@@ -103,6 +112,18 @@ export interface RunManifest {
     readonly tasks: readonly RunManifestTask[];
     readonly concurrency?: number;
   };
+}
+
+/**
+ * Exclusive ownership of one run's mutable lifecycle.
+ *
+ * The owner ID is an opaque capability held by the process that acquired the
+ * run. Ownership is deliberately fail-closed: an owner record left by a
+ * crashed process is not reclaimed by elapsed time or by inspecting a PID.
+ */
+export interface RunOwnership {
+  readonly runId: string;
+  readonly ownerId: string;
 }
 
 export interface NodeStateRecord {
@@ -356,6 +377,10 @@ function runPath(stateRoot: string, runId: string): string {
   return join(runsPath(stateRoot), runId);
 }
 
+function ownerPath(stateRoot: string, runId: string): string {
+  return join(runPath(stateRoot, runId), "owner.json");
+}
+
 function isTimestamp(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -508,6 +533,135 @@ function invalidRecord(path: string, detail: string): never {
     `Invalid record at ${JSON.stringify(path)}: ${detail}`,
     path,
   );
+}
+
+function validateRunOwnership(value: unknown, path: string): RunOwnership {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.kind !== "run-owner" ||
+    typeof value.runId !== "string" ||
+    !RUN_ID_PATTERN.test(value.runId) ||
+    typeof value.ownerId !== "string" ||
+    !RUN_ID_PATTERN.test(value.ownerId) ||
+    !isTimestamp(value.acquiredAt) ||
+    Object.keys(value).some((field) => !RUN_OWNER_RECORD_FIELDS.has(field))
+  ) {
+    return invalidRecord(path, "run ownership does not match schema version 1");
+  }
+  return { runId: value.runId, ownerId: value.ownerId };
+}
+
+function parseOwnershipCapability(value: unknown): RunOwnership {
+  try {
+    if (!isRecord(value)) throw new Error("invalid ownership capability");
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("invalid ownership capability");
+    }
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== 2 ||
+      keys.some((key) => key !== "runId" && key !== "ownerId")
+    ) {
+      throw new Error("invalid ownership capability");
+    }
+    const runIdDescriptor = Object.getOwnPropertyDescriptor(value, "runId");
+    const ownerIdDescriptor = Object.getOwnPropertyDescriptor(value, "ownerId");
+    if (
+      runIdDescriptor === undefined ||
+      !runIdDescriptor.enumerable ||
+      !("value" in runIdDescriptor) ||
+      ownerIdDescriptor === undefined ||
+      !ownerIdDescriptor.enumerable ||
+      !("value" in ownerIdDescriptor) ||
+      typeof runIdDescriptor.value !== "string" ||
+      !RUN_ID_PATTERN.test(runIdDescriptor.value) ||
+      typeof ownerIdDescriptor.value !== "string" ||
+      !RUN_ID_PATTERN.test(ownerIdDescriptor.value)
+    ) {
+      throw new Error("invalid ownership capability");
+    }
+    return Object.freeze({
+      runId: runIdDescriptor.value,
+      ownerId: ownerIdDescriptor.value,
+    });
+  } catch {
+    throw new RunStoreError("ownership", "Run ownership capability is invalid");
+  }
+}
+
+async function acquireRunMutationLock(
+  stateRoot: string,
+  runId: string,
+): Promise<() => Promise<void>> {
+  const path = join(runPath(stateRoot, runId), RUN_MUTATION_LOCK);
+  let created = false;
+  try {
+    await mkdir(path, { mode: DIRECTORY_MODE });
+    created = true;
+    await chmod(path, DIRECTORY_MODE);
+  } catch (error) {
+    if (created) {
+      await rm(path, { recursive: true, force: true }).catch(() => {});
+    }
+    if (errorCode(error) === "EEXIST") {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} has a mutation in flight`,
+        path,
+      );
+    }
+    if (errorCode(error) === "ENOENT") {
+      throw new RunStoreError(
+        "not_found",
+        `Run ${JSON.stringify(runId)} was not found`,
+        path,
+      );
+    }
+    throw error;
+  }
+  return async () => {
+    await rm(path, { recursive: true, force: true });
+  };
+}
+
+async function assertRunOwnership(
+  stateRoot: string,
+  runId: string,
+  ownership: unknown,
+): Promise<() => Promise<void>> {
+  const capability = parseOwnershipCapability(ownership);
+  const path = ownerPath(stateRoot, runId);
+  const releaseMutationLock = await acquireRunMutationLock(stateRoot, runId);
+  try {
+    if (capability.runId !== runId) {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is owned by another orchestrator`,
+        path,
+      );
+    }
+    const record = validateRunOwnership(await readJson(path), path);
+    if (record.runId !== runId || record.ownerId !== capability.ownerId) {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is owned by another orchestrator`,
+        path,
+      );
+    }
+    return releaseMutationLock;
+  } catch (error) {
+    await releaseMutationLock();
+    if (error instanceof RunStoreError && error.code === "not_found") {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is not owned by an orchestrator`,
+        path,
+      );
+    }
+    throw error;
+  }
 }
 
 function validateManifest(value: unknown, path: string): RunManifest {
@@ -847,6 +1001,89 @@ export async function createRun<TPayload>(
   return manifest;
 }
 
+export async function acquireRunOwnership(
+  stateRoot: string,
+  runId: string,
+): Promise<RunOwnership> {
+  // Validate the run before creating an owner record, so ownership can never
+  // accidentally create a new addressable run.
+  await readRun(stateRoot, runId);
+  const path = ownerPath(stateRoot, runId);
+  const ownership = Object.freeze({
+    runId,
+    ownerId: randomUUID(),
+  });
+  const releaseMutationLock = await acquireRunMutationLock(stateRoot, runId);
+  try {
+    try {
+      await writeNewFile(path, {
+        schemaVersion: SCHEMA_VERSION,
+        kind: "run-owner",
+        runId,
+        ownerId: ownership.ownerId,
+        acquiredAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") {
+        throw new RunStoreError(
+          "ownership",
+          `Run ${JSON.stringify(runId)} is already owned by another orchestrator`,
+          path,
+        );
+      }
+      throw error;
+    }
+    return ownership;
+  } finally {
+    await releaseMutationLock();
+  }
+}
+
+export async function releaseRunOwnership(
+  stateRoot: string,
+  ownership: RunOwnership,
+): Promise<void> {
+  const capability = parseOwnershipCapability(ownership);
+  const runId = capability.runId;
+  assertRunId(runId);
+  const path = ownerPath(stateRoot, runId);
+  let releaseMutationLock: (() => Promise<void>) | undefined;
+  try {
+    releaseMutationLock = await acquireRunMutationLock(stateRoot, runId);
+  } catch (error) {
+    if (
+      errorCode(error) === "ENOENT" ||
+      (error instanceof RunStoreError && error.code === "not_found")
+    ) {
+      return;
+    }
+    throw error;
+  }
+  try {
+    let record: RunOwnership;
+    try {
+      record = validateRunOwnership(await readJson(path), path);
+    } catch (error) {
+      if (error instanceof RunStoreError && error.code === "not_found") return;
+      throw error;
+    }
+    if (record.runId !== runId || record.ownerId !== capability.ownerId) {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is owned by another orchestrator`,
+        path,
+      );
+    }
+    try {
+      await rm(path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  } finally {
+    await releaseMutationLock();
+  }
+}
+
 export async function readRun(
   stateRoot: string,
   runId: string,
@@ -869,10 +1106,29 @@ export async function readNodeState(
 }
 
 /**
- * Validates and persists one graph transition. Calls for a run must be
- * serialized by its single parent owner; cross-process ownership is deferred.
+ * Validates and persists one graph transition. Every mutation requires the
+ * caller to hold the run's exclusive ownership record.
  */
 export async function writeNodeState(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+  status: NodeStatus,
+  ownership: RunOwnership,
+): Promise<NodeStateRecord> {
+  const releaseMutationLock = await assertRunOwnership(
+    stateRoot,
+    runId,
+    ownership,
+  );
+  try {
+    return await writeNodeStateUnlocked(stateRoot, runId, taskId, status);
+  } finally {
+    await releaseMutationLock();
+  }
+}
+
+async function writeNodeStateUnlocked(
   stateRoot: string,
   runId: string,
   taskId: string,
@@ -958,6 +1214,24 @@ export async function writeNodeState(
 }
 
 export async function publishNodeOutput(
+  stateRoot: string,
+  runId: string,
+  input: PublishNodeOutput,
+  ownership: RunOwnership,
+): Promise<NodeOutputRecord> {
+  const releaseMutationLock = await assertRunOwnership(
+    stateRoot,
+    runId,
+    ownership,
+  );
+  try {
+    return await publishNodeOutputUnlocked(stateRoot, runId, input);
+  } finally {
+    await releaseMutationLock();
+  }
+}
+
+async function publishNodeOutputUnlocked(
   stateRoot: string,
   runId: string,
   input: PublishNodeOutput,

@@ -12,12 +12,14 @@ import type {
   TaskExecutor,
 } from "../src/index.js";
 import {
+  acquireRunOwnership,
   GraphValidationError,
   NODE_OUTPUT_LIMITS,
   RUN_GRAPH_LIMITS,
   RunGraphValidationError,
   readNodeOutput,
   readNodeState,
+  releaseRunOwnership,
   runGraph,
   TaskExecutionFailure,
 } from "../src/index.js";
@@ -68,6 +70,8 @@ test("runs independent tasks concurrently up to the configured limit", async (t)
   });
 
   assert.equal(result.status, "succeeded");
+  const ownership = await acquireRunOwnership(stateRoot, result.runId);
+  await releaseRunOwnership(stateRoot, ownership);
   assert.equal(maximumActive, 2);
   assert.deepEqual(started.slice(0, 2), ["a", "b"]);
   assert.deepEqual(

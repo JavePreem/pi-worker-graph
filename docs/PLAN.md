@@ -43,9 +43,9 @@ Acceptance tests cover:
 
 ## Phase 2 — Run store
 
-The basic record lifecycle is complete. Ownership, coordination, artifacts, and
-cleanup remain incremental follow-up work rather than prerequisites for the
-fake-backed scheduler core.
+The basic record lifecycle is complete. Exclusive ownership now protects the
+active graph lifecycle; coordination, artifacts, and cleanup remain incremental
+follow-up work rather than prerequisites for the fake-backed scheduler core.
 
 Implement run-scoped persistence outside the target checkout:
 
@@ -55,7 +55,7 @@ Implement run-scoped persistence outside the target checkout:
 - [ ] bounded text artifacts;
 - [ ] immutable events and directed messages;
 - [x] restrictive permissions and atomic publication;
-- [ ] run ownership;
+- [x] exclusive run ownership for active graph lifecycles;
 - [x] bounded reads with explicit malformed and overflow errors;
 - [x] bounded retained-run count with atomic capacity reservation;
 - [ ] explicit text truncation and retained artifact references;

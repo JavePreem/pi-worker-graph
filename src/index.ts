@@ -63,9 +63,11 @@ export type {
   PublishNodeOutput,
   RunManifest,
   RunManifestTask,
+  RunOwnership,
   RunStoreErrorCode,
 } from "./store.js";
 export {
+  acquireRunOwnership,
   createRun,
   publishNodeOutput,
   RUN_STORE_DEFAULT_MAX_RUNS,
@@ -75,5 +77,6 @@ export {
   readNodeOutput,
   readNodeState,
   readRun,
+  releaseRunOwnership,
   writeNodeState,
 } from "./store.js";

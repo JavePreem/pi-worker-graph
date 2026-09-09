@@ -21,8 +21,9 @@ import type { JsonValue } from "./json.js";
 import { isJsonValue, jsonByteLength } from "./json.js";
 import type { NodeOutput } from "./output.js";
 import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
-import type { NodeStateRecord, RunManifest } from "./store.js";
+import type { NodeStateRecord, RunManifest, RunOwnership } from "./store.js";
 import {
+  acquireRunOwnership,
   createRun,
   publishNodeOutput,
   RUN_STORE_DEFAULT_MAX_RUNS,
@@ -30,6 +31,7 @@ import {
   readNodeOutput,
   readNodeState,
   readRun,
+  releaseRunOwnership,
   writeNodeState,
 } from "./store.js";
 
@@ -447,6 +449,7 @@ async function settlePersistedBlocked(
   runId: string,
   graph: NormalizedGraph<JsonValue>,
   state: GraphState,
+  ownership: RunOwnership,
 ): Promise<GraphState> {
   const settled = settleBlocked(graph, state);
   for (const task of graph.tasks) {
@@ -454,7 +457,7 @@ async function settlePersistedBlocked(
       state.get(task.id) === "pending" &&
       settled.get(task.id) === "blocked"
     ) {
-      await writeNodeState(stateRoot, runId, task.id, "blocked");
+      await writeNodeState(stateRoot, runId, task.id, "blocked", ownership);
     }
   }
   return settled;
@@ -464,6 +467,7 @@ async function persistCompletion(
   stateRoot: string,
   runId: string,
   completion: SettledTask,
+  ownership: RunOwnership,
 ): Promise<void> {
   await publishNodeOutput(
     stateRoot,
@@ -495,8 +499,15 @@ async function persistCompletion(
               ? {}
               : { diagnostics: completion.diagnostics }),
           },
+    ownership,
   );
-  await writeNodeState(stateRoot, runId, completion.taskId, completion.status);
+  await writeNodeState(
+    stateRoot,
+    runId,
+    completion.taskId,
+    completion.status,
+    ownership,
+  );
 }
 
 async function abortPending(
@@ -504,12 +515,14 @@ async function abortPending(
   runId: string,
   graph: NormalizedGraph<JsonValue>,
   initialState: GraphState,
+  ownership: RunOwnership,
 ): Promise<GraphState> {
   let state = await settlePersistedBlocked(
     stateRoot,
     runId,
     graph,
     initialState,
+    ownership,
   );
   while (!isGraphComplete(graph, state)) {
     const ready = readyFrontier(graph, state);
@@ -517,14 +530,25 @@ async function abortPending(
       throw new Error("Graph has pending tasks but no abortable frontier");
     }
     for (const taskId of ready) {
-      await persistCompletion(stateRoot, runId, {
-        taskId,
-        status: "aborted",
-        diagnostics: "Graph run was aborted before task execution",
-      });
+      await persistCompletion(
+        stateRoot,
+        runId,
+        {
+          taskId,
+          status: "aborted",
+          diagnostics: "Graph run was aborted before task execution",
+        },
+        ownership,
+      );
       state = setNodeStatus(graph, state, taskId, "aborted");
     }
-    state = await settlePersistedBlocked(stateRoot, runId, graph, state);
+    state = await settlePersistedBlocked(
+      stateRoot,
+      runId,
+      graph,
+      state,
+      ownership,
+    );
   }
   return state;
 }
@@ -564,6 +588,7 @@ export async function runGraph<TPayload>(
       ? {}
       : { concurrency: manifest.graph.concurrency }),
   });
+  const ownership = await acquireRunOwnership(options.stateRoot, created.runId);
   const concurrency = persistedGraph.concurrency ?? 1;
   const runController = new AbortController();
   const abortRun = () => runController.abort();
@@ -608,6 +633,7 @@ export async function runGraph<TPayload>(
             manifest.runId,
             taskId,
             "running",
+            ownership,
           );
           state = setNodeStatus(persistedGraph, state, taskId, "running");
           running.set(
@@ -649,6 +675,7 @@ export async function runGraph<TPayload>(
             manifest.runId,
             persistedGraph,
             state,
+            ownership,
           );
           break;
         }
@@ -657,6 +684,7 @@ export async function runGraph<TPayload>(
           manifest.runId,
           persistedGraph,
           state,
+          ownership,
         );
         if (!isGraphComplete(persistedGraph, state)) {
           throw new Error("Graph made no scheduling progress");
@@ -666,7 +694,12 @@ export async function runGraph<TPayload>(
 
       const completion = await Promise.race(running.values());
       running.delete(completion.taskId);
-      await persistCompletion(options.stateRoot, manifest.runId, completion);
+      await persistCompletion(
+        options.stateRoot,
+        manifest.runId,
+        completion,
+        ownership,
+      );
       state = setNodeStatus(
         persistedGraph,
         state,
@@ -678,24 +711,25 @@ export async function runGraph<TPayload>(
         manifest.runId,
         persistedGraph,
         state,
+        ownership,
       );
     }
+    const nodes = await Promise.all(
+      persistedGraph.tasks.map((task) =>
+        readNodeState(options.stateRoot, manifest.runId, task.id),
+      ),
+    );
+    return {
+      runId: manifest.runId,
+      status: aggregateStatus(nodes),
+      nodes,
+    };
   } catch (error) {
     abortRun();
     await Promise.allSettled(running.values());
     throw error;
   } finally {
     options.signal?.removeEventListener("abort", abortRun);
+    await releaseRunOwnership(options.stateRoot, ownership);
   }
-
-  const nodes = await Promise.all(
-    persistedGraph.tasks.map((task) =>
-      readNodeState(options.stateRoot, manifest.runId, task.id),
-    ),
-  );
-  return {
-    runId: manifest.runId,
-    status: aggregateStatus(nodes),
-    nodes,
-  };
 }

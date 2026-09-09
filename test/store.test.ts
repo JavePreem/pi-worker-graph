@@ -14,6 +14,7 @@ import { join, parse } from "node:path";
 import test from "node:test";
 import type { NodeOutput, RunStoreErrorCode } from "../src/index.js";
 import {
+  acquireRunOwnership,
   createRun,
   normalizeGraph,
   publishNodeOutput,
@@ -22,6 +23,7 @@ import {
   readNodeOutput,
   readNodeState,
   readRun,
+  releaseRunOwnership,
   writeNodeState,
 } from "../src/index.js";
 import { nodeOutput } from "./fixtures.js";
@@ -32,6 +34,17 @@ async function temporaryStateRoot(t: test.TestContext): Promise<string> {
     await rm(root, { recursive: true, force: true });
   });
   return root;
+}
+
+async function ownedRun(
+  t: test.TestContext,
+  root: string,
+  graph: Parameters<typeof normalizeGraph>[0],
+) {
+  const manifest = await createRun(root, normalizeGraph(graph));
+  const ownership = await acquireRunOwnership(root, manifest.runId);
+  t.after(() => releaseRunOwnership(root, ownership));
+  return { manifest, ownership };
 }
 
 async function rejectsWithCode(
@@ -80,6 +93,101 @@ test("creates and reopens a versioned run with initial node states", async (t) =
   assert.equal(
     (await readNodeState(root, created.runId, "second")).status,
     "pending",
+  );
+});
+
+test("serializes ownership of one run and releases only its owner", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+
+  const owner = await acquireRunOwnership(root, manifest.runId);
+  assert.equal(owner.runId, manifest.runId);
+  assert.match(owner.ownerId, /^[0-9a-f-]{36}$/);
+  await rejectsWithCode(
+    () => acquireRunOwnership(root, manifest.runId),
+    "ownership",
+  );
+  await rejectsWithCode(
+    () =>
+      writeNodeState(root, manifest.runId, "task", "running", {
+        runId: manifest.runId,
+        ownerId: "8a2b0f2c-2c1d-4d1e-9a3f-6b5c4d3e2f10",
+      }),
+    "ownership",
+  );
+  await rejectsWithCode(
+    () =>
+      releaseRunOwnership(root, {
+        runId: manifest.runId,
+        ownerId: "8a2b0f2c-2c1d-4d1e-9a3f-6b5c4d3e2f10",
+      }),
+    "ownership",
+  );
+  await rejectsWithCode(
+    () => acquireRunOwnership(root, manifest.runId),
+    "ownership",
+  );
+
+  for (const capability of [
+    undefined,
+    null,
+    {},
+    { runId: manifest.runId },
+    { runId: manifest.runId, ownerId: null },
+  ]) {
+    await rejectsWithCode(
+      () => releaseRunOwnership(root, capability as never),
+      "ownership",
+    );
+  }
+  const hostileCapability = Object.create(null);
+  Object.defineProperties(hostileCapability, {
+    runId: {
+      enumerable: true,
+      get() {
+        throw new RunStoreError("not_found", "must be normalized");
+      },
+    },
+    ownerId: { enumerable: true, value: owner.ownerId },
+  });
+  await rejectsWithCode(
+    () => releaseRunOwnership(root, hostileCapability as never),
+    "ownership",
+  );
+  await rejectsWithCode(
+    () =>
+      writeNodeState(
+        root,
+        manifest.runId,
+        "task",
+        "running",
+        undefined as never,
+      ),
+    "ownership",
+  );
+
+  const mutationLock = join(root, "runs", manifest.runId, "mutation.lock");
+  await mkdir(mutationLock);
+  await rejectsWithCode(() => releaseRunOwnership(root, owner), "ownership");
+  await rejectsWithCode(
+    () => acquireRunOwnership(root, manifest.runId),
+    "ownership",
+  );
+  await rm(mutationLock, { recursive: true });
+
+  await releaseRunOwnership(root, owner);
+  const replacement = await acquireRunOwnership(root, manifest.runId);
+  await releaseRunOwnership(root, replacement);
+  await rm(join(root, "runs", manifest.runId), {
+    recursive: true,
+    force: true,
+  });
+  await rejectsWithCode(
+    () => writeNodeState(root, manifest.runId, "task", "running", replacement),
+    "not_found",
   );
 });
 
@@ -286,12 +394,17 @@ test("rejects the filesystem root as a state root", async () => {
 
 test("atomically replaces parent-owned node state", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
 
-  const running = await writeNodeState(root, manifest.runId, "task", "running");
+  const running = await writeNodeState(
+    root,
+    manifest.runId,
+    "task",
+    "running",
+    ownership,
+  );
   const reopened = await readNodeState(root, manifest.runId, "task");
 
   assert.equal(running.status, "running");
@@ -301,23 +414,27 @@ test("atomically replaces parent-owned node state", async (t) => {
 
 test("publishes one immutable terminal output", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await writeNodeState(root, manifest.runId, "task", "running");
-
-  const published = await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "succeeded",
-    output: {
-      ...nodeOutput("Implemented the change"),
-      changedFiles: [
-        { path: "src/file.ts", description: "Implemented the change" },
-      ],
-    },
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
   });
-  await writeNodeState(root, manifest.runId, "task", "succeeded");
+  await writeNodeState(root, manifest.runId, "task", "running", ownership);
+
+  const published = await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "succeeded",
+      output: {
+        ...nodeOutput("Implemented the change"),
+        changedFiles: [
+          { path: "src/file.ts", description: "Implemented the change" },
+        ],
+      },
+    },
+    ownership,
+  );
+  await writeNodeState(root, manifest.runId, "task", "succeeded", ownership);
 
   assert.equal(published.schemaVersion, 1);
   assert.deepEqual(
@@ -330,33 +447,47 @@ test("publishes one immutable terminal output", async (t) => {
   );
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "succeeded",
-        output: nodeOutput("Replacement"),
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "succeeded",
+          output: nodeOutput("Replacement"),
+        },
+        ownership,
+      ),
     "record_exists",
   );
 });
 
 test("publishes immutable output without a same-process race", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
 
   const results = await Promise.allSettled([
-    publishNodeOutput(root, manifest.runId, {
-      taskId: "task",
-      status: "failed",
-      diagnostics: "first",
-    }),
-    publishNodeOutput(root, manifest.runId, {
-      taskId: "task",
-      status: "failed",
-      diagnostics: "second",
-    }),
+    publishNodeOutput(
+      root,
+      manifest.runId,
+      {
+        taskId: "task",
+        status: "failed",
+        diagnostics: "first",
+      },
+      ownership,
+    ),
+    publishNodeOutput(
+      root,
+      manifest.runId,
+      {
+        taskId: "task",
+        status: "failed",
+        diagnostics: "second",
+      },
+      ownership,
+    ),
   ]);
 
   assert.equal(
@@ -365,23 +496,27 @@ test("publishes immutable output without a same-process race", async (t) => {
   );
   const rejected = results.find((result) => result.status === "rejected");
   assert.ok(rejected?.reason instanceof RunStoreError);
-  assert.equal(rejected.reason.code, "record_exists");
+  assert.equal(rejected.reason.code, "ownership");
 });
 
 test("validates diagnostics from untyped callers before publication", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
 
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "failed",
-        diagnostics: 42 as unknown as string,
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "failed",
+          diagnostics: 42 as unknown as string,
+        },
+        ownership,
+      ),
     "invalid_argument",
   );
   await rejectsWithCode(
@@ -392,28 +527,37 @@ test("validates diagnostics from untyped callers before publication", async (t) 
 
 test("rejects malformed structured reports from untyped callers", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await writeNodeState(root, manifest.runId, "task", "running");
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  await writeNodeState(root, manifest.runId, "task", "running", ownership);
 
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "succeeded",
-        output: { summary: "incomplete" } as unknown as NodeOutput,
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "succeeded",
+          output: { summary: "incomplete" } as unknown as NodeOutput,
+        },
+        ownership,
+      ),
     "invalid_argument",
   );
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "succeeded",
-        output: { ...nodeOutput(), blockers: ["Not complete"] },
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "succeeded",
+          output: { ...nodeOutput(), blockers: ["Not complete"] },
+        },
+        ownership,
+      ),
     "invalid_argument",
   );
   await rejectsWithCode(
@@ -424,16 +568,20 @@ test("rejects malformed structured reports from untyped callers", async (t) => {
 
 test("rejects incompatible and unknown node-output envelope fields", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await writeNodeState(root, manifest.runId, "task", "running");
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "succeeded",
-    output: nodeOutput(),
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
   });
+  await writeNodeState(root, manifest.runId, "task", "running", ownership);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "succeeded",
+      output: nodeOutput(),
+    },
+    ownership,
+  );
   const task = manifest.graph.tasks[0];
   assert.ok(task);
   const outputPath = join(
@@ -465,77 +613,93 @@ test("rejects incompatible and unknown node-output envelope fields", async (t) =
 
 test("rejects output that conflicts with terminal node state", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "failed",
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
   });
-  await writeNodeState(root, manifest.runId, "task", "failed");
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "failed",
+    },
+    ownership,
+  );
+  await writeNodeState(root, manifest.runId, "task", "failed", ownership);
 
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "succeeded",
-        output: nodeOutput(),
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "succeeded",
+          output: nodeOutput(),
+        },
+        ownership,
+      ),
     "invalid_record",
   );
 });
 
 test("enforces graph transitions and requires output before terminal state", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({
-      tasks: [{ id: "first" }, { id: "second", needs: ["first"] }],
-    }),
-  );
-
-  await rejectsWithCode(
-    () => writeNodeState(root, manifest.runId, "second", "running"),
-    "invalid_record",
-  );
-  await rejectsWithCode(
-    () => writeNodeState(root, manifest.runId, "first", "succeeded"),
-    "invalid_record",
-  );
-
-  await writeNodeState(root, manifest.runId, "first", "running");
-  await rejectsWithCode(
-    () => writeNodeState(root, manifest.runId, "first", "succeeded"),
-    "invalid_record",
-  );
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "first",
-    status: "succeeded",
-    output: nodeOutput(),
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "first" }, { id: "second", needs: ["first"] }],
   });
-  await writeNodeState(root, manifest.runId, "first", "succeeded");
+
+  await rejectsWithCode(
+    () => writeNodeState(root, manifest.runId, "second", "running", ownership),
+    "invalid_record",
+  );
+  await rejectsWithCode(
+    () => writeNodeState(root, manifest.runId, "first", "succeeded", ownership),
+    "invalid_record",
+  );
+
+  await writeNodeState(root, manifest.runId, "first", "running", ownership);
+  await rejectsWithCode(
+    () => writeNodeState(root, manifest.runId, "first", "succeeded", ownership),
+    "invalid_record",
+  );
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "first",
+      status: "succeeded",
+      output: nodeOutput(),
+    },
+    ownership,
+  );
+  await writeNodeState(root, manifest.runId, "first", "succeeded", ownership);
   assert.equal(
-    (await writeNodeState(root, manifest.runId, "second", "running")).status,
+    (await writeNodeState(root, manifest.runId, "second", "running", ownership))
+      .status,
     "running",
   );
 });
 
 test("does not let terminal state disagree with a published output", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await writeNodeState(root, manifest.runId, "task", "running");
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "succeeded",
-    output: nodeOutput(),
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
   });
+  await writeNodeState(root, manifest.runId, "task", "running", ownership);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "succeeded",
+      output: nodeOutput(),
+    },
+    ownership,
+  );
 
   await rejectsWithCode(
-    () => writeNodeState(root, manifest.runId, "task", "failed"),
+    () => writeNodeState(root, manifest.runId, "task", "failed", ownership),
     "invalid_record",
   );
   assert.equal(
@@ -585,18 +749,22 @@ test("rejects invalid and unknown identifiers before constructing record paths",
 
 test("bounds diagnostics and records on write and read", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
 
   await rejectsWithCode(
     () =>
-      publishNodeOutput(root, manifest.runId, {
-        taskId: "task",
-        status: "failed",
-        diagnostics: "x".repeat(RUN_STORE_MAX_RECORD_BYTES),
-      }),
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "failed",
+          diagnostics: "x".repeat(RUN_STORE_MAX_RECORD_BYTES),
+        },
+        ownership,
+      ),
     "invalid_argument",
   );
 
@@ -695,10 +863,9 @@ test("rejects records whose embedded identity does not match their path", async 
 
 test("ignores abandoned temporary files", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
   const task = manifest.graph.tasks[0];
   assert.ok(task);
   await writeFile(
@@ -716,10 +883,15 @@ test("ignores abandoned temporary files", async (t) => {
     () => readNodeOutput(root, manifest.runId, "task"),
     "not_found",
   );
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "failed",
-  });
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "failed",
+    },
+    ownership,
+  );
   assert.equal(
     (await readNodeOutput(root, manifest.runId, "task")).status,
     "failed",
@@ -728,16 +900,20 @@ test("ignores abandoned temporary files", async (t) => {
 
 test("creates run directories and records with restrictive permissions", async (t) => {
   const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
   const task = manifest.graph.tasks[0];
   assert.ok(task);
-  await publishNodeOutput(root, manifest.runId, {
-    taskId: "task",
-    status: "failed",
-  });
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "failed",
+    },
+    ownership,
+  );
   const runDirectory = join(root, "runs", manifest.runId);
 
   assert.equal((await stat(join(root, "runs"))).mode & 0o777, 0o700);
