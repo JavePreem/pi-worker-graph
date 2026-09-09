@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import test from "node:test";
 import type { NodeOutput, RunStoreErrorCode } from "../src/index.js";
 import {
@@ -71,6 +80,207 @@ test("creates and reopens a versioned run with initial node states", async (t) =
   assert.equal(
     (await readNodeState(root, created.runId, "second")).status,
     "pending",
+  );
+});
+
+test("refuses new runs at the retained-state limit", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+
+  await createRun(root, graph, 2);
+  await createRun(root, graph, 2);
+  await rejectsWithCode(() => createRun(root, graph, 2), "retention_limit");
+});
+
+test("concurrent creation fills the available capacity exactly once", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const store = join(root, `store-${attempt}`);
+    const results = await Promise.allSettled([
+      createRun(store, graph, 1),
+      createRun(store, graph, 1),
+    ]);
+    const created = results.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    );
+    assert.equal(created.length, 1);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        assert.ok(result.reason instanceof RunStoreError);
+        assert.equal(result.reason.code, "retention_limit");
+      }
+    }
+    const entries = await readdir(join(store, "runs"));
+    assert.deepEqual(
+      entries.filter((entry) => entry !== "slots"),
+      [created[0]?.runId],
+    );
+  }
+});
+
+test("a claimed capacity slot is never released by elapsed time", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+  const slots = join(root, "runs", "slots");
+  await mkdir(slots, { recursive: true });
+  await writeFile(
+    join(slots, "0.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-slot",
+      runId: "8a2b0f2c-2c1d-4d1e-9a3f-6b5c4d3e2f10",
+    })}\n`,
+  );
+  const stale = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  await utimes(join(slots, "0.json"), stale, stale);
+
+  await rejectsWithCode(() => createRun(root, graph, 1), "retention_limit");
+  assert.deepEqual(
+    (await readdir(join(root, "runs"))).filter((entry) => entry !== "slots"),
+    [],
+  );
+});
+
+test("an interrupted creation reports its slot as reclaimable", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+  const slots = join(root, "runs", "slots");
+  await mkdir(slots, { recursive: true });
+  await writeFile(
+    join(slots, "0.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-slot",
+      runId: "8a2b0f2c-2c1d-4d1e-9a3f-6b5c4d3e2f10",
+    })}\n`,
+  );
+
+  await assert.rejects(createRun(root, graph, 1), (error: unknown) => {
+    assert.ok(error instanceof RunStoreError);
+    assert.equal(error.code, "retention_limit");
+    assert.match(error.message, /1 of them belong to runs that were never/);
+    return true;
+  });
+
+  await rm(join(slots, "0.json"));
+  const created = await createRun(root, graph, 1);
+  assert.equal((await readRun(root, created.runId)).runId, created.runId);
+});
+
+test("a lowered limit cannot admit work past the new limit", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+  const created = [];
+  for (let index = 0; index < 6; index += 1) {
+    created.push(await createRun(root, graph, 6));
+  }
+  // Retire every run but the one holding the highest slot, so the survivor's
+  // slot sits outside the range a claim under the lowered limit searches.
+  for (let index = 0; index < 5; index += 1) {
+    await rm(join(root, "runs", `${created[index]?.runId}`), {
+      recursive: true,
+    });
+    await rm(join(root, "runs", "slots", `${index}.json`));
+  }
+
+  const results = await Promise.allSettled([
+    createRun(root, graph, 2),
+    createRun(root, graph, 2),
+  ]);
+
+  for (const result of results) {
+    assert.equal(result.status, "rejected");
+    assert.ok(result.reason instanceof RunStoreError);
+    assert.equal(result.reason.code, "retention_limit");
+    assert.match(
+      result.reason.message,
+      /1 published run\(s\) hold a capacity slot at or above/,
+    );
+  }
+  assert.deepEqual(
+    (await readdir(join(root, "runs"))).filter((entry) => entry !== "slots"),
+    [created[5]?.runId],
+  );
+});
+
+test("deleted slot files cannot push the store past its limit", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+
+  await createRun(root, graph, 1);
+  await rm(join(root, "runs", "slots"), { recursive: true });
+
+  await rejectsWithCode(() => createRun(root, graph, 1), "retention_limit");
+});
+
+test("a run without its slot admits nobody rather than everybody", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+  const published = await createRun(root, graph, 2);
+  await rm(join(root, "runs", "slots"), { recursive: true });
+
+  const results = await Promise.allSettled([
+    createRun(root, graph, 2),
+    createRun(root, graph, 2),
+  ]);
+
+  for (const result of results) {
+    assert.equal(result.status, "rejected");
+    assert.ok(result.reason instanceof RunStoreError);
+    assert.equal(result.reason.code, "retention_limit");
+    assert.match(
+      result.reason.message,
+      /1 published run\(s\) have no capacity/,
+    );
+  }
+  assert.deepEqual(
+    (await readdir(join(root, "runs"))).filter((entry) => entry !== "slots"),
+    [published.runId],
+  );
+});
+
+test("a slot that names no owner is reported as reclaimable", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const graph = normalizeGraph({ tasks: [{ id: "task" }] });
+  const slots = join(root, "runs", "slots");
+  await mkdir(slots, { recursive: true });
+  await writeFile(join(slots, "0.json"), "");
+
+  await assert.rejects(createRun(root, graph, 1), (error: unknown) => {
+    assert.ok(error instanceof RunStoreError);
+    assert.equal(error.code, "retention_limit");
+    assert.match(error.message, /1 of them belong to runs that were never/);
+    return true;
+  });
+});
+
+test("a claimed slot always names the run that holds it", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const created = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+    2,
+  );
+  const slots = join(root, "runs", "slots");
+
+  assert.deepEqual(await readdir(slots), ["0.json"]);
+  assert.deepEqual(JSON.parse(await readFile(join(slots, "0.json"), "utf8")), {
+    schemaVersion: 1,
+    kind: "run-slot",
+    runId: created.runId,
+  });
+});
+
+test("rejects the filesystem root as a state root", async () => {
+  await rejectsWithCode(
+    () =>
+      createRun(
+        parse(process.cwd()).root,
+        normalizeGraph({ tasks: [{ id: "task" }] }),
+      ),
+    "invalid_argument",
   );
 });
 
@@ -531,6 +741,11 @@ test("creates run directories and records with restrictive permissions", async (
   const runDirectory = join(root, "runs", manifest.runId);
 
   assert.equal((await stat(join(root, "runs"))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(root, "runs", "slots"))).mode & 0o777, 0o700);
+  assert.equal(
+    (await stat(join(root, "runs", "slots", "0.json"))).mode & 0o777,
+    0o600,
+  );
   assert.equal((await stat(runDirectory)).mode & 0o777, 0o700);
   assert.equal((await stat(join(runDirectory, "nodes"))).mode & 0o777, 0o700);
   assert.equal((await stat(join(runDirectory, "outputs"))).mode & 0o777, 0o700);

@@ -761,7 +761,6 @@ async function runNormalizedPiWorkerProcess(
         forceSent = true;
         terminateProcessTree(child, true);
       }, terminationGraceMs);
-      forceTimer.unref();
     };
     const fail = (code: TaskExecutionFailureCode) => {
       if (failure || settled) return;

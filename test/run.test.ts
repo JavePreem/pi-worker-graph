@@ -526,6 +526,19 @@ test("rejects runtime bounds before creating a run or calling the executor", asy
       RunGraphValidationError,
     );
   }
+  for (const maxRetainedRuns of [0, RUN_GRAPH_LIMITS.maxRetainedRuns + 1]) {
+    await assert.rejects(
+      () =>
+        runGraph({
+          stateRoot,
+          graph: { tasks: [] },
+          workingDirectory: stateRoot,
+          executor,
+          maxRetainedRuns,
+        }),
+      RunGraphValidationError,
+    );
+  }
 
   assert.equal(calls, 0);
   await assert.rejects(() => stat(join(stateRoot, "runs")));

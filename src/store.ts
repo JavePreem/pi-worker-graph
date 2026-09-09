@@ -1,23 +1,36 @@
 import { randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
-import { chmod, link, mkdir, open, rename, rm } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { GraphState, NodeStatus, NormalizedGraph } from "./graph.js";
 import { normalizeGraph, setNodeStatus, settleBlocked } from "./graph.js";
 import type { JsonValue } from "./json.js";
-import { isJsonValue } from "./json.js";
+import { isJsonValue, isRecord } from "./json.js";
 import type { NodeOutput } from "./output.js";
 import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
 
 export type { JsonValue } from "./json.js";
 
 export const RUN_STORE_MAX_RECORD_BYTES = 1024 * 1024;
+export const RUN_STORE_DEFAULT_MAX_RUNS = 64;
+export const RUN_STORE_MAX_RUNS = 256;
 
 const SCHEMA_VERSION = 1;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RUN_SLOT_DIRECTORY = "slots";
+const RUN_SLOT_RECORD = "slot.json";
+const RUN_SLOT_PATTERN = /^(0|[1-9][0-9]*)\.json$/;
 const TASK_KEY_PATTERN =
   /^task-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NODE_STATUSES = new Set<NodeStatus>([
@@ -46,6 +59,11 @@ const NODE_OUTPUT_RECORD_FIELDS = new Set([
   "diagnostics",
 ]);
 
+interface SlotClaim {
+  readonly index: number;
+  readonly owner?: string;
+}
+
 export type RunStoreErrorCode =
   | "invalid_argument"
   | "invalid_identifier"
@@ -54,7 +72,8 @@ export type RunStoreErrorCode =
   | "record_exists"
   | "record_too_large"
   | "malformed_record"
-  | "invalid_record";
+  | "invalid_record"
+  | "retention_limit";
 
 export class RunStoreError extends Error {
   readonly code: RunStoreErrorCode;
@@ -165,7 +184,158 @@ function stateRootPath(stateRoot: string): string {
       "The run store state root must not be empty",
     );
   }
-  return resolve(stateRoot);
+  const root = resolve(stateRoot);
+  if (dirname(root) === root) {
+    throw new RunStoreError(
+      "invalid_argument",
+      "The run store state root must not be the filesystem root",
+    );
+  }
+  return root;
+}
+
+async function publishedRunIds(runs: string): Promise<ReadonlySet<string>> {
+  const entries = await readdir(runs, { withFileTypes: true });
+  return new Set(
+    entries
+      .filter((entry) => entry.isDirectory() && RUN_ID_PATTERN.test(entry.name))
+      .map((entry) => entry.name),
+  );
+}
+
+async function slotOwner(path: string): Promise<string | undefined> {
+  try {
+    const record = await readJson(path);
+    if (!isRecord(record) || typeof record.runId !== "string") return undefined;
+    // The recorded owner is compared against directory names, so it must be a
+    // run ID and not a traversal written into the slot by anything else.
+    return RUN_ID_PATTERN.test(record.runId) ? record.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readSlotClaims(slots: string): Promise<readonly SlotClaim[]> {
+  const entries = await readdir(slots, { withFileTypes: true });
+  return Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && RUN_SLOT_PATTERN.test(entry.name))
+      .map(async (entry) => {
+        const index = Number.parseInt(entry.name, 10);
+        const owner = await slotOwner(join(slots, entry.name));
+        return owner === undefined ? { index } : { index, owner };
+      }),
+  );
+}
+
+/**
+ * Capacity is a fixed set of atomically claimed slot files, so the limit is
+ * structural rather than counted: at most `maximumRuns` slots can exist, so at
+ * most `maximumRuns` runs can publish. Concurrent creators are arbitrated by
+ * the filesystem — the lowest index whose link succeeds is that creator's — so
+ * an available slot is always claimed by exactly one of them rather than
+ * refused to all of them.
+ *
+ * Runs are read before slots. A creator links its slot before renaming its run
+ * into place, so every published run's slot is visible here and an in-flight
+ * creation can never be mistaken for a missing one. A published run that is
+ * genuinely unaccounted for means the two disagree, and the store then admits
+ * nobody rather than letting each creator claim the same free capacity.
+ *
+ * The structure only bounds what it can see: a run holding a slot at or above
+ * the current limit occupies none of the indices a claim searches, so lowering
+ * the limit below an assigned index would leave that run's capacity claimable
+ * a second time. Such a run is treated the same way as a missing slot — the
+ * store admits nobody until the numbering is reconciled.
+ */
+async function claimRunSlot(
+  runs: string,
+  runId: string,
+  maximumRuns: number,
+): Promise<string> {
+  const slots = join(runs, RUN_SLOT_DIRECTORY);
+  await mkdir(slots, { recursive: true, mode: DIRECTORY_MODE });
+  await chmod(slots, DIRECTORY_MODE);
+  const published = await publishedRunIds(runs);
+  const claims = await readSlotClaims(slots);
+  const owners = new Set(claims.flatMap((claim) => claim.owner ?? []));
+  const bounded = new Set(
+    claims.flatMap((claim) =>
+      claim.index < maximumRuns ? (claim.owner ?? []) : [],
+    ),
+  );
+  const beyondLimit = [...published].filter(
+    (id) => owners.has(id) && !bounded.has(id),
+  ).length;
+  if (beyondLimit > 0) {
+    throw new RunStoreError(
+      "retention_limit",
+      `${beyondLimit} published run(s) hold a capacity slot at or above the current maximum of ${maximumRuns}; the run store admits no new work until the slot files in ${JSON.stringify(slots)} are renumbered below that maximum`,
+      slots,
+    );
+  }
+  const unaccounted = [...published].filter((id) => !owners.has(id)).length;
+  if (unaccounted > 0) {
+    throw new RunStoreError(
+      "retention_limit",
+      `${unaccounted} published run(s) have no capacity slot; the run store admits no new work until the run directories in ${JSON.stringify(runs)} and their slots agree`,
+      slots,
+    );
+  }
+  if (published.size >= maximumRuns) {
+    throw new RunStoreError(
+      "retention_limit",
+      `The run store retains ${published.size} of at most ${maximumRuns} runs; remove old run state before starting another graph`,
+      runs,
+    );
+  }
+  const claimed = await linkFirstFreeSlot(slots, runId, maximumRuns);
+  if (claimed !== undefined) return claimed;
+  const reclaimable = claims.filter(
+    (claim) =>
+      claim.index < maximumRuns &&
+      (claim.owner === undefined || !published.has(claim.owner)),
+  ).length;
+  throw new RunStoreError(
+    "retention_limit",
+    `All ${maximumRuns} run capacity slots are claimed; ${reclaimable} of them belong to runs that were never published and can be deleted from ${JSON.stringify(slots)}`,
+    slots,
+  );
+}
+
+/**
+ * The claim is a hard link to a record that is already complete on disk, so a
+ * crash can never leave a slot that holds capacity without naming its owner.
+ */
+async function linkFirstFreeSlot(
+  slots: string,
+  runId: string,
+  maximumRuns: number,
+): Promise<string | undefined> {
+  const temporaryPath = await writeTemporaryFile(join(slots, RUN_SLOT_RECORD), {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "run-slot",
+    runId,
+  });
+  try {
+    for (let index = 0; index < maximumRuns; index += 1) {
+      const path = join(slots, `${index}.json`);
+      try {
+        await link(temporaryPath, path);
+        return path;
+      } catch (error) {
+        if (errorCode(error) !== "EEXIST") throw error;
+      }
+    }
+    return undefined;
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+async function releaseRunSlot(path: string, runId: string): Promise<void> {
+  if ((await slotOwner(path)) !== runId) return;
+  await rm(path, { force: true });
 }
 
 function assertRunId(runId: string): void {
@@ -184,10 +354,6 @@ function runsPath(stateRoot: string): string {
 function runPath(stateRoot: string, runId: string): string {
   assertRunId(runId);
   return join(runsPath(stateRoot), runId);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isTimestamp(value: unknown): value is string {
@@ -587,8 +753,19 @@ function graphFromManifest(manifest: RunManifest): NormalizedGraph<JsonValue> {
 export async function createRun<TPayload>(
   stateRoot: string,
   graph: NormalizedGraph<TPayload>,
+  maximumRuns = RUN_STORE_DEFAULT_MAX_RUNS,
 ): Promise<RunManifest> {
   const root = stateRootPath(stateRoot);
+  if (
+    !Number.isInteger(maximumRuns) ||
+    maximumRuns <= 0 ||
+    maximumRuns > RUN_STORE_MAX_RUNS
+  ) {
+    throw new RunStoreError(
+      "invalid_argument",
+      `The maximum retained run count must be between 1 and ${RUN_STORE_MAX_RUNS}`,
+    );
+  }
   const validatedGraph = normalizeGraph({
     tasks: graph.tasks,
     ...(graph.concurrency === undefined
@@ -632,6 +809,8 @@ export async function createRun<TPayload>(
   await chmod(runs, DIRECTORY_MODE);
   const finalRunPath = join(runs, runId);
   const temporaryRunPath = join(runs, `.${runId}.${randomUUID()}.tmp`);
+  let slotPath: string | undefined;
+  let published = false;
   try {
     await mkdir(temporaryRunPath, { mode: DIRECTORY_MODE });
     await mkdir(join(temporaryRunPath, "nodes"), { mode: DIRECTORY_MODE });
@@ -653,9 +832,16 @@ export async function createRun<TPayload>(
         state,
       );
     }
+    // The slot is claimed as late as possible, so an interrupted creation can
+    // only strand one between this call and the rename that publishes the run.
+    slotPath = await claimRunSlot(runs, runId, maximumRuns);
     await rename(temporaryRunPath, finalRunPath);
+    published = true;
   } finally {
     await rm(temporaryRunPath, { recursive: true, force: true });
+    if (!published && slotPath !== undefined) {
+      await releaseRunSlot(slotPath, runId);
+    }
   }
 
   return manifest;

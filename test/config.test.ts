@@ -58,6 +58,7 @@ test("loads strict profiles and defaults state beneath the Pi agent directory", 
     configuration.stateRoot,
     join(paths.agentDirectory, "worker-graph"),
   );
+  assert.equal(configuration.maxRetainedRuns, 64);
   assert.deepEqual(configuration.profiles.writer, {
     provider: "test-provider",
     model: "test-model",
@@ -76,6 +77,29 @@ test("resolves an explicit relative state root against the agent directory", asy
   const configuration = await loadWorkerGraphConfiguration(paths);
 
   assert.equal(configuration.stateRoot, join(paths.agentDirectory, "state"));
+});
+
+test("loads and bounds an explicit retained-run limit", async (t) => {
+  const paths = await directories(t);
+  await writeConfiguration(paths.agentDirectory, {
+    ...(validConfiguration() as object),
+    maxRetainedRuns: 2,
+  });
+
+  assert.equal((await loadWorkerGraphConfiguration(paths)).maxRetainedRuns, 2);
+
+  for (const maxRetainedRuns of [0, 257, 1.5, "2"]) {
+    await writeConfiguration(paths.agentDirectory, {
+      ...(validConfiguration() as object),
+      maxRetainedRuns,
+    });
+    await assert.rejects(
+      loadWorkerGraphConfiguration(paths),
+      (error: unknown) =>
+        error instanceof WorkerGraphConfigurationError &&
+        error.code === "invalid",
+    );
+  }
 });
 
 test("rejects state roots inside the target checkout", async (t) => {

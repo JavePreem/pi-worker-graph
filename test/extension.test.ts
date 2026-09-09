@@ -18,6 +18,140 @@ interface RegisteredTool {
   }>;
 }
 
+interface SessionContext {
+  readonly sessionManager: { getBranch(): readonly unknown[] };
+  readonly ui: { notify(message: string, type?: string): void };
+}
+
+type SessionHandler = (event: unknown, context: SessionContext) => void;
+
+interface CustomEntry {
+  readonly type: "custom";
+  readonly customType: string;
+  readonly data: unknown;
+}
+
+interface Notification {
+  readonly message: string;
+  readonly type?: string;
+}
+
+/**
+ * One fake Pi session for the mode tests. Registered tools join the active set
+ * the way Pi adds them, and persisted entries accumulate in `entries`, so a
+ * session event replays exactly what the extension wrote earlier.
+ */
+interface ModeSession {
+  active: readonly string[];
+  readonly tools: string[];
+  readonly commands: string[];
+  readonly flags: string[];
+  readonly entries: CustomEntry[];
+  readonly notifications: Notification[];
+  start(entries?: readonly unknown[]): void;
+  tree(entries?: readonly unknown[]): void;
+  shutdown(): void;
+  swarm(action: string): Promise<void>;
+}
+
+function modeSession(
+  options: {
+    readonly active?: readonly string[];
+    readonly flag?: boolean;
+  } = {},
+): ModeSession {
+  const handlers = new Map<string, SessionHandler>();
+  let swarmCommand:
+    | ((args: string, ctx: SessionContext) => Promise<void>)
+    | undefined;
+  const notify = (message: string, type?: string) => {
+    session.notifications.push({
+      message,
+      ...(type === undefined ? {} : { type }),
+    });
+  };
+  const context = (entries?: readonly unknown[]): SessionContext => ({
+    sessionManager: { getBranch: () => entries ?? session.entries },
+    ui: { notify },
+  });
+  const fire = (event: string, entries?: readonly unknown[]) => {
+    const handler = handlers.get(event);
+    if (!handler) throw new Error(`${event} was not registered`);
+    handler({}, context(entries));
+  };
+  const session: ModeSession = {
+    active: [...(options.active ?? ["read", "bash", "edit", "write"])],
+    tools: [],
+    commands: [],
+    flags: [],
+    entries: [],
+    notifications: [],
+    start: (entries) => fire("session_start", entries),
+    tree: (entries) => fire("session_tree", entries),
+    shutdown: () => fire("session_shutdown"),
+    async swarm(action) {
+      if (!swarmCommand) throw new Error("/swarm was not registered");
+      await swarmCommand(action, context());
+    },
+  };
+  registerWorkerGraph({
+    registerTool(tool: { name: string }) {
+      session.tools.push(tool.name);
+      session.active = [...session.active, tool.name];
+    },
+    registerCommand(
+      name: string,
+      definition: {
+        handler: (args: string, ctx: SessionContext) => Promise<void>;
+      },
+    ) {
+      session.commands.push(name);
+      swarmCommand = definition.handler;
+    },
+    registerFlag(name: string) {
+      session.flags.push(name);
+    },
+    getFlag() {
+      return options.flag === true;
+    },
+    getActiveTools() {
+      return [...session.active];
+    },
+    setActiveTools(names: string[]) {
+      session.active = [...names];
+    },
+    appendEntry(customType: string, data: unknown) {
+      session.entries.push({ type: "custom", customType, data });
+    },
+    on(event: string, handler: SessionHandler) {
+      handlers.set(event, handler);
+    },
+  } as never);
+  return session;
+}
+
+function modeEntry(
+  enabled: boolean,
+  toolsBeforeMode?: readonly string[],
+): CustomEntry {
+  return {
+    type: "custom",
+    customType: "worker-graph-mode",
+    data: {
+      schemaVersion: 1,
+      enabled,
+      ...(toolsBeforeMode === undefined ? {} : { toolsBeforeMode }),
+    },
+  };
+}
+
+/** Clears the worker role so the extension registers its parent surface. */
+function parentSession(t: test.TestContext): void {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
+  delete process.env.PI_WORKER_GRAPH_ROLE;
+}
+
 function captureWorkerTool(): RegisteredTool {
   let definition: RegisteredTool | undefined;
   registerWorkerGraph({
@@ -35,46 +169,15 @@ function restoreWorkerRole(value: string | undefined): void {
 }
 
 test("keeps the parent graph tool inactive until explicitly enabled", async (t) => {
-  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
-  t.after(() => restoreWorkerRole(previousRole));
+  parentSession(t);
+  const session = modeSession({ active: ["read", "edit", "write"] });
 
-  delete process.env.PI_WORKER_GRAPH_ROLE;
-  const tools: string[] = [];
-  const commands: string[] = [];
-  const flags: string[] = [];
-  let active = ["read", "edit", "write"];
-  let sessionStart: (() => void) | undefined;
-  registerWorkerGraph({
-    registerTool(tool: { name: string }) {
-      tools.push(tool.name);
-      active.push(tool.name);
-    },
-    registerCommand(name: string) {
-      commands.push(name);
-    },
-    registerFlag(name: string) {
-      flags.push(name);
-    },
-    getFlag() {
-      return false;
-    },
-    getActiveTools() {
-      return [...active];
-    },
-    setActiveTools(names: string[]) {
-      active = [...names];
-    },
-    on(event: string, handler: () => void) {
-      if (event === "session_start") sessionStart = handler;
-    },
-  } as never);
-  if (!sessionStart) throw new Error("session_start was not registered");
-  assert.deepEqual(active, ["read", "edit", "write", "worker_graph"]);
-  sessionStart();
-  assert.deepEqual(tools, ["worker_graph"]);
-  assert.deepEqual(commands, ["swarm"]);
-  assert.deepEqual(flags, ["swarm"]);
-  assert.deepEqual(active, ["read", "edit", "write"]);
+  assert.deepEqual(session.active, ["read", "edit", "write", "worker_graph"]);
+  session.start();
+  assert.deepEqual(session.tools, ["worker_graph"]);
+  assert.deepEqual(session.commands, ["swarm"]);
+  assert.deepEqual(session.flags, ["swarm"]);
+  assert.deepEqual(session.active, ["read", "edit", "write"]);
 
   process.env.PI_WORKER_GRAPH_ROLE = "worker";
   let workerCommands = 0;
@@ -96,65 +199,88 @@ test("keeps the parent graph tool inactive until explicitly enabled", async (t) 
   assert.equal(workerFlags, 0);
 });
 
-test("activates from the startup flag and preserves other tool changes", async (t) => {
-  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
-  t.after(() => restoreWorkerRole(previousRole));
-  delete process.env.PI_WORKER_GRAPH_ROLE;
+test("startup mode suppresses parent write tools and restores its snapshot", async (t) => {
+  parentSession(t);
+  const session = modeSession({ flag: true });
+  const suppressed = ["read", "bash", "edit", "write"];
 
-  let active = ["read", "edit", "worker_graph"];
-  let command:
-    | ((
-        args: string,
-        ctx: { ui: { notify(message: string): void } },
-      ) => Promise<void>)
-    | undefined;
-  let sessionStart: (() => void) | undefined;
-  const notifications: string[] = [];
-  registerWorkerGraph({
-    registerTool() {},
-    registerFlag() {},
-    getFlag() {
-      return true;
-    },
-    getActiveTools() {
-      return [...active];
-    },
-    setActiveTools(names: string[]) {
-      active = [...names];
-    },
-    on(event: string, handler: () => void) {
-      if (event === "session_start") sessionStart = handler;
-    },
-    registerCommand(
-      _name: string,
-      options: {
-        handler: (
-          args: string,
-          ctx: { ui: { notify(message: string): void } },
-        ) => Promise<void>;
-      },
-    ) {
-      command = options.handler;
-    },
-  } as never);
+  session.start();
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
 
-  if (!sessionStart) throw new Error("session_start was not registered");
-  sessionStart();
-  assert.deepEqual(active, ["read", "edit", "worker_graph"]);
-  assert.ok(command);
-  const ctx = {
-    ui: { notify: (message: string) => notifications.push(message) },
+  session.active = ["read", "custom", "worker_graph"];
+  await session.swarm("off");
+  assert.deepEqual(session.active, suppressed);
+  await session.swarm("on");
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
+  await session.swarm("status");
+
+  assert.deepEqual(session.entries, [
+    modeEntry(true, suppressed),
+    modeEntry(false),
+    modeEntry(true, suppressed),
+  ]);
+  assert.deepEqual(session.notifications, [
+    { message: "Worker-graph mode disabled", type: "info" },
+    { message: "Worker-graph mode enabled", type: "info" },
+    { message: "Worker-graph mode is enabled", type: "info" },
+  ]);
+
+  session.shutdown();
+  assert.deepEqual(session.active, suppressed);
+});
+
+test("restores branch-scoped mode state on resume and tree navigation", async (t) => {
+  parentSession(t);
+  const session = modeSession();
+  const enabled = modeEntry(true, ["read", "bash", "edit", "write", "custom"]);
+
+  session.start([enabled]);
+  assert.deepEqual(session.active, ["read", "custom", "worker_graph"]);
+
+  session.tree([enabled, modeEntry(false)]);
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write", "custom"]);
+});
+
+test("the startup flag does not undo an explicit off across the session tree", async (t) => {
+  parentSession(t);
+  const session = modeSession({ flag: true });
+  const suppressed = ["read", "bash", "edit", "write"];
+
+  session.start();
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
+
+  await session.swarm("off");
+  assert.deepEqual(session.active, suppressed);
+
+  session.tree();
+  assert.deepEqual(session.active, suppressed);
+
+  session.start();
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
+});
+
+test("refuses to enable a mode whose tool snapshot could not be restored", async (t) => {
+  parentSession(t);
+  const unrestorable = ["read", "bash", `wide-${"t".repeat(300)}`];
+  const session = modeSession({ active: unrestorable, flag: true });
+  const refusal = {
+    message:
+      "Worker-graph mode not enabled: the active tool set cannot be restored later",
+    type: "error",
   };
-  active = ["read", "custom", "worker_graph"];
-  await command("off", ctx);
-  assert.deepEqual(active, ["read", "custom"]);
-  await command("on", ctx);
-  assert.deepEqual(active, ["read", "custom", "worker_graph"]);
-  await command("status", ctx);
-  assert.deepEqual(notifications, [
-    "Worker-graph mode disabled",
-    "Worker-graph mode enabled",
-    "Worker-graph mode is enabled",
+
+  session.start();
+  assert.deepEqual(session.active, unrestorable);
+
+  await session.swarm("on");
+  assert.deepEqual(session.active, unrestorable);
+  assert.deepEqual(session.entries, []);
+
+  await session.swarm("status");
+  assert.deepEqual(session.notifications, [
+    refusal,
+    refusal,
+    { message: "Worker-graph mode is disabled", type: "info" },
   ]);
 });
 

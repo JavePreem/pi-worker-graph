@@ -47,8 +47,14 @@ repair.
 ### D8 — Runtime activation is explicit
 
 The extension does not activate its graph tool until worker-graph mode is
-explicitly enabled. Leaving the mode removes only that graph tool, preserving
-unrelated active-tool changes made during the session.
+explicitly enabled. Entering snapshots the active tools and suppresses the
+built-in parent tools that can mutate the checkout or execute commands. Leaving
+restores the exact snapshot. The enabled state and snapshot are session-scoped
+and restored through Pi's custom entries. The startup flag applies to the launch
+that carried it; navigating the session tree restores what the target branch
+recorded. A snapshot is captured through the same bounds that read it back, and
+a tool set outside those bounds refuses activation instead of persisting state
+the extension could not restore.
 
 ### D9 — Models and providers are configuration
 
@@ -96,12 +102,26 @@ claimed until a broader matrix exists.
 The parent exposes one static `worker_graph` schema for complete DAG execution.
 It is inactive by default and enabled only through `/swarm on` or `--swarm`.
 Transport progress contains bounded status and usage metadata, never worker
-transcripts or tool payloads.
+transcripts or tool payloads. Final results contain a separately bounded compact
+projection of structured worker reports and label worker-authored fields as
+untrusted data.
+
+### D16 — Retention is bounded without implicit deletion
+
+The store has a fixed default retained-run count and a bounded configuration
+override. Capacity is a fixed set of atomically claimed slot files, so the limit
+is structural and concurrent creators are arbitrated by the filesystem instead
+of by counting. Runs and slots that disagree stop new work rather than admitting
+it on an accounting the store cannot trust. Automatic deletion is deferred so an orchestration
+request never destroys prior diagnostic state as a side effect, and no
+elapsed-time heuristic may reclaim a claimed slot: a stranded slot is reported
+for explicit removal rather than guessed to be free.
 
 ## Open decisions
 
 1. Whether review feedback resumes a persisted child session or starts a fresh
    attempt with the prior structured output.
 2. Whether advisory path and symbol claims belong in the MVP or a follow-up.
-3. Retention defaults and cleanup policy for completed run state.
+3. Whether explicit cleanup removes runs by age, count, or user selection. It
+   must release each removed run's capacity slot with the run directory.
 4. Whether graph execution pauses at explicit review barriers between frontiers.

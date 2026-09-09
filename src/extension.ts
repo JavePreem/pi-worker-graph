@@ -3,6 +3,7 @@ import {
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { isRecord } from "./json.js";
 import {
   registerWorkerGraphOrchestratorTool,
   WORKER_GRAPH_TOOL_NAME,
@@ -16,9 +17,91 @@ import {
 
 const WORKER_ROLE_VARIABLE = "PI_WORKER_GRAPH_ROLE";
 const WORKER_ROLE = "worker";
+const MODE_ENTRY_TYPE = "worker-graph-mode";
+const MODE_STATE_SCHEMA_VERSION = 1;
+const MAX_MODE_TOOL_COUNT = 256;
+const MAX_MODE_TOOL_NAME_BYTES = 256;
+const DISABLED_PARENT_TOOLS = new Set(["bash", "edit", "write"]);
+const MODE_STATE_FIELDS = new Set([
+  "schemaVersion",
+  "enabled",
+  "toolsBeforeMode",
+]);
+const UNRESTORABLE_TOOLS_MESSAGE =
+  "Worker-graph mode not enabled: the active tool set cannot be restored later";
 export const WORKER_REPORT_TOOL_NAME = "worker_graph_report";
 export const SWARM_COMMAND_NAME = "swarm";
 export const SWARM_FLAG_NAME = "swarm";
+
+interface WorkerGraphModeState {
+  readonly schemaVersion: 1;
+  readonly enabled: boolean;
+  readonly toolsBeforeMode?: readonly string[];
+}
+
+function modeToolSnapshot(value: unknown): readonly string[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length > MAX_MODE_TOOL_COUNT
+  ) {
+    return undefined;
+  }
+  const tools: string[] = [];
+  for (const tool of value) {
+    if (
+      typeof tool !== "string" ||
+      tool.trim().length === 0 ||
+      tool !== tool.trim() ||
+      Buffer.byteLength(tool) > MAX_MODE_TOOL_NAME_BYTES ||
+      tool === WORKER_GRAPH_TOOL_NAME ||
+      tools.includes(tool)
+    ) {
+      return undefined;
+    }
+    tools.push(tool);
+  }
+  return Object.freeze(tools);
+}
+
+function parseModeState(value: unknown): WorkerGraphModeState | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    Object.keys(value).some((field) => !MODE_STATE_FIELDS.has(field)) ||
+    value.schemaVersion !== MODE_STATE_SCHEMA_VERSION ||
+    typeof value.enabled !== "boolean"
+  ) {
+    return undefined;
+  }
+  if (!value.enabled) {
+    return value.toolsBeforeMode === undefined
+      ? { schemaVersion: MODE_STATE_SCHEMA_VERSION, enabled: false }
+      : undefined;
+  }
+  const toolsBeforeMode = modeToolSnapshot(value.toolsBeforeMode);
+  if (toolsBeforeMode === undefined) return undefined;
+  return Object.freeze({
+    schemaVersion: MODE_STATE_SCHEMA_VERSION,
+    enabled: true,
+    toolsBeforeMode,
+  });
+}
+
+function latestModeState(
+  entries: readonly unknown[],
+): WorkerGraphModeState | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (
+      isRecord(entry) &&
+      entry.type === "custom" &&
+      entry.customType === MODE_ENTRY_TYPE
+    ) {
+      return parseModeState(entry.data);
+    }
+  }
+  return undefined;
+}
 
 /**
  * `parseNodeOutput` measures every limit in UTF-8 bytes, but JSON Schema can
@@ -136,6 +219,9 @@ function orchestratorDependencies(
     ...(dependencies.executeGraph === undefined
       ? {}
       : { executeGraph: dependencies.executeGraph }),
+    ...(dependencies.readOutput === undefined
+      ? {}
+      : { readOutput: dependencies.readOutput }),
   };
 }
 
@@ -160,21 +246,86 @@ export default function registerWorkerGraph(
   );
 
   let enabled = false;
-  const activate = () => {
-    const active = pi.getActiveTools();
-    if (active.includes(WORKER_GRAPH_TOOL_NAME)) return;
-    pi.setActiveTools([...active, WORKER_GRAPH_TOOL_NAME]);
+  let toolsBeforeMode: readonly string[] | undefined;
+
+  /**
+   * The snapshot is captured through the same bounds that restore it. A tool set
+   * this extension could not read back must never enable the mode, because the
+   * suppressed parent tools would then be unrecoverable after a reload.
+   */
+  const activate = (restoredTools?: readonly string[]): boolean => {
+    const snapshot =
+      restoredTools ??
+      toolsBeforeMode ??
+      modeToolSnapshot(
+        pi.getActiveTools().filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
+      );
+    if (snapshot === undefined) return false;
+    toolsBeforeMode = snapshot;
+    pi.setActiveTools([
+      ...snapshot.filter((name) => !DISABLED_PARENT_TOOLS.has(name)),
+      WORKER_GRAPH_TOOL_NAME,
+    ]);
+    return true;
   };
   const deactivate = () => {
+    if (toolsBeforeMode !== undefined) {
+      pi.setActiveTools([...toolsBeforeMode]);
+      toolsBeforeMode = undefined;
+      return;
+    }
     const active = pi.getActiveTools();
-    if (!active.includes(WORKER_GRAPH_TOOL_NAME)) return;
-    pi.setActiveTools(active.filter((name) => name !== WORKER_GRAPH_TOOL_NAME));
+    if (active.includes(WORKER_GRAPH_TOOL_NAME)) {
+      pi.setActiveTools(
+        active.filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
+      );
+    }
   };
 
-  pi.on("session_start", () => {
-    enabled = pi.getFlag(SWARM_FLAG_NAME) === true;
-    if (enabled) activate();
-    else deactivate();
+  const persistModeState = () => {
+    pi.appendEntry(MODE_ENTRY_TYPE, {
+      schemaVersion: MODE_STATE_SCHEMA_VERSION,
+      enabled,
+      ...(enabled && toolsBeforeMode !== undefined
+        ? { toolsBeforeMode: [...toolsBeforeMode] }
+        : {}),
+    });
+  };
+
+  /**
+   * The startup flag applies only to the launch that carried it. Navigating the
+   * session tree restores what the branch recorded, so `/swarm off` is never
+   * undone by the flag that started the session.
+   */
+  const restoreModeState = (
+    entries: readonly unknown[],
+    applyStartupFlag: boolean,
+  ): { readonly persist: boolean; readonly refused: boolean } => {
+    deactivate();
+    const state = latestModeState(entries);
+    const enabledByFlag =
+      applyStartupFlag && pi.getFlag(SWARM_FLAG_NAME) === true;
+    const requested = enabledByFlag || state?.enabled === true;
+    enabled =
+      requested && activate(state?.enabled ? state.toolsBeforeMode : undefined);
+    return {
+      persist: enabled && enabledByFlag && state?.enabled !== true,
+      refused: requested && !enabled,
+    };
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    const restored = restoreModeState(ctx.sessionManager.getBranch(), true);
+    if (restored.persist) persistModeState();
+    if (restored.refused) ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
+  });
+  pi.on("session_tree", (_event, ctx) => {
+    if (restoreModeState(ctx.sessionManager.getBranch(), false).refused) {
+      ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
+    }
+  });
+  pi.on("session_shutdown", () => {
+    deactivate();
   });
 
   pi.registerCommand(SWARM_COMMAND_NAME, {
@@ -182,12 +333,17 @@ export default function registerWorkerGraph(
     async handler(args, ctx) {
       const action = args.trim();
       if (action === "on") {
+        if (!activate()) {
+          ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
+          return;
+        }
         enabled = true;
-        activate();
+        persistModeState();
         ctx.ui.notify("Worker-graph mode enabled", "info");
       } else if (action === "off") {
         enabled = false;
         deactivate();
+        persistModeState();
         ctx.ui.notify("Worker-graph mode disabled", "info");
       } else if (action === "status") {
         ctx.ui.notify(

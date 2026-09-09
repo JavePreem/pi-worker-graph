@@ -46,6 +46,19 @@ adapter. Automated tests remain provider-free:
   rejected by the extension;
 - one static, fully bounded `worker_graph` parent tool;
 - explicit `/swarm on`, `/swarm status`, `/swarm off`, and `--swarm` activation;
+- session-persisted swarm mode with exact active-tool restoration and built-in
+  parent mutation tools suppressed while active, with branch-recorded state
+  governing session-tree navigation and activation refused for any tool set the
+  extension could not restore;
+- compact, explicitly bounded worker-report projection for parent review and
+  focused follow-up graphs, delivered in a labeled block worker text cannot
+  close;
+- a configurable retained-run cap enforced by atomically claimed capacity slots,
+  with deterministic arbitration between concurrent creators, no implicit
+  deletion, stranded slots reported for explicit removal, and inconsistent
+  run/slot state failing closed;
+- a verified npm artifact containing the compiled runtime, loaded from a clean
+  temporary install in offline Pi RPC mode;
 - behavioral coverage using `node:test`, fakes, and temporary directories.
 
 Normal parent sessions register the `/swarm` control command, but the
@@ -74,25 +87,24 @@ never on its own session.
 
 ## Next implementation slice
 
-Exercise the new vertical slice, then complete orchestrator-mode policy:
+Prepare the vertical slice for a prerelease:
 
 1. Run an optional provider-backed smoke test with two independent workers and a
-   dependent validation node; confirm profile routing, progress, aggregate usage,
-   cancellation, and state placement.
-2. When `/swarm on` is active, suppress parent tools that can write directly and
-   restore the exact prior active-tool set on `/swarm off`.
-3. Persist and restore mode state across Pi session replacement and resume without
-   ever enabling orchestrator mode in worker children.
-4. Add focused orchestrator guidance and a compact result renderer for integrated
-   checkout review and repair delegation.
-5. Keep every automated path provider-free behind the existing fake subprocess
+   dependent validation node when provider-backed testing is desired; this is
+   intentionally skipped for the current local pass.
+2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
+   and registry workflow.
+3. Decide whether the first prerelease needs explicit run-state cleanup tooling;
+   the current hard cap is safe but requires manual cleanup when full.
+4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
 ## Deferred run-store work
 
 Before a resumable or externally addressable run API is added, implement run
 ownership so two orchestrators cannot advance one run. Add events, inboxes,
-and retention cleanup only with their consumers. Bounded text artifacts can be
+and retention cleanup only with their consumers; cleanup must release a removed
+run's capacity slot together with its directory. Bounded text artifacts can be
 added with structured-output overflow handling.
 
 ## Constraints to preserve
@@ -108,7 +120,7 @@ added with structured-output overflow handling.
 
 ## Decisions still needed
 
-Review barriers, retention defaults, and session-resumption semantics remain
-deferred until their runtime layers are implemented. Broader Pi compatibility can
-be claimed only after testing versions beyond the current 0.85.1 development
-pin.
+Review barriers, retention cleanup, and worker-session resumption semantics
+remain deferred until their runtime layers are implemented. Broader Pi
+compatibility can be claimed only after testing versions beyond the current
+0.85.1 development pin.

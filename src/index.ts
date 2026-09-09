@@ -68,7 +68,9 @@ export type {
 export {
   createRun,
   publishNodeOutput,
+  RUN_STORE_DEFAULT_MAX_RUNS,
   RUN_STORE_MAX_RECORD_BYTES,
+  RUN_STORE_MAX_RUNS,
   RunStoreError,
   readNodeOutput,
   readNodeState,

@@ -57,6 +57,7 @@ Implement run-scoped persistence outside the target checkout:
 - [x] restrictive permissions and atomic publication;
 - [ ] run ownership;
 - [x] bounded reads with explicit malformed and overflow errors;
+- [x] bounded retained-run count with atomic capacity reservation;
 - [ ] explicit text truncation and retained artifact references;
 - [ ] cleanup by age and terminal status.
 
@@ -145,8 +146,8 @@ Implement:
 
 - [x] explicit on, status, and off commands;
 - [x] an opt-in startup flag;
-- session setting snapshot and restoration;
-- orchestrator guidance for decomposition, bounded overlap, review, validation,
+- [x] session setting snapshot and restoration;
+- [x] orchestrator guidance for decomposition, bounded overlap, review, validation,
   and repair delegation;
 - [x] bounded graph progress through tool updates.
 
@@ -175,11 +176,12 @@ Acceptance tests:
 
 ## Phase 8 — Package trial and release
 
-- Add versioned installation instructions.
+- [x] Add versioned installation instructions.
 - Run a controlled same-tree exercise with intentional minor overlap.
 - Verify routing with at least two configurable model/provider profiles.
 - Compare duration, conflicts, usage, and review findings with a sequential run.
-- Document limitations and safe operating guidance.
+- [x] Document limitations and safe operating guidance.
+- [x] Pack and load the production artifact in a provider-free Pi session.
 - Publish a tagged prerelease before a stable release.
 
 ## Explicitly deferred

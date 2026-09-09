@@ -21,12 +21,25 @@ Worker profiles are loaded from the global Pi agent directory, not from the
 target checkout. The configuration must not contain provider credentials or
 other secrets. Progress projection retains only bounded task status, allowlisted
 tool names, and numeric usage; worker messages, tool arguments, tool results, and
-stderr are not forwarded into the parent model context.
+stderr are not forwarded into the parent model context. The final result carries
+a bounded projection of worker reports inside a labeled block; every `<` in that
+serialization is escaped, so worker-authored text cannot close the block and
+address the parent as something other than untrusted data.
 
 Run state defaults beneath the global Pi agent directory. Explicit state roots
 cannot be the filesystem root or resolve into the target checkout through an
 existing symlink; operators should still choose a private, access-controlled
-directory outside repositories.
+directory outside repositories. Retained runs have a configurable hard count
+limit enforced by atomically claimed capacity slots, and reaching it rejects
+new work rather than deleting prior state. No elapsed-time heuristic can release
+a claimed slot, so a slow creator is never displaced by a second one, and a
+published run whose slot is missing stops the store from admitting new work
+instead of handing the same free capacity to several creators at once.
+
+Swarm mode removes Pi's built-in `bash`, `edit`, and `write` tools from the
+parent tool set and restores the exact pre-mode snapshot on exit. Pi does not
+label arbitrary extension tools as read-only or writable, so separately
+installed third-party tools remain the operator's responsibility.
 
 Workers are started without a command interpreter: the executable is Pi's own
 CLI entry point, resolved through this package's dependency on Pi, and every

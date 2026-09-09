@@ -167,7 +167,9 @@ outside the MVP.
 ## Persistence
 
 The state root is resolved from runtime configuration and defaults beneath Pi's
-agent data directory. It never defaults inside the target checkout.
+agent data directory. It never defaults inside the target checkout. A bounded
+run count is enforced through atomically created run reservations. Reaching the
+limit fails before a worker starts and never deletes prior state implicitly.
 
 Per-run layout:
 
@@ -185,8 +187,9 @@ Per-run layout:
 Task IDs are validated or encoded before use as path components. Immutable
 records are published by writing a same-directory temporary file with restrictive
 permissions and atomically renaming it. Mutable parent-owned state is replaced
-atomically. A run ownership mechanism prevents two orchestrators from advancing
-the same run concurrently.
+atomically. One extension instance permits only one graph lifecycle at a time.
+Cross-process run ownership remains required before an API can resume or
+externally advance an existing run.
 
 ## Child process contract
 
@@ -244,10 +247,11 @@ and an opt-in startup flag. The parent `worker_graph` tool is registered once bu
 removed from the active tool set until the mode is enabled. Worker children take
 a mutually exclusive extension path and receive only their final-report tool.
 
-The current activation layer adds or removes only `worker_graph`, preserving
-unrelated active-tool changes made while the mode is enabled. Removing direct
-parent write capabilities, adding richer orchestrator guidance, and restoring
-mode state across session replacement remain follow-up work.
+Entering the mode snapshots the complete active-tool set, removes the built-in
+`bash`, `edit`, and `write` tools, and activates `worker_graph` in their place.
+The snapshot and enabled state are stored in a bounded custom Pi session entry,
+restored on resume and tree navigation, and restored exactly when the mode ends.
+Worker children never register this lifecycle.
 
 ## Failure semantics
 
@@ -258,7 +262,8 @@ mode state across session replacement remain follow-up work.
 - Abort: terminate running children and settle remaining nodes as aborted or
   blocked.
 - Journal failure: report it; never silently claim coordination succeeded.
-- Output overflow: retain bounded content and explicit truncation metadata.
+- Worker-report overflow: fail the node; compact parent review projections mark
+  every truncated field or omitted report explicitly.
 - Process crash: persisted terminal nodes remain terminal; running nodes become
   interrupted and require an explicit retry or recovery decision.
 

@@ -9,14 +9,21 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { isRecord } from "./json.js";
 import type { PiWorkerProfile } from "./pi-subprocess.js";
 import { parsePiWorkerProfiles } from "./pi-subprocess.js";
+import { RUN_STORE_DEFAULT_MAX_RUNS, RUN_STORE_MAX_RUNS } from "./store.js";
 
 export const WORKER_GRAPH_CONFIG_FILENAME = "worker-graph.json";
 export const WORKER_GRAPH_DEFAULT_STATE_DIRECTORY = "worker-graph";
 export const WORKER_GRAPH_CONFIG_MAX_BYTES = 64 * 1024;
 
-const CONFIG_FIELDS = new Set(["schemaVersion", "stateRoot", "profiles"]);
+const CONFIG_FIELDS = new Set([
+  "schemaVersion",
+  "stateRoot",
+  "maxRetainedRuns",
+  "profiles",
+]);
 const MAX_PATH_BYTES = 4 * 1024;
 
 export type WorkerGraphConfigurationErrorCode =
@@ -48,16 +55,13 @@ export class WorkerGraphConfigurationError extends Error {
 
 export interface WorkerGraphConfiguration {
   readonly stateRoot: string;
+  readonly maxRetainedRuns: number;
   readonly profiles: Readonly<Record<string, PiWorkerProfile>>;
 }
 
 export interface LoadWorkerGraphConfigurationOptions {
   readonly agentDirectory: string;
   readonly workingDirectory: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasControlCharacter(value: string): boolean {
@@ -185,7 +189,20 @@ function parseConfiguration(
   if (dirname(stateRoot) === stateRoot) {
     throw new WorkerGraphConfigurationError("invalid");
   }
-  return Object.freeze({ stateRoot, profiles });
+  const maxRetainedRuns = value.maxRetainedRuns ?? RUN_STORE_DEFAULT_MAX_RUNS;
+  if (
+    typeof maxRetainedRuns !== "number" ||
+    !Number.isInteger(maxRetainedRuns) ||
+    maxRetainedRuns <= 0 ||
+    maxRetainedRuns > RUN_STORE_MAX_RUNS
+  ) {
+    throw new WorkerGraphConfigurationError("invalid");
+  }
+  return Object.freeze({
+    stateRoot,
+    maxRetainedRuns,
+    profiles,
+  });
 }
 
 export async function loadWorkerGraphConfiguration(

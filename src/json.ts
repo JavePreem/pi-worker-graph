@@ -8,6 +8,11 @@ export type JsonValue =
 
 const MAX_JSON_DEPTH = 100;
 
+/** Narrows to a keyed object. Arrays and null are not records. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isJsonValueAtDepth(
   value: unknown,
   ancestors: Set<object>,

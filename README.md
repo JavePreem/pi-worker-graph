@@ -169,6 +169,7 @@ tool allowlist explicitly:
 ```json
 {
   "schemaVersion": 1,
+  "maxRetainedRuns": 64,
   "profiles": {
     "writer": {
       "provider": "anthropic",
@@ -184,6 +185,23 @@ Run state defaults to the `worker-graph` subdirectory of Pi's agent directory.
 An optional `stateRoot` may be absolute or relative to the agent directory, but
 the extension rejects the filesystem root and any path that is inside the target
 checkout, including through an existing symlink.
+`maxRetainedRuns` defaults to 64 and may be set from 1 through 256. Capacity is
+a fixed set of slot files under `runs/slots`, so the limit is structural: at
+most that many slots can exist, so at most that many runs can publish, and
+concurrent creators are arbitrated by the filesystem rather than by counting —
+an available slot is always claimed by exactly one of them. A slot is claimed by
+hard-linking a record that is already complete on disk, so an interrupted
+creation can never leave a slot that holds capacity without naming its owner.
+Reaching the limit rejects the new graph; run state is never deleted
+automatically.
+
+A creation interrupted between claiming its slot and publishing its run leaves
+the slot claimed. The rejection names how many slots belong to runs that were
+never published; deleting those slot files releases the capacity. Delete a run
+directory and its slot together: a published run whose slot is missing means the
+two disagree, and the store then admits no new work at all — rather than letting
+every waiting creator claim the same apparently free capacity — until they
+agree again.
 
 Load the package and activate orchestration explicitly:
 
@@ -194,9 +212,22 @@ Load the package and activate orchestration explicitly:
 ```
 
 The `--swarm` extension flag enables the mode at startup. While the mode is off,
-the `worker_graph` tool is excluded from the active tool set. While it runs, the
-tool streams bounded status and returns deterministic node statuses plus
-aggregate usage; worker transcripts never enter the parent model context.
+the `worker_graph` tool is excluded from the active tool set. Enabling the mode
+snapshots the active tools, disables the built-in `bash`, `edit`, and `write`
+tools in the parent, and persists the mode state in the Pi session. Turning it
+off restores the exact snapshot. Navigating the session tree restores whatever
+the target branch recorded, so `/swarm off` is never undone by the flag that
+started the session. A tool set the extension could not read back — more than
+256 tools, or a tool name longer than 256 bytes — refuses to enable the mode
+rather than suppressing parent tools it could not restore after a reload. While a graph runs, the tool streams bounded status and
+returns deterministic node statuses, aggregate usage, and a compact bounded
+projection of worker reports. Worker transcripts never enter the parent model
+context; projected report fields are marked as untrusted data inside a labeled
+block that worker text cannot close.
+
+Only one graph may run in a parent session at a time. Include validation as a
+dependent worker task. After reviewing the shared checkout with the remaining
+read-only tools, invoke another narrow graph for any repairs.
 
 ## Planned runtime
 
@@ -204,8 +235,8 @@ The remaining runtime will add:
 
 - retained report artifacts if explicit truncation is added;
 - additional child-only coordination tools if required after MVP;
-- complete orchestrator-mode tool suppression and session restoration;
-- review, repair, and interrupted-run recovery behavior.
+- optional cleanup tooling for retained run state;
+- persisted worker attempts and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not
 create worktrees or perform automatic branches, commits, merges, stashes, resets,
@@ -217,17 +248,25 @@ Requires Node.js 22.19 or newer. Pi integration is currently tested against
 `@earendil-works/pi-coding-agent` 0.85.1; the peer dependency follows Pi package
 conventions and compatibility outside the tested version is not yet guaranteed.
 
+For a local source checkout, install dependencies and build before loading the
+package:
+
 ```bash
 npm install
 npm run check
 npm run build
+pi -e /absolute/path/to/pi-worker-graph
 ```
 
-The package can be loaded locally by Pi while the extension is under development:
+After version `0.1.0` is published, install that exact packaged build with:
 
 ```bash
-pi -e .
+pi install npm:pi-worker-graph@0.1.0
 ```
+
+The npm artifact contains the compiled `dist/` tree. Do not install directly
+from Git until the repository has a production-safe build lifecycle for Pi's
+`--omit=dev` package installation path.
 
 See [`docs/NEXT.md`](docs/NEXT.md) for current development status,
 [`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence, and

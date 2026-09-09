@@ -25,6 +25,8 @@ import type { NodeStateRecord, RunManifest } from "./store.js";
 import {
   createRun,
   publishNodeOutput,
+  RUN_STORE_DEFAULT_MAX_RUNS,
+  RUN_STORE_MAX_RUNS,
   readNodeOutput,
   readNodeState,
   readRun,
@@ -40,11 +42,13 @@ export const RUN_GRAPH_LIMITS = Object.freeze({
   maxPrerequisiteBytes: 256 * 1024,
   maxTaskRuntimeMs: 10 * 60 * 1000,
   maxExecutorCleanupMs: 5_000,
+  maxRetainedRuns: RUN_STORE_MAX_RUNS,
 });
 
 export type RunGraphIssueCode =
   | "invalid_working_directory"
   | "invalid_task_timeout"
+  | "invalid_retention_limit"
   | "task_limit"
   | "dependency_limit"
   | "concurrency_limit"
@@ -113,6 +117,7 @@ export interface RunGraphOptions<TPayload = unknown> {
   readonly executor: TaskExecutor;
   readonly signal?: AbortSignal;
   readonly taskTimeoutMs?: number;
+  readonly maxRetainedRuns?: number;
 }
 
 export type GraphRunStatus = "succeeded" | "failed" | "aborted";
@@ -146,6 +151,7 @@ function validateRun<TPayload>(
   graph: GraphRequest<TPayload>,
   workingDirectory: string,
   taskTimeoutMs: number,
+  maxRetainedRuns: number,
 ): readonly RunGraphIssue[] {
   const issues: RunGraphIssue[] = [];
   if (workingDirectory.trim().length === 0) {
@@ -162,6 +168,16 @@ function validateRun<TPayload>(
     issues.push({
       code: "invalid_task_timeout",
       message: `Task timeout must be a positive integer no greater than ${RUN_GRAPH_LIMITS.maxTaskRuntimeMs}`,
+    });
+  }
+  if (
+    !Number.isInteger(maxRetainedRuns) ||
+    maxRetainedRuns <= 0 ||
+    maxRetainedRuns > RUN_GRAPH_LIMITS.maxRetainedRuns
+  ) {
+    issues.push({
+      code: "invalid_retention_limit",
+      message: `Retained run count must be a positive integer no greater than ${RUN_GRAPH_LIMITS.maxRetainedRuns}`,
     });
   }
   if (graph.tasks.length > RUN_GRAPH_LIMITS.maxTasks) {
@@ -524,17 +540,19 @@ export async function runGraph<TPayload>(
 ): Promise<GraphRunResult> {
   const taskTimeoutMs =
     options.taskTimeoutMs ?? RUN_GRAPH_LIMITS.maxTaskRuntimeMs;
+  const maxRetainedRuns = options.maxRetainedRuns ?? RUN_STORE_DEFAULT_MAX_RUNS;
   const issues = validateRun(
     options.graph,
     options.workingDirectory,
     taskTimeoutMs,
+    maxRetainedRuns,
   );
   if (issues.length > 0) throw new RunGraphValidationError(issues);
   const graph = normalizeGraph(options.graph);
   validateAdapterTasks(options.executor, graph.tasks);
 
   const workingDirectory = resolve(options.workingDirectory);
-  const created = await createRun(options.stateRoot, graph);
+  const created = await createRun(options.stateRoot, graph, maxRetainedRuns);
   const manifest = await readRun(options.stateRoot, created.runId);
   const persistedGraph = normalizeGraph({
     tasks: manifest.graph.tasks.map((task) => ({
