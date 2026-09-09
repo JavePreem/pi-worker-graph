@@ -148,11 +148,13 @@ type EventKind =
   | "progress";
 
 interface RunEvent {
-  id: string;
+  schemaVersion: 1;
+  kind: "run-event";
+  eventId: string;
   runId: string;
   taskId: string;
   timestamp: string;
-  kind: EventKind;
+  eventKind: EventKind;
   message: string;
   paths?: string[];
   symbols?: string[];
@@ -160,9 +162,32 @@ interface RunEvent {
 }
 ```
 
+Directed messages carry the same envelope with a sender and one recipient task.
+
 Workers explicitly query relevant entries by recipient, path, symbol, or cursor.
 The runtime does not inject the entire journal into every turn. Live steering is
 outside the MVP.
+
+Every record in a run shares one monotonic sequence, so an identifier is also a
+position: a cursor names a point that no later record can precede, and a worker
+polling with one cannot silently skip a record published between two reads. The
+sequence is allocated by exclusively creating a claim file, so concurrent
+workers are arbitrated by the filesystem rather than by a lock a crashed worker
+could hold. An interrupted publisher leaves an unused number rather than an
+identifier a second worker could reuse.
+
+Coordination is bounded on both sides. A run retains a fixed maximum number of
+records, and publishing past it fails explicitly instead of silently degrading
+reads. A read is bounded by a requested record count and by a serialized page
+size, and reports a cursor for the remainder, so one large record cannot enlarge
+a worker's context beyond the page bound.
+
+Publishing requires the run to have an active owner, but not the owner's
+capability. Workers are the authors of coordination records and never hold the
+capability that advances node state, so an unowned or finished run stays
+immutable while worker writes remain unprivileged. Records are attributed to a
+task rather than authenticated: every worker of a run shares this state root, as
+they already share the checkout.
 
 ## Persistence
 
@@ -180,6 +205,7 @@ Per-run layout:
   nodes/<task-key>.json       parent-owned current node state
   outputs/<task-key>.json     terminal structured output
   artifacts/<task-key>.md     bounded textual output
+  coordination.seq/<id>.json  run-global coordination sequence claims
   events/<task-key>/<id>.json immutable published events
   inbox/<task-key>/<id>.json  immutable directed messages
   sessions/<task-key>/...     optional child session state
@@ -198,11 +224,15 @@ an existing run.
 
 ## Child process contract
 
-Every worker receives explicit run and task identity plus the state directory.
-The child detects worker mode and registers coordination and reporting tools, but
-not graph-spawning tools or orchestrator commands. Secrets are not added to child
-arguments, prompts, environment metadata persisted by the runtime, or graph
-state.
+Every worker receives explicit run and task identity plus the state directory,
+and no other runtime state; in particular it never receives the run's ownership
+capability. The child detects worker mode and registers coordination and
+reporting tools, but not graph-spawning tools or orchestrator commands. Pi's
+tool allowlist is strict over built-in and extension tools, so the adapter
+allowlists the coordination tools on exactly the condition under which the child
+registers them, and advertises them in the assignment only then. Secrets are not
+added to child arguments, prompts, environment metadata persisted by the
+runtime, or graph state.
 
 The MVP transport is a one-shot Pi JSON-mode subprocess behind the execution
 adapter. It runs without session persistence or discovered extensions, skills,

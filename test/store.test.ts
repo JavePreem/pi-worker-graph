@@ -18,12 +18,19 @@ import {
   createRun,
   normalizeGraph,
   publishNodeOutput,
+  publishRunEvent,
+  RUN_COORDINATION_MAX_PAGE_BYTES,
+  RUN_COORDINATION_MAX_RECORDS,
+  RUN_COORDINATION_MAX_TEXT_BYTES,
   RUN_STORE_MAX_RECORD_BYTES,
   RunStoreError,
   readNodeOutput,
   readNodeState,
   readRun,
+  readRunEvents,
+  readRunMessages,
   releaseRunOwnership,
+  sendRunMessage,
   writeNodeState,
 } from "../src/index.js";
 import { nodeOutput } from "./fixtures.js";
@@ -188,6 +195,195 @@ test("serializes ownership of one run and releases only its owner", async (t) =>
   await rejectsWithCode(
     () => writeNodeState(root, manifest.runId, "task", "running", replacement),
     "not_found",
+  );
+});
+
+test("publishes and queries coordination events and messages in order", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, {
+    tasks: [{ id: "sender" }, { id: "recipient" }],
+  });
+
+  const first = await publishRunEvent(root, manifest.runId, {
+    taskId: "sender",
+    eventKind: "decision",
+    message: "Use the shared interface.",
+    paths: ["src/api.ts"],
+    recipients: ["recipient"],
+  });
+  const second = await publishRunEvent(root, manifest.runId, {
+    taskId: "recipient",
+    eventKind: "risk",
+    message: "The provider is unavailable.",
+    symbols: ["createClient"],
+  });
+  const handoff = await sendRunMessage(root, manifest.runId, {
+    senderTaskId: "sender",
+    recipientTaskId: "recipient",
+    message: "Please consume the shared interface.",
+  });
+
+  // One run-global sequence orders every coordination record, so a cursor
+  // names a position that no later record can precede.
+  assert.deepEqual(
+    [first.eventId, second.eventId, handoff.messageId],
+    ["000001", "000002", "000003"],
+  );
+
+  const page = await readRunEvents(root, manifest.runId, { limit: 1 });
+  assert.deepEqual(
+    page.events.map((event) => event.eventId),
+    [first.eventId],
+  );
+  assert.equal(page.nextCursor, first.eventId);
+
+  // A record published after the page was read must still be delivered.
+  const third = await publishRunEvent(root, manifest.runId, {
+    taskId: "sender",
+    eventKind: "progress",
+    message: "The interface is implemented.",
+  });
+  const remainder = await readRunEvents(root, manifest.runId, {
+    cursor: page.nextCursor,
+  });
+  assert.deepEqual(
+    remainder.events.map((event) => event.eventId),
+    [second.eventId, third.eventId],
+  );
+  assert.equal(remainder.nextCursor, undefined);
+
+  const relevant = await readRunEvents(root, manifest.runId, {
+    recipient: "recipient",
+    path: "src/api.ts",
+  });
+  assert.deepEqual(
+    relevant.events.map((event) => event.eventId),
+    [first.eventId],
+  );
+  assert.deepEqual(
+    (
+      await readRunEvents(root, manifest.runId, { eventKind: "risk" })
+    ).events.map((event) => event.eventId),
+    [second.eventId],
+  );
+
+  const inbox = await readRunMessages(root, manifest.runId, "recipient");
+  assert.deepEqual(inbox.messages, [handoff]);
+  assert.deepEqual(
+    (
+      await readRunMessages(root, manifest.runId, "recipient", {
+        cursor: handoff.messageId,
+      })
+    ).messages,
+    [],
+  );
+  assert.deepEqual(
+    (await readRunMessages(root, manifest.runId, "sender")).messages,
+    [],
+  );
+
+  await rejectsWithCode(
+    () =>
+      sendRunMessage(root, manifest.runId, {
+        senderTaskId: "sender",
+        recipientTaskId: "missing",
+        message: "No such task",
+      }),
+    "unknown_task",
+  );
+  await rejectsWithCode(
+    () =>
+      publishRunEvent(root, manifest.runId, {
+        taskId: "sender",
+        eventKind: "handoff",
+        message: "Unknown recipient",
+        recipients: ["missing"],
+      }),
+    "unknown_task",
+  );
+  await rejectsWithCode(
+    () => readRunEvents(root, manifest.runId, { cursor: "not-a-cursor" }),
+    "invalid_argument",
+  );
+});
+
+test("accepts coordination only while a run is owned", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "worker" }] }),
+  );
+  const event = {
+    taskId: "worker",
+    eventKind: "progress",
+    message: "Started the assignment.",
+  } as const;
+
+  // A worker publishes without the orchestrator's ownership capability, so an
+  // unowned run is the only thing that keeps a finished run immutable.
+  await rejectsWithCode(
+    () => publishRunEvent(root, manifest.runId, event),
+    "ownership",
+  );
+
+  const ownership = await acquireRunOwnership(root, manifest.runId);
+  assert.equal(
+    (await publishRunEvent(root, manifest.runId, event)).eventId,
+    "000001",
+  );
+
+  await releaseRunOwnership(root, ownership);
+  await rejectsWithCode(
+    () => publishRunEvent(root, manifest.runId, event),
+    "ownership",
+  );
+  // Published records stay readable after the run is released.
+  assert.equal((await readRunEvents(root, manifest.runId)).events.length, 1);
+});
+
+test("bounds one coordination page by size and retains the rest", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+  const message = "m".repeat(RUN_COORDINATION_MAX_TEXT_BYTES);
+  const published = 6;
+  for (let index = 0; index < published; index += 1) {
+    await publishRunEvent(root, manifest.runId, {
+      taskId: "worker",
+      eventKind: "progress",
+      message,
+    });
+  }
+
+  const page = await readRunEvents(root, manifest.runId);
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.length < published);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(page.events)) <=
+      RUN_COORDINATION_MAX_PAGE_BYTES + RUN_COORDINATION_MAX_TEXT_BYTES,
+  );
+  const cursor = page.nextCursor;
+  assert.equal(cursor, page.events.at(-1)?.eventId);
+  assert.ok(cursor !== undefined);
+
+  const rest = await readRunEvents(root, manifest.runId, { cursor });
+  assert.equal(page.events.length + rest.events.length, published);
+});
+
+test("refuses coordination beyond the retained record limit", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+  const event = {
+    taskId: "worker",
+    eventKind: "progress",
+    message: "One bounded fact.",
+  } as const;
+  for (let index = 0; index < RUN_COORDINATION_MAX_RECORDS; index += 1) {
+    await publishRunEvent(root, manifest.runId, event);
+  }
+
+  await rejectsWithCode(
+    () => publishRunEvent(root, manifest.runId, event),
+    "retention_limit",
   );
 });
 
@@ -496,7 +692,7 @@ test("publishes immutable output without a same-process race", async (t) => {
   );
   const rejected = results.find((result) => result.status === "rejected");
   assert.ok(rejected?.reason instanceof RunStoreError);
-  assert.equal(rejected.reason.code, "ownership");
+  assert.equal(rejected.reason.code, "record_exists");
 });
 
 test("validates diagnostics from untyped callers before publication", async (t) => {
@@ -938,6 +1134,29 @@ test("creates run directories and records with restrictive permissions", async (
       0o777,
     0o600,
   );
+  for (const directory of [
+    "events",
+    "inbox",
+    join("events", task.key),
+    join("inbox", task.key),
+    "coordination.seq",
+  ]) {
+    assert.equal(
+      (await stat(join(runDirectory, directory))).mode & 0o777,
+      0o700,
+    );
+  }
+  const event = await publishRunEvent(root, manifest.runId, {
+    taskId: "task",
+    eventKind: "progress",
+    message: "Published a coordination fact.",
+  });
+  for (const record of [
+    join("events", task.key, `${event.eventId}.json`),
+    join("coordination.seq", `${event.eventId}.json`),
+  ]) {
+    assert.equal((await stat(join(runDirectory, record))).mode & 0o777, 0o600);
+  }
 });
 
 test("rejects non-JSON graph payloads", async (t) => {

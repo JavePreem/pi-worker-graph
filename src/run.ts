@@ -84,6 +84,8 @@ export interface TaskExecutionInput {
   readonly prerequisites: readonly PrerequisiteOutput[];
   /** Canonical, byte-bounded prompt context for the direct prerequisites. */
   readonly prerequisiteContext: string;
+  /** Present for adapters that expose run-scoped coordination to workers. */
+  readonly runStateRoot?: string;
   readonly signal: AbortSignal;
 }
 
@@ -660,6 +662,7 @@ export async function runGraph<TPayload>(
                       workingDirectory,
                       prerequisites,
                       prerequisiteContext: prerequisiteContext ?? "",
+                      runStateRoot: options.stateRoot,
                     },
                     signal,
                     taskTimeoutMs,

@@ -3,6 +3,10 @@ import {
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  registerWorkerCoordinationTools,
+  workerCoordinationContext,
+} from "./coordination.js";
 import { isRecord } from "./json.js";
 import {
   registerWorkerGraphOrchestratorTool,
@@ -232,6 +236,10 @@ export default function registerWorkerGraph(
 ): void {
   if (process.env[WORKER_ROLE_VARIABLE] === WORKER_ROLE) {
     registerWorkerReportTool(pi);
+    const coordination = workerCoordinationContext();
+    if (coordination !== undefined) {
+      registerWorkerCoordinationTools(pi, coordination);
+    }
     return;
   }
 

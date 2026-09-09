@@ -163,9 +163,13 @@ function captureWorkerTool(): RegisteredTool {
   return definition;
 }
 
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
 function restoreWorkerRole(value: string | undefined): void {
-  if (value === undefined) delete process.env.PI_WORKER_GRAPH_ROLE;
-  else process.env.PI_WORKER_GRAPH_ROLE = value;
+  restoreEnvironment("PI_WORKER_GRAPH_ROLE", value);
 }
 
 test("keeps the parent graph tool inactive until explicitly enabled", async (t) => {
@@ -281,6 +285,38 @@ test("refuses to enable a mode whose tool snapshot could not be restored", async
     refusal,
     refusal,
     { message: "Worker-graph mode is disabled", type: "info" },
+  ]);
+});
+
+test("registers child-only coordination tools with a worker context", async (t) => {
+  const names = [
+    "PI_WORKER_GRAPH_ROLE",
+    "PI_WORKER_GRAPH_STATE_ROOT",
+    "PI_WORKER_GRAPH_RUN_ID",
+    "PI_WORKER_GRAPH_TASK_ID",
+  ] as const;
+  const previous = Object.fromEntries(
+    names.map((name) => [name, process.env[name]]),
+  );
+  t.after(() => {
+    for (const name of names) restoreEnvironment(name, previous[name]);
+  });
+  process.env.PI_WORKER_GRAPH_ROLE = "worker";
+  process.env.PI_WORKER_GRAPH_STATE_ROOT = "/state/worker-graph";
+  process.env.PI_WORKER_GRAPH_RUN_ID = "8a2b0f2c-2c1d-4d1e-9a3f-6b5c4d3e2f10";
+  process.env.PI_WORKER_GRAPH_TASK_ID = "sender";
+  const registered: string[] = [];
+  registerWorkerGraph({
+    registerTool(tool: { name: string }) {
+      registered.push(tool.name);
+    },
+  } as never);
+  assert.deepEqual(registered, [
+    "worker_graph_report",
+    "worker_graph_event",
+    "worker_graph_events",
+    "worker_graph_message",
+    "worker_graph_inbox",
   ]);
 });
 

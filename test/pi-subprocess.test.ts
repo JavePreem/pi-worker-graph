@@ -179,6 +179,10 @@ test("spawns an isolated Pi worker and sends task content only through stdin", a
     "PI_PROVIDER",
     "PI_MODEL",
     "PI_REASONING_LEVEL",
+    "PI_WORKER_GRAPH_STATE_ROOT",
+    "PI_WORKER_GRAPH_RUN_ID",
+    "PI_WORKER_GRAPH_TASK_ID",
+    "PI_WORKER_GRAPH_OWNER_ID",
   ]) {
     assert.equal(environment[name], undefined);
   }
@@ -202,6 +206,7 @@ test("spawns an isolated Pi worker and sends task content only through stdin", a
     "--tools",
     "edit,read,write,worker_graph_report",
   ]);
+  assert.equal(prompt.includes("worker_graph_event"), false);
   const argumentsText = invocation.args.join(" ");
   for (const sensitive of [
     "Implement the requested change",
@@ -214,6 +219,63 @@ test("spawns an isolated Pi worker and sends task content only through stdin", a
     assert.equal(argumentsText.includes(sensitive), false);
     assert.equal(prompt.includes(sensitive), true);
   }
+});
+
+test("gives a coordinating worker run identity but no ownership capability", async () => {
+  const child = new FakeChild();
+  let prompt = "";
+  let invocation:
+    | { command: string; args: readonly string[]; options: SpawnOptions }
+    | undefined;
+  child.stdin.on("data", (chunk) => {
+    prompt += chunk.toString();
+  });
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.end(`${reportEvent(nodeOutput("Completed task"))}\n`);
+      child.close(0);
+    });
+  });
+
+  await runPiWorkerProcess(
+    {
+      ...input(new AbortController().signal),
+      runStateRoot: "/state/worker-graph",
+    },
+    options,
+    {
+      spawnProcess: ((
+        command: string,
+        args: readonly string[],
+        spawnOptions: SpawnOptions,
+      ) => {
+        invocation = { command, args, options: spawnOptions };
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.ok(invocation);
+  const environment = invocation.options.env as NodeJS.ProcessEnv;
+  assert.equal(environment.PI_WORKER_GRAPH_STATE_ROOT, "/state/worker-graph");
+  assert.equal(environment.PI_WORKER_GRAPH_RUN_ID, "run-id");
+  assert.equal(environment.PI_WORKER_GRAPH_TASK_ID, "task-id");
+  assert.equal(environment.PI_WORKER_GRAPH_OWNER_ID, undefined);
+  // Pi's tool allowlist covers extension tools, so the coordination tools are
+  // only callable when they are named here.
+  assert.equal(
+    invocation.args[invocation.args.indexOf("--tools") + 1],
+    [
+      "edit,read,write",
+      "worker_graph_report",
+      "worker_graph_event",
+      "worker_graph_events",
+      "worker_graph_message",
+      "worker_graph_inbox",
+    ].join(","),
+  );
+  assert.equal(prompt.includes("worker_graph_event"), true);
 });
 
 test("fails a worker that exits without the final-report tool", async () => {

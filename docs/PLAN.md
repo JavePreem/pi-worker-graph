@@ -53,7 +53,7 @@ Implement run-scoped persistence outside the target checkout:
 - [x] parent-owned node and attempt status;
 - [x] immutable node outputs;
 - [ ] bounded text artifacts;
-- [ ] immutable events and directed messages;
+- [x] immutable events and directed messages;
 - [x] restrictive permissions and atomic publication;
 - [x] exclusive run ownership for active graph lifecycles;
 - [x] bounded reads with explicit malformed and overflow errors;
@@ -127,9 +127,9 @@ Acceptance tests:
 
 Register child-only tools for:
 
-- publishing decisions, interfaces, risks, conflicts, handoffs, and progress;
-- querying relevant events with cursors;
-- sending and reading directed messages;
+- [x] publishing decisions, interfaces, risks, conflicts, handoffs, and progress;
+- [x] querying relevant events with cursors;
+- [x] sending and reading directed messages;
 - [x] submitting a structured final report.
 
 Acceptance tests:

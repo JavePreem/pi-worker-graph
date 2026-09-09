@@ -22,6 +22,23 @@ export type { JsonValue } from "./json.js";
 export const RUN_STORE_MAX_RECORD_BYTES = 1024 * 1024;
 export const RUN_STORE_DEFAULT_MAX_RUNS = 64;
 export const RUN_STORE_MAX_RUNS = 256;
+export const RUN_COORDINATION_MAX_TEXT_BYTES = 16 * 1024;
+/** Bound for one path or symbol, matching the report path bound. */
+export const RUN_COORDINATION_MAX_ITEM_BYTES = 4 * 1024;
+export const RUN_COORDINATION_MAX_ITEMS = 16;
+/** Retained coordination records per run, including unused sequence claims. */
+export const RUN_COORDINATION_MAX_RECORDS = 256;
+/** Bound for one requested coordination page. */
+export const RUN_COORDINATION_MAX_READ = 256;
+/**
+ * Serialized bound for one returned coordination page. A page stops at the
+ * first record that would exceed it and reports a cursor, so one oversized
+ * record cannot enlarge a reader's context beyond this.
+ */
+export const RUN_COORDINATION_MAX_PAGE_BYTES = 64 * 1024;
+
+const MUTATION_LOCK_WAIT_MS = 250;
+const MUTATION_LOCK_POLL_MS = 5;
 
 const SCHEMA_VERSION = 1;
 const DIRECTORY_MODE = 0o700;
@@ -32,6 +49,14 @@ const RUN_SLOT_DIRECTORY = "slots";
 const RUN_SLOT_RECORD = "slot.json";
 const RUN_SLOT_PATTERN = /^(0|[1-9][0-9]*)\.json$/;
 const RUN_MUTATION_LOCK = "mutation.lock";
+const RUN_EVENTS_DIRECTORY = "events";
+const RUN_INBOX_DIRECTORY = "inbox";
+const RUN_SEQUENCE_DIRECTORY = "coordination.seq";
+const RECORD_SUFFIX = ".json";
+const COORDINATION_ID_WIDTH = 6;
+const COORDINATION_ID_PATTERN = /^[0-9]{6}$/;
+const MAX_COORDINATION_SEQUENCE = 10 ** COORDINATION_ID_WIDTH - 1;
+const COORDINATION_CLAIM_ATTEMPTS = 16;
 const TASK_KEY_PATTERN =
   /^task-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NODE_STATUSES = new Set<NodeStatus>([
@@ -65,6 +90,37 @@ const RUN_OWNER_RECORD_FIELDS = new Set([
   "runId",
   "ownerId",
   "acquiredAt",
+]);
+const RUN_EVENT_RECORD_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "eventId",
+  "runId",
+  "taskId",
+  "eventKind",
+  "timestamp",
+  "message",
+  "paths",
+  "symbols",
+  "recipients",
+]);
+const RUN_MESSAGE_RECORD_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "messageId",
+  "runId",
+  "senderTaskId",
+  "recipientTaskId",
+  "timestamp",
+  "message",
+]);
+const RUN_EVENT_KINDS = new Set<RunEventKind>([
+  "decision",
+  "interface",
+  "risk",
+  "conflict",
+  "handoff",
+  "progress",
 ]);
 
 interface SlotClaim {
@@ -124,6 +180,78 @@ export interface RunManifest {
 export interface RunOwnership {
   readonly runId: string;
   readonly ownerId: string;
+}
+
+export type RunEventKind =
+  | "decision"
+  | "interface"
+  | "risk"
+  | "conflict"
+  | "handoff"
+  | "progress";
+
+export interface RunEventRecord {
+  readonly schemaVersion: 1;
+  readonly kind: "run-event";
+  readonly eventId: string;
+  readonly runId: string;
+  readonly taskId: string;
+  readonly eventKind: RunEventKind;
+  readonly timestamp: string;
+  readonly message: string;
+  readonly paths?: readonly string[];
+  readonly symbols?: readonly string[];
+  readonly recipients?: readonly string[];
+}
+
+export interface PublishRunEvent {
+  readonly taskId: string;
+  readonly eventKind: RunEventKind;
+  readonly message: string;
+  readonly paths?: readonly string[];
+  readonly symbols?: readonly string[];
+  readonly recipients?: readonly string[];
+}
+
+export interface RunEventQuery {
+  readonly cursor?: string;
+  readonly eventKind?: RunEventKind;
+  readonly recipient?: string;
+  readonly path?: string;
+  readonly symbol?: string;
+  readonly limit?: number;
+}
+
+export interface RunEventQueryResult {
+  readonly events: readonly RunEventRecord[];
+  readonly nextCursor?: string;
+}
+
+export interface RunMessageRecord {
+  readonly schemaVersion: 1;
+  readonly kind: "run-message";
+  readonly messageId: string;
+  readonly runId: string;
+  readonly senderTaskId: string;
+  readonly recipientTaskId: string;
+  readonly timestamp: string;
+  readonly message: string;
+}
+
+export interface PublishRunMessage {
+  readonly senderTaskId: string;
+  readonly recipientTaskId: string;
+  readonly message: string;
+}
+
+export interface RunMessageQuery {
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+export interface RunMessageQueryResult {
+  readonly messages: readonly RunMessageRecord[];
+  readonly nextCursor?: string;
 }
 
 export interface NodeStateRecord {
@@ -381,6 +509,27 @@ function ownerPath(stateRoot: string, runId: string): string {
   return join(runPath(stateRoot, runId), "owner.json");
 }
 
+type CoordinationDirectory =
+  | typeof RUN_EVENTS_DIRECTORY
+  | typeof RUN_INBOX_DIRECTORY;
+
+function coordinationDirectory(
+  stateRoot: string,
+  runId: string,
+  name: CoordinationDirectory,
+  taskKey: string,
+): string {
+  return join(runPath(stateRoot, runId), name, taskKey);
+}
+
+function sequenceDirectory(stateRoot: string, runId: string): string {
+  return join(runPath(stateRoot, runId), RUN_SEQUENCE_DIRECTORY);
+}
+
+function recordId(fileName: string): string {
+  return fileName.slice(0, -RECORD_SUFFIX.length);
+}
+
 function isTimestamp(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -596,34 +745,43 @@ async function acquireRunMutationLock(
   runId: string,
 ): Promise<() => Promise<void>> {
   const path = join(runPath(stateRoot, runId), RUN_MUTATION_LOCK);
-  let created = false;
-  try {
-    await mkdir(path, { mode: DIRECTORY_MODE });
-    created = true;
-    await chmod(path, DIRECTORY_MODE);
-  } catch (error) {
-    if (created) {
-      await rm(path, { recursive: true, force: true }).catch(() => {});
+  const deadline = Date.now() + MUTATION_LOCK_WAIT_MS;
+  for (;;) {
+    let created = false;
+    try {
+      await mkdir(path, { mode: DIRECTORY_MODE });
+      created = true;
+      await chmod(path, DIRECTORY_MODE);
+      return async () => {
+        await rm(path, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if (created) {
+        await rm(path, { recursive: true, force: true }).catch(() => {});
+      }
+      if (errorCode(error) === "EEXIST") {
+        if (Date.now() >= deadline) {
+          throw new RunStoreError(
+            "ownership",
+            `Run ${JSON.stringify(runId)} has a mutation in flight`,
+            path,
+          );
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, MUTATION_LOCK_POLL_MS),
+        );
+        continue;
+      }
+      if (errorCode(error) === "ENOENT") {
+        throw new RunStoreError(
+          "not_found",
+          `Run ${JSON.stringify(runId)} was not found`,
+          path,
+        );
+      }
+      throw error;
     }
-    if (errorCode(error) === "EEXIST") {
-      throw new RunStoreError(
-        "ownership",
-        `Run ${JSON.stringify(runId)} has a mutation in flight`,
-        path,
-      );
-    }
-    if (errorCode(error) === "ENOENT") {
-      throw new RunStoreError(
-        "not_found",
-        `Run ${JSON.stringify(runId)} was not found`,
-        path,
-      );
-    }
-    throw error;
   }
-  return async () => {
-    await rm(path, { recursive: true, force: true });
-  };
 }
 
 async function assertRunOwnership(
@@ -662,6 +820,140 @@ async function assertRunOwnership(
     }
     throw error;
   }
+}
+
+function validStringArray(
+  value: unknown,
+  maximumItemBytes: number,
+): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= RUN_COORDINATION_MAX_ITEMS &&
+    value.every(
+      (item) =>
+        typeof item === "string" &&
+        item.trim().length > 0 &&
+        Buffer.byteLength(item) <= maximumItemBytes,
+    )
+  );
+}
+
+function validateRunEvent(value: unknown, path: string): RunEventRecord {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.kind !== "run-event" ||
+    typeof value.eventId !== "string" ||
+    !COORDINATION_ID_PATTERN.test(value.eventId) ||
+    typeof value.runId !== "string" ||
+    !RUN_ID_PATTERN.test(value.runId) ||
+    typeof value.taskId !== "string" ||
+    value.taskId.length === 0 ||
+    Buffer.byteLength(value.taskId) > RUN_COORDINATION_MAX_TEXT_BYTES ||
+    typeof value.eventKind !== "string" ||
+    !RUN_EVENT_KINDS.has(value.eventKind as RunEventKind) ||
+    !isTimestamp(value.timestamp) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    Buffer.byteLength(value.message) > RUN_COORDINATION_MAX_TEXT_BYTES ||
+    (value.paths !== undefined &&
+      !validStringArray(value.paths, RUN_COORDINATION_MAX_ITEM_BYTES)) ||
+    (value.symbols !== undefined &&
+      !validStringArray(value.symbols, RUN_COORDINATION_MAX_ITEM_BYTES)) ||
+    (value.recipients !== undefined &&
+      !validStringArray(value.recipients, RUN_COORDINATION_MAX_TEXT_BYTES)) ||
+    Object.keys(value).some((field) => !RUN_EVENT_RECORD_FIELDS.has(field))
+  ) {
+    return invalidRecord(path, "run event does not match schema version 1");
+  }
+  return value as unknown as RunEventRecord;
+}
+
+function validateRunMessage(value: unknown, path: string): RunMessageRecord {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.kind !== "run-message" ||
+    typeof value.messageId !== "string" ||
+    !COORDINATION_ID_PATTERN.test(value.messageId) ||
+    typeof value.runId !== "string" ||
+    !RUN_ID_PATTERN.test(value.runId) ||
+    typeof value.senderTaskId !== "string" ||
+    value.senderTaskId.length === 0 ||
+    Buffer.byteLength(value.senderTaskId) > RUN_COORDINATION_MAX_TEXT_BYTES ||
+    typeof value.recipientTaskId !== "string" ||
+    value.recipientTaskId.length === 0 ||
+    Buffer.byteLength(value.recipientTaskId) >
+      RUN_COORDINATION_MAX_TEXT_BYTES ||
+    !isTimestamp(value.timestamp) ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    Buffer.byteLength(value.message) > RUN_COORDINATION_MAX_TEXT_BYTES ||
+    Object.keys(value).some((field) => !RUN_MESSAGE_RECORD_FIELDS.has(field))
+  ) {
+    return invalidRecord(path, "run message does not match schema version 1");
+  }
+  return value as unknown as RunMessageRecord;
+}
+
+function coordinationText(
+  value: unknown,
+  field: string,
+  maximumBytes = RUN_COORDINATION_MAX_TEXT_BYTES,
+): string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    Buffer.byteLength(value) > maximumBytes
+  ) {
+    throw new RunStoreError(
+      "invalid_argument",
+      `Coordination ${field} is invalid or oversized`,
+    );
+  }
+  return value;
+}
+
+function coordinationList(
+  value: unknown,
+  field: string,
+  maximumItemBytes: number,
+): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!validStringArray(value, maximumItemBytes)) {
+    throw new RunStoreError(
+      "invalid_argument",
+      `Coordination ${field} is invalid or oversized`,
+    );
+  }
+  return Object.freeze([...value]);
+}
+
+function coordinationLimit(value: unknown): number {
+  if (value === undefined) return RUN_COORDINATION_MAX_READ;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value <= 0 ||
+    value > RUN_COORDINATION_MAX_READ
+  ) {
+    throw new RunStoreError(
+      "invalid_argument",
+      "Coordination read limit is invalid",
+    );
+  }
+  return value;
+}
+
+function coordinationCursor(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !COORDINATION_ID_PATTERN.test(value)) {
+    throw new RunStoreError(
+      "invalid_argument",
+      "Coordination cursor is invalid",
+    );
+  }
+  return value;
 }
 
 function validateManifest(value: unknown, path: string): RunManifest {
@@ -967,10 +1259,24 @@ export async function createRun<TPayload>(
   let published = false;
   try {
     await mkdir(temporaryRunPath, { mode: DIRECTORY_MODE });
-    await mkdir(join(temporaryRunPath, "nodes"), { mode: DIRECTORY_MODE });
-    await mkdir(join(temporaryRunPath, "outputs"), { mode: DIRECTORY_MODE });
+    for (const directory of [
+      "nodes",
+      "outputs",
+      RUN_EVENTS_DIRECTORY,
+      RUN_INBOX_DIRECTORY,
+      RUN_SEQUENCE_DIRECTORY,
+    ]) {
+      await mkdir(join(temporaryRunPath, directory), { mode: DIRECTORY_MODE });
+    }
     await writeNewFile(join(temporaryRunPath, "run.json"), manifest);
     for (const task of tasks) {
+      // Coordination directories are created with the run, so publishing a
+      // record is only ever one atomic link into an existing directory.
+      for (const directory of [RUN_EVENTS_DIRECTORY, RUN_INBOX_DIRECTORY]) {
+        await mkdir(join(temporaryRunPath, directory, task.key), {
+          mode: DIRECTORY_MODE,
+        });
+      }
       const state: NodeStateRecord = {
         schemaVersion: SCHEMA_VERSION,
         kind: "node-state",
@@ -1316,6 +1622,522 @@ async function publishNodeOutputUnlocked(
   }
   await publishRecord(path, record);
   return record;
+}
+
+function parsePublishRunEvent(value: unknown): PublishRunEvent {
+  try {
+    if (
+      !isRecord(value) ||
+      Object.keys(value).some(
+        (field) =>
+          !new Set([
+            "taskId",
+            "eventKind",
+            "message",
+            "paths",
+            "symbols",
+            "recipients",
+          ]).has(field),
+      )
+    ) {
+      throw new Error("invalid event");
+    }
+    const eventKind = value.eventKind;
+    if (
+      typeof eventKind !== "string" ||
+      !RUN_EVENT_KINDS.has(eventKind as RunEventKind)
+    ) {
+      throw new Error("invalid event kind");
+    }
+    const taskId = coordinationText(value.taskId, "task ID");
+    const message = coordinationText(value.message, "message");
+    const paths = coordinationList(
+      value.paths,
+      "paths",
+      RUN_COORDINATION_MAX_ITEM_BYTES,
+    );
+    const symbols = coordinationList(
+      value.symbols,
+      "symbols",
+      RUN_COORDINATION_MAX_ITEM_BYTES,
+    );
+    const recipients = coordinationList(
+      value.recipients,
+      "recipients",
+      RUN_COORDINATION_MAX_TEXT_BYTES,
+    );
+    return {
+      taskId,
+      eventKind: eventKind as RunEventKind,
+      message,
+      ...(paths === undefined ? {} : { paths }),
+      ...(symbols === undefined ? {} : { symbols }),
+      ...(recipients === undefined ? {} : { recipients }),
+    };
+  } catch {
+    throw new RunStoreError(
+      "invalid_argument",
+      "Run event is invalid or oversized",
+    );
+  }
+}
+
+function parsePublishRunMessage(value: unknown): PublishRunMessage {
+  try {
+    if (
+      !isRecord(value) ||
+      Object.keys(value).some(
+        (field) =>
+          !new Set(["senderTaskId", "recipientTaskId", "message"]).has(field),
+      )
+    ) {
+      throw new Error("invalid message");
+    }
+    return {
+      senderTaskId: coordinationText(value.senderTaskId, "sender task ID"),
+      recipientTaskId: coordinationText(
+        value.recipientTaskId,
+        "recipient task ID",
+      ),
+      message: coordinationText(value.message, "message"),
+    };
+  } catch {
+    throw new RunStoreError(
+      "invalid_argument",
+      "Run message is invalid or oversized",
+    );
+  }
+}
+
+function parseRunEventQuery(value: unknown): RunEventQuery {
+  try {
+    if (value === undefined) return {};
+    if (
+      !isRecord(value) ||
+      Object.keys(value).some(
+        (field) =>
+          !new Set([
+            "cursor",
+            "eventKind",
+            "recipient",
+            "path",
+            "symbol",
+            "limit",
+          ]).has(field),
+      )
+    ) {
+      throw new Error("invalid event query");
+    }
+    const cursor = coordinationCursor(value.cursor);
+    const eventKind = value.eventKind;
+    if (
+      eventKind !== undefined &&
+      (typeof eventKind !== "string" ||
+        !RUN_EVENT_KINDS.has(eventKind as RunEventKind))
+    ) {
+      throw new Error("invalid event kind");
+    }
+    const recipient =
+      value.recipient === undefined
+        ? undefined
+        : coordinationText(value.recipient, "recipient");
+    const path =
+      value.path === undefined
+        ? undefined
+        : coordinationText(value.path, "path", RUN_COORDINATION_MAX_ITEM_BYTES);
+    const symbol =
+      value.symbol === undefined
+        ? undefined
+        : coordinationText(
+            value.symbol,
+            "symbol",
+            RUN_COORDINATION_MAX_ITEM_BYTES,
+          );
+    const limit = coordinationLimit(value.limit);
+    return {
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(eventKind === undefined
+        ? {}
+        : { eventKind: eventKind as RunEventKind }),
+      ...(recipient === undefined ? {} : { recipient }),
+      ...(path === undefined ? {} : { path }),
+      ...(symbol === undefined ? {} : { symbol }),
+      limit,
+    };
+  } catch {
+    throw new RunStoreError("invalid_argument", "Run event query is invalid");
+  }
+}
+
+function parseRunMessageQuery(value: unknown): RunMessageQuery {
+  try {
+    if (value === undefined) return {};
+    if (
+      !isRecord(value) ||
+      Object.keys(value).some(
+        (field) => !new Set(["cursor", "limit"]).has(field),
+      )
+    ) {
+      throw new Error("invalid message query");
+    }
+    const cursor = coordinationCursor(value.cursor);
+    const limit = coordinationLimit(value.limit);
+    return { ...(cursor === undefined ? {} : { cursor }), limit };
+  } catch {
+    throw new RunStoreError("invalid_argument", "Run message query is invalid");
+  }
+}
+
+async function coordinationFiles(
+  directory: string,
+): Promise<readonly string[]> {
+  let entries: readonly import("node:fs").Dirent<string>[];
+  try {
+    entries = await readdir(directory, {
+      withFileTypes: true,
+      encoding: "utf8",
+    });
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      throw new RunStoreError(
+        "not_found",
+        `Coordination directory not found at ${JSON.stringify(directory)}`,
+        directory,
+      );
+    }
+    throw error;
+  }
+  // Identifiers are fixed-width, so sorting the names sorts the sequence.
+  const files = entries
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith(RECORD_SUFFIX) &&
+        COORDINATION_ID_PATTERN.test(recordId(entry.name)),
+    )
+    .map((entry) => entry.name)
+    .sort();
+  if (files.length > RUN_COORDINATION_MAX_RECORDS) {
+    throw new RunStoreError(
+      "record_too_large",
+      `Coordination records exceed the retained limit of ${RUN_COORDINATION_MAX_RECORDS}`,
+      directory,
+    );
+  }
+  return files;
+}
+
+/**
+ * Coordination records are published by workers, which never hold the
+ * orchestrator's ownership capability: that capability authorizes node state
+ * and output mutations for the whole run. Requiring an owner record rather than
+ * the capability itself keeps an unowned or finished run immutable while
+ * leaving worker writes unprivileged.
+ *
+ * Records are therefore attributed to a task rather than authenticated. Every
+ * worker of a run shares this state root, exactly as they share the checkout.
+ */
+async function readActiveRun(
+  stateRoot: string,
+  runId: string,
+): Promise<RunManifest> {
+  const manifest = await readRun(stateRoot, runId);
+  const path = ownerPath(stateRoot, runId);
+  let owner: RunOwnership;
+  try {
+    owner = validateRunOwnership(await readJson(path), path);
+  } catch (error) {
+    if (error instanceof RunStoreError && error.code === "not_found") {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is not owned by an orchestrator`,
+        path,
+      );
+    }
+    throw error;
+  }
+  if (owner.runId !== runId) {
+    invalidRecord(path, "run ownership does not match its run");
+  }
+  return manifest;
+}
+
+/**
+ * Coordination records are ordered by one run-global sequence, so a cursor
+ * names a position that no later record can precede and a reader polling with
+ * one can never skip a record.
+ *
+ * A sequence number is claimed by exclusively creating one file in a single
+ * directory, so concurrent workers are arbitrated by the filesystem rather than
+ * by a lock that a crashed worker could hold forever. The claim is separate
+ * from the record it names: an interrupted publisher strands an unused sequence
+ * number, which leaves a harmless gap, instead of releasing an identifier that
+ * another worker could reuse in a different task's directory.
+ */
+async function claimCoordinationSequence(
+  stateRoot: string,
+  runId: string,
+): Promise<string> {
+  const directory = sequenceDirectory(stateRoot, runId);
+  for (let attempt = 0; attempt < COORDINATION_CLAIM_ATTEMPTS; attempt += 1) {
+    const claims = await coordinationFiles(directory);
+    const previous = claims.at(-1);
+    const sequence =
+      previous === undefined ? 1 : Number.parseInt(recordId(previous), 10) + 1;
+    if (
+      claims.length >= RUN_COORDINATION_MAX_RECORDS ||
+      sequence > MAX_COORDINATION_SEQUENCE
+    ) {
+      throw new RunStoreError(
+        "retention_limit",
+        `Run ${JSON.stringify(runId)} retains the maximum of ${RUN_COORDINATION_MAX_RECORDS} coordination records`,
+        directory,
+      );
+    }
+    const id = String(sequence).padStart(COORDINATION_ID_WIDTH, "0");
+    try {
+      await writeNewFile(join(directory, `${id}${RECORD_SUFFIX}`), {
+        schemaVersion: SCHEMA_VERSION,
+        kind: "coordination-sequence",
+        runId,
+        sequence,
+      });
+      return id;
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+    }
+  }
+  throw new RunStoreError(
+    "record_exists",
+    `Run ${JSON.stringify(runId)} has too many concurrent coordination writers`,
+    directory,
+  );
+}
+
+interface CoordinationEntry {
+  readonly id: string;
+  readonly taskId: string;
+  readonly path: string;
+}
+
+/**
+ * Names every record after `cursor`, in sequence order, without reading any of
+ * them. Filtered records still have to be read, so a page cannot be bounded
+ * here, but a cursor prunes the common polling case to the new records alone.
+ */
+async function coordinationEntries(
+  stateRoot: string,
+  manifest: RunManifest,
+  name: CoordinationDirectory,
+  tasks: readonly RunManifestTask[],
+  cursor: string | undefined,
+): Promise<readonly CoordinationEntry[]> {
+  const entries = await Promise.all(
+    tasks.map(async (task) => {
+      const directory = coordinationDirectory(
+        stateRoot,
+        manifest.runId,
+        name,
+        task.key,
+      );
+      return (await coordinationFiles(directory))
+        .map((file) => ({
+          id: recordId(file),
+          taskId: task.id,
+          path: join(directory, file),
+        }))
+        .filter((entry) => cursor === undefined || entry.id > cursor);
+    }),
+  );
+  return entries.flat().sort((left, right) => left.id.localeCompare(right.id));
+}
+
+interface CoordinationPage<TRecord> {
+  readonly records: readonly TRecord[];
+  readonly nextCursor?: string;
+}
+
+/**
+ * Reads entries in sequence order until the requested count or the page byte
+ * bound is reached, and reports the last included identifier as the cursor for
+ * the rest. A cursor is returned whenever unread entries remain, so a following
+ * page can be empty once filters are applied.
+ */
+async function readCoordinationPage<TRecord>(
+  entries: readonly CoordinationEntry[],
+  limit: number,
+  select: (entry: CoordinationEntry) => Promise<TRecord | undefined>,
+): Promise<CoordinationPage<TRecord>> {
+  const records: TRecord[] = [];
+  let bytes = 0;
+  let cursor: string | undefined;
+  // Reached only with at least one record in the page, so the cursor is always
+  // the identifier of a record the caller has now seen.
+  const truncated = (): CoordinationPage<TRecord> =>
+    cursor === undefined ? { records } : { records, nextCursor: cursor };
+  for (const entry of entries) {
+    if (records.length >= limit) return truncated();
+    const record = await select(entry);
+    if (record === undefined) continue;
+    const size = Buffer.byteLength(JSON.stringify(record));
+    if (records.length > 0 && bytes + size > RUN_COORDINATION_MAX_PAGE_BYTES) {
+      return truncated();
+    }
+    records.push(record);
+    bytes += size;
+    cursor = entry.id;
+  }
+  return { records };
+}
+
+export async function publishRunEvent(
+  stateRoot: string,
+  runId: string,
+  input: PublishRunEvent,
+): Promise<RunEventRecord> {
+  const event = parsePublishRunEvent(input);
+  const manifest = await readActiveRun(stateRoot, runId);
+  const task = findTask(manifest, event.taskId);
+  for (const recipient of event.recipients ?? []) {
+    findTask(manifest, recipient);
+  }
+  const eventId = await claimCoordinationSequence(stateRoot, runId);
+  const record: RunEventRecord = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "run-event",
+    eventId,
+    runId,
+    taskId: task.id,
+    eventKind: event.eventKind,
+    timestamp: new Date().toISOString(),
+    message: event.message,
+    ...(event.paths === undefined ? {} : { paths: event.paths }),
+    ...(event.symbols === undefined ? {} : { symbols: event.symbols }),
+    ...(event.recipients === undefined ? {} : { recipients: event.recipients }),
+  };
+  const directory = coordinationDirectory(
+    stateRoot,
+    runId,
+    RUN_EVENTS_DIRECTORY,
+    task.key,
+  );
+  await publishRecord(join(directory, `${eventId}${RECORD_SUFFIX}`), record);
+  return Object.freeze(record);
+}
+
+export async function readRunEvents(
+  stateRoot: string,
+  runId: string,
+  options?: RunEventQuery,
+): Promise<RunEventQueryResult> {
+  const manifest = await readRun(stateRoot, runId);
+  const query = parseRunEventQuery(options);
+  const entries = await coordinationEntries(
+    stateRoot,
+    manifest,
+    RUN_EVENTS_DIRECTORY,
+    manifest.graph.tasks,
+    query.cursor,
+  );
+  const page = await readCoordinationPage(
+    entries,
+    query.limit ?? RUN_COORDINATION_MAX_READ,
+    async (entry) => {
+      const record = validateRunEvent(await readJson(entry.path), entry.path);
+      if (
+        record.eventId !== entry.id ||
+        record.runId !== manifest.runId ||
+        record.taskId !== entry.taskId
+      ) {
+        return invalidRecord(
+          entry.path,
+          "run event identity does not match its path",
+        );
+      }
+      const matches =
+        (query.eventKind === undefined ||
+          record.eventKind === query.eventKind) &&
+        (query.recipient === undefined ||
+          record.recipients?.includes(query.recipient) === true) &&
+        (query.path === undefined ||
+          record.paths?.includes(query.path) === true) &&
+        (query.symbol === undefined ||
+          record.symbols?.includes(query.symbol) === true);
+      return matches ? record : undefined;
+    },
+  );
+  return page.nextCursor === undefined
+    ? { events: Object.freeze(page.records) }
+    : { events: Object.freeze(page.records), nextCursor: page.nextCursor };
+}
+
+export async function sendRunMessage(
+  stateRoot: string,
+  runId: string,
+  input: PublishRunMessage,
+): Promise<RunMessageRecord> {
+  const message = parsePublishRunMessage(input);
+  const manifest = await readActiveRun(stateRoot, runId);
+  const sender = findTask(manifest, message.senderTaskId);
+  const recipient = findTask(manifest, message.recipientTaskId);
+  const messageId = await claimCoordinationSequence(stateRoot, runId);
+  const record: RunMessageRecord = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "run-message",
+    messageId,
+    runId,
+    senderTaskId: sender.id,
+    recipientTaskId: recipient.id,
+    timestamp: new Date().toISOString(),
+    message: message.message,
+  };
+  const directory = coordinationDirectory(
+    stateRoot,
+    runId,
+    RUN_INBOX_DIRECTORY,
+    recipient.key,
+  );
+  await publishRecord(join(directory, `${messageId}${RECORD_SUFFIX}`), record);
+  return Object.freeze(record);
+}
+
+export async function readRunMessages(
+  stateRoot: string,
+  runId: string,
+  recipientTaskId: string,
+  options?: RunMessageQuery,
+): Promise<RunMessageQueryResult> {
+  const manifest = await readRun(stateRoot, runId);
+  const recipient = findTask(manifest, recipientTaskId);
+  const query = parseRunMessageQuery(options);
+  const entries = await coordinationEntries(
+    stateRoot,
+    manifest,
+    RUN_INBOX_DIRECTORY,
+    [recipient],
+    query.cursor,
+  );
+  const page = await readCoordinationPage(
+    entries,
+    query.limit ?? RUN_COORDINATION_MAX_READ,
+    async (entry) => {
+      const record = validateRunMessage(await readJson(entry.path), entry.path);
+      if (
+        record.messageId !== entry.id ||
+        record.runId !== manifest.runId ||
+        record.recipientTaskId !== entry.taskId
+      ) {
+        return invalidRecord(
+          entry.path,
+          "run message identity does not match its path",
+        );
+      }
+      return record;
+    },
+  );
+  return page.nextCursor === undefined
+    ? { messages: Object.freeze(page.records) }
+    : { messages: Object.freeze(page.records), nextCursor: page.nextCursor };
 }
 
 export async function readNodeOutput(

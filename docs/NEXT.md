@@ -57,6 +57,8 @@ adapter. Automated tests remain provider-free:
   with deterministic arbitration between concurrent creators, no implicit
   deletion, stranded slots reported for explicit removal, and inconsistent
   run/slot state failing closed;
+- immutable bounded run-scoped coordination events and directed inbox messages,
+  with cursor-based queries and child-only Pi tools;
 - a verified npm artifact containing the compiled runtime, loaded from a clean
   temporary install in offline Pi RPC mode;
 - behavioral coverage using `node:test`, fakes, and temporary directories.
@@ -104,10 +106,10 @@ Prepare the vertical slice for a prerelease:
 ## Deferred run-store work
 
 Before a resumable or externally addressable run API is added, retain the
-fail-closed ownership contract so two orchestrators cannot advance one run. Add
-events, inboxes, and retention cleanup only with their consumers; cleanup must
-release a removed run's capacity slot together with its directory. Bounded text
-artifacts can be added with structured-output overflow handling.
+fail-closed ownership contract so two orchestrators cannot advance one run.
+Retention cleanup must release a removed run's capacity slot together with its
+directory. Bounded text artifacts can be added with structured-output overflow
+handling.
 
 ## Constraints to preserve
 

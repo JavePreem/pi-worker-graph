@@ -36,7 +36,12 @@ or cleans. Git may be used read-only for review and diagnostics.
 
 Coordination events live outside the target checkout. Each event is an immutable
 file created atomically, avoiding concurrent mutation of one shared document.
-Runs are isolated from one another.
+Runs are isolated from one another. One run-global sequence orders every record,
+so a cursor is a position a later record cannot precede and a polling worker
+cannot skip a record. Records are published by workers, which never hold the
+orchestrator's ownership capability: publication requires an active owner rather
+than that capability, and is attributed to a task rather than authenticated.
+Both the retained record count per run and one returned page are bounded.
 
 ### D7 — The orchestrator owns acceptance
 

@@ -5,7 +5,7 @@ A small DAG-first worker orchestration runtime for the
 
 `pi-worker-graph` is designed for one orchestrator coordinating multiple writable
 workers in a shared checkout. Dependency edges control scheduling and carry
-bounded structured context; an optional run-scoped journal is planned for facts
+bounded structured context; an optional run-scoped journal carries facts
 discovered while work is in progress.
 
 ## Status
@@ -13,9 +13,10 @@ discovered while work is in progress.
 Early implementation. The package currently provides tested graph primitives,
 a versioned structured worker-report contract, canonical byte-bounded
 prerequisite context, an explicit-root filesystem store, a bounded DAG runner,
-a one-shot Pi subprocess adapter, and an explicitly activated parent
-orchestration tool. The parent tool is inactive by default; worker children
-receive only the final-report tool.
+a one-shot Pi subprocess adapter, immutable run-scoped coordination events and
+inboxes, and an explicitly activated parent orchestration tool. The parent tool
+is inactive by default; worker children receive only the final-report and
+coordination tools.
 
 ## Graph semantics
 
@@ -234,7 +235,6 @@ read-only tools, invoke another narrow graph for any repairs.
 The remaining runtime will add:
 
 - retained report artifacts if explicit truncation is added;
-- additional child-only coordination tools if required after MVP;
 - optional cleanup tooling for retained run state;
 - persisted worker attempts and interrupted-run recovery behavior.
 
