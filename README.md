@@ -160,6 +160,47 @@ phase, allowlisted tool name, and numeric usage. Worker text, tool arguments,
 tool results, and stderr are never included. Progress callbacks are capped and
 cannot alter worker execution if an observer throws.
 
+## Worker coordination
+
+Workers receive four child-only tools for facts discovered after scheduling:
+`worker_graph_event` publishes one bounded coordination fact, optionally
+addressed to named tasks and tagged with paths or symbols;
+`worker_graph_message` sends one directed handoff; `worker_graph_events` and
+`worker_graph_inbox` read them. Nothing is injected automatically — a worker
+reads only what it asks for — and returned records are labeled as untrusted
+worker-authored data.
+
+Every record in a run shares one monotonic sequence, so an identifier is also a
+position: a cursor cannot skip a record published between two reads. Claiming a
+sequence number and storing the record it names are one exclusive create in one
+journal, so no identifier is ever reserved for a record that lands after a
+reader has been handed a cursor past it. A read is bounded by a requested record
+count and by the serialized JSON array size, including its brackets and
+separators. This holds strictly because every record is bounded at 32 KiB when
+published, half of one 64 KiB page; a read returns a cursor for the remainder.
+Both kinds share the journal, so a read also passes over records it is never
+given — the other kind, another task's mail — and its cursor runs past them, so
+polling an inbox costs only the records published since the last call rather
+than the whole journal each time. A cursor therefore belongs to the query that
+produced it, and a page can come back empty with one; a reader stops when no
+cursor is returned.
+Publication synchronizes the active-owner check with ownership release. The
+parent and every worker contend for one run mutation lock, which is claimed by
+linking a record that already names its holder, so contention with a live
+worker is never mistaken for a lock a killed worker left behind: a parent
+mutation waits contention out and recovers a lock only when it names a task of
+its own graph that has already finished. Publication requires the run to have
+an active owner but not the orchestrator's ownership capability, which never
+leaves the parent,
+so workers cannot advance node state or publish another task's output. Records
+are attributed to the publishing task rather than authenticated: workers of one
+run share the state root as they already share the checkout.
+
+A run retains at most 256 coordination records. Publishing past that, or a
+record over its size bound, fails explicitly and the worker continues without
+it; as with retained runs, nothing is deleted automatically, so reclaiming the
+capacity means deleting the run directory and its slot together.
+
 ## Orchestrator tool
 
 The extension reads `worker-graph.json` from Pi's agent directory (normally

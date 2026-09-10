@@ -19,7 +19,10 @@ import {
   normalizeGraph,
   publishNodeOutput,
   publishRunEvent,
+  RUN_COORDINATION_MAX_ITEM_BYTES,
+  RUN_COORDINATION_MAX_ITEMS,
   RUN_COORDINATION_MAX_PAGE_BYTES,
+  RUN_COORDINATION_MAX_RECORD_BYTES,
   RUN_COORDINATION_MAX_RECORDS,
   RUN_COORDINATION_MAX_TEXT_BYTES,
   RUN_STORE_MAX_RECORD_BYTES,
@@ -176,14 +179,24 @@ test("serializes ownership of one run and releases only its owner", async (t) =>
     "ownership",
   );
 
+  // A mutation in flight is contention, reported apart from an ownership
+  // conflict so that a waiting orchestrator does not read it as one.
   const mutationLock = join(root, "runs", manifest.runId, "mutation.lock");
-  await mkdir(mutationLock);
-  await rejectsWithCode(() => releaseRunOwnership(root, owner), "ownership");
+  await writeFile(
+    mutationLock,
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-mutation-lock",
+      runId: manifest.runId,
+      taskId: "task",
+    }),
+  );
+  await rejectsWithCode(() => releaseRunOwnership(root, owner), "locked");
   await rejectsWithCode(
     () => acquireRunOwnership(root, manifest.runId),
-    "ownership",
+    "locked",
   );
-  await rm(mutationLock, { recursive: true });
+  await rm(mutationLock);
 
   await releaseRunOwnership(root, owner);
   const replacement = await acquireRunOwnership(root, manifest.runId);
@@ -359,7 +372,7 @@ test("bounds one coordination page by size and retains the rest", async (t) => {
   assert.ok(page.events.length < published);
   assert.ok(
     Buffer.byteLength(JSON.stringify(page.events)) <=
-      RUN_COORDINATION_MAX_PAGE_BYTES + RUN_COORDINATION_MAX_TEXT_BYTES,
+      RUN_COORDINATION_MAX_PAGE_BYTES,
   );
   const cursor = page.nextCursor;
   assert.equal(cursor, page.events.at(-1)?.eventId);
@@ -367,6 +380,252 @@ test("bounds one coordination page by size and retains the rest", async (t) => {
 
   const rest = await readRunEvents(root, manifest.runId, { cursor });
   assert.equal(page.events.length + rest.events.length, published);
+});
+
+test("counts JSON array overhead in coordination pages", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+  const sample = await publishRunEvent(root, manifest.runId, {
+    taskId: "worker",
+    eventKind: "progress",
+    message: "m".repeat(1000),
+  });
+  // Four records whose contents sum to two bytes below the limit exceed it by
+  // one byte once the array brackets and separators are serialized.
+  const recordOverhead =
+    Buffer.byteLength(JSON.stringify(sample)) - sample.message.length;
+  const messageBytes = RUN_COORDINATION_MAX_PAGE_BYTES - 2 - 4 * recordOverhead;
+  const baseLength = Math.floor(messageBytes / 4);
+  const remainder = messageBytes % 4;
+  const lengths = Array.from(
+    { length: 4 },
+    (_unused, index) => baseLength + (index < remainder ? 1 : 0),
+  );
+  assert.ok(
+    lengths.every((length) => length <= RUN_COORDINATION_MAX_TEXT_BYTES),
+  );
+
+  for (const length of lengths) {
+    await publishRunEvent(root, manifest.runId, {
+      taskId: "worker",
+      eventKind: "progress",
+      message: "m".repeat(length),
+    });
+  }
+
+  const page = await readRunEvents(root, manifest.runId, {
+    cursor: sample.eventId,
+  });
+  assert.equal(page.events.length, 3);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(page.events)) <=
+      RUN_COORDINATION_MAX_PAGE_BYTES,
+  );
+});
+
+test("arbitrates concurrent coordination publishers", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, {
+    tasks: [{ id: "worker" }, { id: "peer" }],
+  });
+
+  const published = await Promise.all(
+    Array.from({ length: 8 }, (_unused, index) =>
+      publishRunEvent(root, manifest.runId, {
+        taskId: index % 2 === 0 ? "worker" : "peer",
+        eventKind: "progress",
+        message: `Fact ${index}.`,
+      }),
+    ),
+  );
+
+  // Every publisher claims its own sequence number, densely and exactly once.
+  assert.deepEqual(published.map((event) => event.eventId).sort(), [
+    "000001",
+    "000002",
+    "000003",
+    "000004",
+    "000005",
+    "000006",
+    "000007",
+    "000008",
+  ]);
+
+  // Paging one record at a time delivers all of them, in sequence order, from
+  // the run-global journal.
+  const delivered: string[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await readRunEvents(root, manifest.runId, {
+      limit: 1,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    delivered.push(...page.events.map((event) => event.message));
+    if (page.nextCursor === undefined) break;
+    cursor = page.nextCursor;
+  }
+  assert.deepEqual(
+    delivered,
+    [...published]
+      .sort((left, right) => left.eventId.localeCompare(right.eventId))
+      .map((event) => event.message),
+  );
+});
+
+test("an inbox poll advances past records it is never given", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, {
+    tasks: [{ id: "other" }, { id: "worker" }],
+  });
+  // Events and another task's mail share the journal with this inbox.
+  for (let index = 0; index < 3; index += 1) {
+    await publishRunEvent(root, manifest.runId, {
+      taskId: "worker",
+      eventKind: "progress",
+      message: `Step ${index}.`,
+    });
+  }
+  const aside = await sendRunMessage(root, manifest.runId, {
+    senderTaskId: "worker",
+    recipientTaskId: "other",
+    message: "Addressed to the other task.",
+  });
+
+  // Nothing is addressed to this worker, but the poll still reports where it
+  // read to, so the next one does not examine the whole journal again.
+  const empty = await readRunMessages(root, manifest.runId, "worker");
+  assert.deepEqual(empty.messages, []);
+  assert.equal(empty.nextCursor, aside.messageId);
+
+  // Polling from that position is idle, and ends rather than repeating.
+  const idle = await readRunMessages(root, manifest.runId, "worker", {
+    cursor: empty.nextCursor,
+  });
+  assert.deepEqual(idle.messages, []);
+  assert.equal(idle.nextCursor, undefined);
+
+  const mail = await sendRunMessage(root, manifest.runId, {
+    senderTaskId: "other",
+    recipientTaskId: "worker",
+    message: "Please consume the shared interface.",
+  });
+  const delivered = await readRunMessages(root, manifest.runId, "worker", {
+    cursor: empty.nextCursor,
+  });
+  assert.deepEqual(
+    delivered.messages.map((record) => record.messageId),
+    [mail.messageId],
+  );
+  assert.equal(delivered.nextCursor, undefined);
+});
+
+test("publishes a coordination record and its identifier as one act", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+  const journal = join(root, "runs", manifest.runId, "coordination");
+  const event = {
+    taskId: "worker",
+    eventKind: "progress",
+    message: "One bounded fact.",
+  } as const;
+  const first = await publishRunEvent(root, manifest.runId, event);
+  assert.equal(first.eventId, "000001");
+
+  // A publisher that fails reserves nothing: no identifier names a record that
+  // a reader could be handed a cursor past before it exists.
+  await rejectsWithCode(
+    () =>
+      publishRunEvent(root, manifest.runId, {
+        ...event,
+        message: "m".repeat(RUN_COORDINATION_MAX_TEXT_BYTES),
+        paths: Array.from({ length: RUN_COORDINATION_MAX_ITEMS }, () =>
+          "p".repeat(RUN_COORDINATION_MAX_ITEM_BYTES),
+        ),
+      }),
+    "record_too_large",
+  );
+  assert.deepEqual(await readdir(journal), ["000001.json"]);
+
+  const second = await publishRunEvent(root, manifest.runId, event);
+  assert.equal(second.eventId, "000002");
+  const page = await readRunEvents(root, manifest.runId, {
+    cursor: first.eventId,
+  });
+  assert.deepEqual(
+    page.events.map((record) => record.eventId),
+    [second.eventId],
+  );
+});
+
+test("bounds one coordination record below one page", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+
+  // Field bounds alone permit a record far larger than a page, so the whole
+  // record is bounded when it is published.
+  await rejectsWithCode(
+    () =>
+      publishRunEvent(root, manifest.runId, {
+        taskId: "worker",
+        eventKind: "interface",
+        message: "One bounded fact.",
+        symbols: Array.from({ length: RUN_COORDINATION_MAX_ITEMS }, () =>
+          "s".repeat(RUN_COORDINATION_MAX_ITEM_BYTES),
+        ),
+      }),
+    "record_too_large",
+  );
+
+  const published = await publishRunEvent(root, manifest.runId, {
+    taskId: "worker",
+    eventKind: "interface",
+    message: "m".repeat(RUN_COORDINATION_MAX_TEXT_BYTES),
+  });
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(published)) <=
+      RUN_COORDINATION_MAX_RECORD_BYTES,
+  );
+
+  // Which is what makes the page bound hold for a page of one record too.
+  const page = await readRunEvents(root, manifest.runId, { limit: 1 });
+  assert.deepEqual(
+    page.events.map((record) => record.eventId),
+    [published.eventId],
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(page.events)) <=
+      RUN_COORDINATION_MAX_PAGE_BYTES,
+  );
+});
+
+test("refuses a coordination record grown past its bound on disk", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest } = await ownedRun(t, root, { tasks: [{ id: "worker" }] });
+  const published = await publishRunEvent(root, manifest.runId, {
+    taskId: "worker",
+    eventKind: "progress",
+    message: "One bounded fact.",
+  });
+  const path = join(
+    root,
+    "runs",
+    manifest.runId,
+    "coordination",
+    `${published.eventId}.json`,
+  );
+  await rm(path);
+  await writeFile(
+    path,
+    `${JSON.stringify({
+      ...published,
+      message: "m".repeat(RUN_COORDINATION_MAX_RECORD_BYTES),
+    })}\n`,
+  );
+
+  await rejectsWithCode(
+    () => readRunEvents(root, manifest.runId),
+    "invalid_record",
+  );
 });
 
 test("refuses coordination beyond the retained record limit", async (t) => {
@@ -1134,29 +1393,20 @@ test("creates run directories and records with restrictive permissions", async (
       0o777,
     0o600,
   );
-  for (const directory of [
-    "events",
-    "inbox",
-    join("events", task.key),
-    join("inbox", task.key),
-    "coordination.seq",
-  ]) {
-    assert.equal(
-      (await stat(join(runDirectory, directory))).mode & 0o777,
-      0o700,
-    );
-  }
+  assert.equal(
+    (await stat(join(runDirectory, "coordination"))).mode & 0o777,
+    0o700,
+  );
   const event = await publishRunEvent(root, manifest.runId, {
     taskId: "task",
     eventKind: "progress",
     message: "Published a coordination fact.",
   });
-  for (const record of [
-    join("events", task.key, `${event.eventId}.json`),
-    join("coordination.seq", `${event.eventId}.json`),
-  ]) {
-    assert.equal((await stat(join(runDirectory, record))).mode & 0o777, 0o600);
-  }
+  assert.equal(
+    (await stat(join(runDirectory, "coordination", `${event.eventId}.json`)))
+      .mode & 0o777,
+    0o600,
+  );
 });
 
 test("rejects non-JSON graph payloads", async (t) => {

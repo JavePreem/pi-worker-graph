@@ -10,6 +10,7 @@ import type {
 } from "./store.js";
 import {
   publishRunEvent,
+  RUN_COORDINATION_ID_LENGTH,
   RUN_COORDINATION_MAX_ITEM_BYTES,
   RUN_COORDINATION_MAX_ITEMS,
   RUN_COORDINATION_MAX_READ,
@@ -27,7 +28,6 @@ export const WORKER_INBOX_TOOL_NAME = "worker_graph_inbox";
 
 const RUN_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const CURSOR_LENGTH = 6;
 const EVENT_KINDS: readonly RunEventKind[] = [
   "decision",
   "interface",
@@ -66,9 +66,9 @@ const coordinationList = (description: string) =>
   });
 const cursorSchema = (tool: string) =>
   Type.String({
-    minLength: CURSOR_LENGTH,
-    maxLength: CURSOR_LENGTH,
-    description: `Cursor returned by a previous ${tool} call. Reads only records published after it.`,
+    minLength: RUN_COORDINATION_ID_LENGTH,
+    maxLength: RUN_COORDINATION_ID_LENGTH,
+    description: `Cursor returned by a previous ${tool} call with the same arguments. Reads only records after it, so polling costs nothing for records already passed over. A page can come back empty with a cursor; stop when no cursor is returned.`,
   });
 const limitSchema = Type.Integer({
   minimum: 1,
@@ -226,6 +226,11 @@ function coordinationFailure(error: unknown): Error {
         "The worker graph is not accepting coordination changes",
       );
     }
+    if (error.code === "locked") {
+      return new Error(
+        "Another worker is publishing to this run; try the call again",
+      );
+    }
     if (error.code === "retention_limit") {
       return new Error(
         "This run holds its maximum number of coordination records; continue without publishing",
@@ -235,7 +240,9 @@ function coordinationFailure(error: unknown): Error {
       return new Error("The requested coordination records were not found");
     }
     if (error.code === "record_too_large") {
-      return new Error("The coordination records exceed the read limit");
+      return new Error(
+        "The coordination record exceeds its size limit; publish a shorter one",
+      );
     }
   }
   return new Error("The coordination operation failed");

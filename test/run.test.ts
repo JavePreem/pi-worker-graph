@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -276,6 +276,124 @@ test("treats reported blockers as failure and retains the report", async (t) => 
   const output = await readNodeOutput(stateRoot, result.runId, "blocked-root");
   assert.equal(output.status, "failed");
   assert.deepEqual(output.output?.blockers, ["Missing API"]);
+});
+
+/** The lock a worker leaves behind when it is killed while publishing. */
+async function abandonMutationLock(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+): Promise<void> {
+  await writeFile(
+    join(stateRoot, "runs", runId, "mutation.lock"),
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-mutation-lock",
+      runId,
+      taskId,
+    }),
+  );
+}
+
+test("recovers a mutation lock left by a task that has finished", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  let runId: string | undefined;
+  const executor: TaskExecutor = async (input) => {
+    runId = input.runId;
+    await abandonMutationLock(stateRoot, input.runId, input.taskId);
+    throw new Error("worker exited while publishing coordination");
+  };
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+  });
+  assert.equal(result.status, "failed");
+  assert.ok(runId !== undefined);
+
+  // The completion was persisted rather than lost to the abandoned lock, and
+  // the lock is gone before ownership is released.
+  assert.equal(
+    (await readNodeState(stateRoot, runId, "task")).status,
+    "failed",
+  );
+  const replacement = await acquireRunOwnership(stateRoot, runId);
+  await releaseRunOwnership(stateRoot, replacement);
+});
+
+test("waits out a mutation lock held by a running worker", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  let releaseHeld: () => void = () => {};
+  const held = new Promise<void>((resolveHeld) => {
+    releaseHeld = resolveHeld;
+  });
+  let lockTaken: () => void = () => {};
+  const taken = new Promise<void>((resolveTaken) => {
+    lockTaken = resolveTaken;
+  });
+  const executor: TaskExecutor = async (input) => {
+    if (input.taskId !== "publisher") {
+      // Completes while the lock is held, so the parent meets contention it
+      // must not mistake for a lock left behind by a worker that has died.
+      await taken;
+      return { output: nodeOutput("Finished first") };
+    }
+    // Stands in for a live worker publishing coordination records for longer
+    // than the store's lock deadline. The lock is taken exclusively, as the
+    // store takes it, so the parent genuinely cannot hold it meanwhile.
+    const lock = join(stateRoot, "runs", input.runId, "mutation.lock");
+    const record = JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-mutation-lock",
+      runId: input.runId,
+      taskId: input.taskId,
+    });
+    for (;;) {
+      try {
+        await writeFile(lock, record, { flag: "wx" });
+        break;
+      } catch {
+        await new Promise((retry) => setTimeout(retry, 5));
+      }
+    }
+    lockTaken();
+    await held;
+    // The lock still names this worker, so the parent never took it away
+    // while the worker that holds it was running.
+    assert.deepEqual(JSON.parse(await readFile(lock, "utf8")), {
+      schemaVersion: 1,
+      kind: "run-mutation-lock",
+      runId: input.runId,
+      taskId: input.taskId,
+    });
+    await rm(lock, { force: true });
+    return { output: nodeOutput("Published") };
+  };
+
+  const run = runGraph({
+    stateRoot,
+    graph: {
+      // "alpha" is scheduled first, so it is already executing when
+      // "publisher" takes the lock and its completion is what contends.
+      tasks: [{ id: "alpha" }, { id: "publisher" }],
+      concurrency: 2,
+    },
+    workingDirectory: stateRoot,
+    executor,
+  });
+  await taken;
+  setTimeout(releaseHeld, 300).unref();
+  const result = await run;
+
+  // Neither task was aborted: the parent waited for the live holder instead of
+  // taking its lock away and stopping the graph.
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(statuses(result), {
+    alpha: "succeeded",
+    publisher: "succeeded",
+  });
 });
 
 test("aborts running and pending work while blocking descendants", async (t) => {

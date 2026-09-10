@@ -170,17 +170,41 @@ outside the MVP.
 
 Every record in a run shares one monotonic sequence, so an identifier is also a
 position: a cursor names a point that no later record can precede, and a worker
-polling with one cannot silently skip a record published between two reads. The
-sequence is allocated by exclusively creating a claim file, so concurrent
-workers are arbitrated by the filesystem rather than by a lock a crashed worker
-could hold. An interrupted publisher leaves an unused number rather than an
-identifier a second worker could reuse.
+polling with one cannot silently skip a record published between two reads. A
+publisher holds the run mutation lock while checking the active owner and
+linking its record, so ownership release cannot land between validation and
+publication. Within the critical section, the record itself is exclusively
+created under the first free identifier; an interrupted publisher leaves no
+identifier behind.
+
+The orchestrator and every worker of a run contend for that one lock, so the
+parent has to tell a lock a live worker holds from one a worker was killed
+while holding. It is not a judgement about elapsed time: the lock is claimed by
+linking a record that is already complete on disk, so it never exists without
+naming its holder, and contention is reported apart from an ownership conflict.
+A parent mutation that meets a lock waits it out, and recovers it only when the
+lock names a task of its own graph whose promise has already settled. Its own
+task the graph runner knows to be finished; a sibling still running is waited
+for rather than interrupted, so ordinary contention no longer costs a graph.
+The runner recovers whatever remains before releasing ownership, once every
+task has settled.
 
 Coordination is bounded on both sides. A run retains a fixed maximum number of
 records, and publishing past it fails explicitly instead of silently degrading
-reads. A read is bounded by a requested record count and by a serialized page
-size, and reports a cursor for the remainder, so one large record cannot enlarge
-a worker's context beyond the page bound.
+reads. One record is bounded as a whole when it is published, at half a page, so
+field bounds cannot combine into a record larger than a page. A read is bounded
+by a requested record count and by the serialized JSON array size, including its
+brackets and separators, and reports a cursor for the remainder, so no record
+can enlarge a worker's context beyond the page bound.
+
+One journal holds both kinds, so a read passes over records it will never
+return: the other kind, and another task's mail. Its cursor runs past those as
+well as past what it delivered, so a polling worker pays for each record once
+rather than re-reading the journal on every call. Only a record examined and
+held back — the one that overflowed the page — stays ahead of the cursor. A
+cursor consequently belongs to the query that produced it; reused under a
+different filter or recipient it starts past records that filter would have
+matched.
 
 Publishing requires the run to have an active owner, but not the owner's
 capability. Workers are the authors of coordination records and never hold the
@@ -205,9 +229,8 @@ Per-run layout:
   nodes/<task-key>.json       parent-owned current node state
   outputs/<task-key>.json     terminal structured output
   artifacts/<task-key>.md     bounded textual output
-  coordination.seq/<id>.json  run-global coordination sequence claims
-  events/<task-key>/<id>.json immutable published events
-  inbox/<task-key>/<id>.json  immutable directed messages
+  coordination/<id>.json      immutable events and directed messages, in one
+                              run-global sequence
   sessions/<task-key>/...     optional child session state
 ```
 

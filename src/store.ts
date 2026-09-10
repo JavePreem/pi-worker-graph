@@ -26,16 +26,28 @@ export const RUN_COORDINATION_MAX_TEXT_BYTES = 16 * 1024;
 /** Bound for one path or symbol, matching the report path bound. */
 export const RUN_COORDINATION_MAX_ITEM_BYTES = 4 * 1024;
 export const RUN_COORDINATION_MAX_ITEMS = 16;
-/** Retained coordination records per run, including unused sequence claims. */
+/** Retained coordination records per run. */
 export const RUN_COORDINATION_MAX_RECORDS = 256;
 /** Bound for one requested coordination page. */
 export const RUN_COORDINATION_MAX_READ = 256;
 /**
- * Serialized bound for one returned coordination page. A page stops at the
- * first record that would exceed it and reports a cursor, so one oversized
- * record cannot enlarge a reader's context beyond this.
+ * Serialized bound for one coordination record, checked when a record is
+ * published and again when it is read, so the field bounds above cannot
+ * combine into a record that alone exceeds a page.
+ */
+export const RUN_COORDINATION_MAX_RECORD_BYTES = 32 * 1024;
+/**
+ * Serialized bound for one returned coordination page. A page stops before the
+ * first record that would exceed it and reports a cursor, and no single record
+ * can reach it, so a returned page never exceeds this.
  */
 export const RUN_COORDINATION_MAX_PAGE_BYTES = 64 * 1024;
+/**
+ * Length of a coordination record identifier, which is also a read cursor.
+ * Identifiers are fixed-width so that sorting them sorts the sequence, and the
+ * child tool schemas bound their cursor parameter with this.
+ */
+export const RUN_COORDINATION_ID_LENGTH = 6;
 
 const MUTATION_LOCK_WAIT_MS = 250;
 const MUTATION_LOCK_POLL_MS = 5;
@@ -49,14 +61,13 @@ const RUN_SLOT_DIRECTORY = "slots";
 const RUN_SLOT_RECORD = "slot.json";
 const RUN_SLOT_PATTERN = /^(0|[1-9][0-9]*)\.json$/;
 const RUN_MUTATION_LOCK = "mutation.lock";
-const RUN_EVENTS_DIRECTORY = "events";
-const RUN_INBOX_DIRECTORY = "inbox";
-const RUN_SEQUENCE_DIRECTORY = "coordination.seq";
+const RUN_COORDINATION_DIRECTORY = "coordination";
 const RECORD_SUFFIX = ".json";
-const COORDINATION_ID_WIDTH = 6;
-const COORDINATION_ID_PATTERN = /^[0-9]{6}$/;
-const MAX_COORDINATION_SEQUENCE = 10 ** COORDINATION_ID_WIDTH - 1;
-const COORDINATION_CLAIM_ATTEMPTS = 16;
+const COORDINATION_ID_PATTERN = new RegExp(
+  `^[0-9]{${RUN_COORDINATION_ID_LENGTH}}$`,
+);
+const MAX_COORDINATION_SEQUENCE = 10 ** RUN_COORDINATION_ID_LENGTH - 1;
+const COORDINATION_PUBLISH_ATTEMPTS = 16;
 const TASK_KEY_PATTERN =
   /^task-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NODE_STATUSES = new Set<NodeStatus>([
@@ -90,6 +101,12 @@ const RUN_OWNER_RECORD_FIELDS = new Set([
   "runId",
   "ownerId",
   "acquiredAt",
+]);
+const RUN_MUTATION_LOCK_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "runId",
+  "taskId",
 ]);
 const RUN_EVENT_RECORD_FIELDS = new Set([
   "schemaVersion",
@@ -138,6 +155,7 @@ export type RunStoreErrorCode =
   | "malformed_record"
   | "invalid_record"
   | "retention_limit"
+  | "locked"
   | "ownership";
 
 export class RunStoreError extends Error {
@@ -509,21 +527,14 @@ function ownerPath(stateRoot: string, runId: string): string {
   return join(runPath(stateRoot, runId), "owner.json");
 }
 
-type CoordinationDirectory =
-  | typeof RUN_EVENTS_DIRECTORY
-  | typeof RUN_INBOX_DIRECTORY;
-
-function coordinationDirectory(
-  stateRoot: string,
-  runId: string,
-  name: CoordinationDirectory,
-  taskKey: string,
-): string {
-  return join(runPath(stateRoot, runId), name, taskKey);
-}
-
-function sequenceDirectory(stateRoot: string, runId: string): string {
-  return join(runPath(stateRoot, runId), RUN_SEQUENCE_DIRECTORY);
+/**
+ * Events and messages of a run share one journal directory, so a single
+ * exclusive create both claims a record's sequence number and stores the
+ * record. The directory is created with the run, so publishing is only ever
+ * one atomic link into an existing directory.
+ */
+function coordinationDirectory(stateRoot: string, runId: string): string {
+  return join(runPath(stateRoot, runId), RUN_COORDINATION_DIRECTORY);
 }
 
 function recordId(fileName: string): string {
@@ -559,12 +570,22 @@ function serializedRecord(value: unknown, recordPath?: string): string {
   return serialized;
 }
 
-async function writeNewFile(path: string, value: unknown): Promise<void> {
+/**
+ * `durable` flushes the record before it is linked into place, which is what
+ * every stored record needs. The mutation lock is the exception: it is not
+ * state to recover, and flushing it would only lengthen the critical section
+ * that the orchestrator and its workers contend for.
+ */
+async function writeNewFile(
+  path: string,
+  value: unknown,
+  durable = true,
+): Promise<void> {
   const contents = serializedRecord(value, path);
   const handle = await open(path, "wx", FILE_MODE);
   try {
     await handle.writeFile(contents, "utf8");
-    await handle.sync();
+    if (durable) await handle.sync();
   } finally {
     await handle.close();
   }
@@ -573,13 +594,14 @@ async function writeNewFile(path: string, value: unknown): Promise<void> {
 async function writeTemporaryFile(
   finalPath: string,
   value: unknown,
+  durable = true,
 ): Promise<string> {
   const temporaryPath = join(
     dirname(finalPath),
     `.${basename(finalPath)}.${randomUUID()}.tmp`,
   );
   try {
-    await writeNewFile(temporaryPath, value);
+    await writeNewFile(temporaryPath, value, durable);
     return temporaryPath;
   } catch (error) {
     await rm(temporaryPath, { force: true });
@@ -596,8 +618,12 @@ async function replaceRecord(path: string, value: unknown): Promise<void> {
   }
 }
 
-async function publishRecord(path: string, value: unknown): Promise<void> {
-  const temporaryPath = await writeTemporaryFile(path, value);
+async function publishRecord(
+  path: string,
+  value: unknown,
+  durable = true,
+): Promise<void> {
+  const temporaryPath = await writeTemporaryFile(path, value, durable);
   try {
     await link(temporaryPath, path);
   } catch (error) {
@@ -701,6 +727,49 @@ function validateRunOwnership(value: unknown, path: string): RunOwnership {
   return { runId: value.runId, ownerId: value.ownerId };
 }
 
+/**
+ * The run mutation lock, which names the holder that took it.
+ *
+ * The orchestrator and every worker of a run contend for one lock, and to a
+ * waiter a lock held by a live publisher is indistinguishable from one left by
+ * a process that was killed while holding it. Naming the holder lets the graph
+ * runner tell the two apart: it recovers a lock whose named task it knows has
+ * finished, and waits out anything else. `taskId` is absent when the
+ * orchestrator holds the lock for one of its own mutations.
+ */
+interface RunMutationLockRecord {
+  readonly schemaVersion: 1;
+  readonly kind: "run-mutation-lock";
+  readonly runId: string;
+  readonly taskId?: string;
+}
+
+function validateRunMutationLock(
+  value: unknown,
+  path: string,
+): RunMutationLockRecord {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.kind !== "run-mutation-lock" ||
+    typeof value.runId !== "string" ||
+    !RUN_ID_PATTERN.test(value.runId) ||
+    (value.taskId !== undefined && typeof value.taskId !== "string") ||
+    Object.keys(value).some((field) => !RUN_MUTATION_LOCK_FIELDS.has(field))
+  ) {
+    return invalidRecord(
+      path,
+      "run mutation lock does not match schema version 1",
+    );
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "run-mutation-lock",
+    runId: value.runId,
+    ...(value.taskId === undefined ? {} : { taskId: value.taskId }),
+  };
+}
+
 function parseOwnershipCapability(value: unknown): RunOwnership {
   try {
     if (!isRecord(value)) throw new Error("invalid ownership capability");
@@ -740,29 +809,40 @@ function parseOwnershipCapability(value: unknown): RunOwnership {
   }
 }
 
+/**
+ * Takes the run mutation lock, naming `taskId` as its holder when a worker
+ * publication takes it rather than the orchestrator.
+ *
+ * The lock is claimed by hard-linking a record that is already complete on
+ * disk, so the lock never exists without naming who holds it and a waiter
+ * always has something to attribute contention to. Waiting out the deadline
+ * fails with `locked`, which is contention and not an ownership conflict: only
+ * a caller that can show the named holder has finished may recover the lock.
+ */
 async function acquireRunMutationLock(
   stateRoot: string,
   runId: string,
+  taskId?: string,
 ): Promise<() => Promise<void>> {
   const path = join(runPath(stateRoot, runId), RUN_MUTATION_LOCK);
+  const record: RunMutationLockRecord = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "run-mutation-lock",
+    runId,
+    ...(taskId === undefined ? {} : { taskId }),
+  };
   const deadline = Date.now() + MUTATION_LOCK_WAIT_MS;
   for (;;) {
-    let created = false;
     try {
-      await mkdir(path, { mode: DIRECTORY_MODE });
-      created = true;
-      await chmod(path, DIRECTORY_MODE);
+      await publishRecord(path, record, false);
       return async () => {
-        await rm(path, { recursive: true, force: true });
+        await rm(path, { force: true });
       };
     } catch (error) {
-      if (created) {
-        await rm(path, { recursive: true, force: true }).catch(() => {});
-      }
-      if (errorCode(error) === "EEXIST") {
+      if (error instanceof RunStoreError && error.code === "record_exists") {
         if (Date.now() >= deadline) {
           throw new RunStoreError(
-            "ownership",
+            "locked",
             `Run ${JSON.stringify(runId)} has a mutation in flight`,
             path,
           );
@@ -1259,24 +1339,11 @@ export async function createRun<TPayload>(
   let published = false;
   try {
     await mkdir(temporaryRunPath, { mode: DIRECTORY_MODE });
-    for (const directory of [
-      "nodes",
-      "outputs",
-      RUN_EVENTS_DIRECTORY,
-      RUN_INBOX_DIRECTORY,
-      RUN_SEQUENCE_DIRECTORY,
-    ]) {
+    for (const directory of ["nodes", "outputs", RUN_COORDINATION_DIRECTORY]) {
       await mkdir(join(temporaryRunPath, directory), { mode: DIRECTORY_MODE });
     }
     await writeNewFile(join(temporaryRunPath, "run.json"), manifest);
     for (const task of tasks) {
-      // Coordination directories are created with the run, so publishing a
-      // record is only ever one atomic link into an existing directory.
-      for (const directory of [RUN_EVENTS_DIRECTORY, RUN_INBOX_DIRECTORY]) {
-        await mkdir(join(temporaryRunPath, directory, task.key), {
-          mode: DIRECTORY_MODE,
-        });
-      }
       const state: NodeStateRecord = {
         schemaVersion: SCHEMA_VERSION,
         kind: "node-state",
@@ -1343,6 +1410,72 @@ export async function acquireRunOwnership(
   } finally {
     await releaseMutationLock();
   }
+}
+
+/**
+ * Removes a mutation lock left behind by a task executor, and reports whether
+ * one was removed. Only the run's owner may recover a lock; ordinary callers
+ * must use the lock release returned by the mutation operation instead.
+ *
+ * `isHolderFinished` decides whether a lock that is still in place is stale.
+ * The graph runner passes it while workers may still be running, and answers
+ * only for a task of this run whose lifecycle has ended, so contention with a
+ * live worker is left alone rather than resolved by taking its lock away. A
+ * lock naming no task, or one this state root cannot attribute, is never
+ * recovered on that path. Omitting the predicate recovers unconditionally and
+ * is correct only once every task promise has settled.
+ */
+export async function recoverRunMutationLock(
+  stateRoot: string,
+  ownership: RunOwnership,
+  isHolderFinished?: (taskId: string) => boolean,
+): Promise<boolean> {
+  const capability = parseOwnershipCapability(ownership);
+  const runId = capability.runId;
+  assertRunId(runId);
+  const owner = ownerPath(stateRoot, runId);
+  try {
+    const record = validateRunOwnership(await readJson(owner), owner);
+    if (record.runId !== runId || record.ownerId !== capability.ownerId) {
+      throw new RunStoreError(
+        "ownership",
+        `Run ${JSON.stringify(runId)} is owned by another orchestrator`,
+        owner,
+      );
+    }
+  } catch (error) {
+    if (error instanceof RunStoreError && error.code === "not_found") {
+      return false;
+    }
+    throw error;
+  }
+  const path = join(runPath(stateRoot, runId), RUN_MUTATION_LOCK);
+  if (isHolderFinished !== undefined) {
+    let holder: RunMutationLockRecord;
+    try {
+      holder = validateRunMutationLock(await readJson(path), path);
+    } catch (error) {
+      // The lock was released while it was being read, so there is nothing to
+      // recover and the caller should simply retry its mutation.
+      if (error instanceof RunStoreError && error.code === "not_found") {
+        return false;
+      }
+      // Anything else in the lock's place is reported as the invalid record it
+      // is, rather than escaping as a bare filesystem error.
+      if (!(error instanceof RunStoreError)) {
+        return invalidRecord(path, "run mutation lock could not be read");
+      }
+      throw error;
+    }
+    if (holder.runId !== runId) {
+      invalidRecord(path, "run mutation lock does not match its run");
+    }
+    if (holder.taskId === undefined || !isHolderFinished(holder.taskId)) {
+      return false;
+    }
+  }
+  await rm(path, { recursive: true, force: true });
+  return true;
 }
 
 export async function releaseRunOwnership(
@@ -1837,11 +1970,36 @@ async function coordinationFiles(
  * Records are therefore attributed to a task rather than authenticated. Every
  * worker of a run shares this state root, exactly as they share the checkout.
  */
-async function readActiveRun(
+async function withActiveRunPublication<T>(
   stateRoot: string,
   runId: string,
-): Promise<RunManifest> {
+  holderTaskId: string,
+  publish: (manifest: RunManifest, holder: RunManifestTask) => Promise<T>,
+): Promise<T> {
+  // The lock names its holder and the graph runner acts on that name, so the
+  // task is resolved against the manifest before it is written and a worker
+  // cannot label its lock with another task. A published run's manifest is
+  // immutable, so it is read once and outside the lock; only the active-owner
+  // check has to be synchronized with ownership release.
   const manifest = await readRun(stateRoot, runId);
+  const holder = findTask(manifest, holderTaskId);
+  const releaseMutationLock = await acquireRunMutationLock(
+    stateRoot,
+    runId,
+    holder.id,
+  );
+  try {
+    await assertActiveRunOwner(stateRoot, runId);
+    return await publish(manifest, holder);
+  } finally {
+    await releaseMutationLock();
+  }
+}
+
+async function assertActiveRunOwner(
+  stateRoot: string,
+  runId: string,
+): Promise<void> {
   const path = ownerPath(stateRoot, runId);
   let owner: RunOwnership;
   try {
@@ -1859,7 +2017,6 @@ async function readActiveRun(
   if (owner.runId !== runId) {
     invalidRecord(path, "run ownership does not match its run");
   }
-  return manifest;
 }
 
 /**
@@ -1867,25 +2024,27 @@ async function readActiveRun(
  * names a position that no later record can precede and a reader polling with
  * one can never skip a record.
  *
- * A sequence number is claimed by exclusively creating one file in a single
- * directory, so concurrent workers are arbitrated by the filesystem rather than
- * by a lock that a crashed worker could hold forever. The claim is separate
- * from the record it names: an interrupted publisher strands an unused sequence
- * number, which leaves a harmless gap, instead of releasing an identifier that
- * another worker could reuse in a different task's directory.
+ * The caller holds the run mutation lock while checking ownership and invoking
+ * this function, so publishers of one run do not race each other. Claiming a
+ * sequence number and publishing the record it names are still one exclusive
+ * create in the journal, so a failed attempt leaves no identifier behind and
+ * a writer that ignored the lock cannot take an identifier already used. The
+ * lock additionally prevents ownership release from landing between the
+ * active-run check and publication.
  */
-async function claimCoordinationSequence(
+async function publishCoordinationRecord<TRecord>(
   stateRoot: string,
   runId: string,
-): Promise<string> {
-  const directory = sequenceDirectory(stateRoot, runId);
-  for (let attempt = 0; attempt < COORDINATION_CLAIM_ATTEMPTS; attempt += 1) {
-    const claims = await coordinationFiles(directory);
-    const previous = claims.at(-1);
+  build: (id: string) => TRecord,
+): Promise<TRecord> {
+  const directory = coordinationDirectory(stateRoot, runId);
+  for (let attempt = 0; attempt < COORDINATION_PUBLISH_ATTEMPTS; attempt += 1) {
+    const published = await coordinationFiles(directory);
+    const previous = published.at(-1);
     const sequence =
       previous === undefined ? 1 : Number.parseInt(recordId(previous), 10) + 1;
     if (
-      claims.length >= RUN_COORDINATION_MAX_RECORDS ||
+      published.length >= RUN_COORDINATION_MAX_RECORDS ||
       sequence > MAX_COORDINATION_SEQUENCE
     ) {
       throw new RunStoreError(
@@ -1894,62 +2053,57 @@ async function claimCoordinationSequence(
         directory,
       );
     }
-    const id = String(sequence).padStart(COORDINATION_ID_WIDTH, "0");
+    const id = String(sequence).padStart(RUN_COORDINATION_ID_LENGTH, "0");
+    const record = build(id);
+    // Bounded as a whole rather than field by field: the guarantee a reader
+    // depends on is that one record always fits in one page.
+    const bytes = Buffer.byteLength(JSON.stringify(record));
+    if (bytes > RUN_COORDINATION_MAX_RECORD_BYTES) {
+      throw new RunStoreError(
+        "record_too_large",
+        `Coordination record of ${bytes} bytes exceeds the bound of ${RUN_COORDINATION_MAX_RECORD_BYTES} bytes`,
+        directory,
+      );
+    }
     try {
-      await writeNewFile(join(directory, `${id}${RECORD_SUFFIX}`), {
-        schemaVersion: SCHEMA_VERSION,
-        kind: "coordination-sequence",
-        runId,
-        sequence,
-      });
-      return id;
+      await publishRecord(join(directory, `${id}${RECORD_SUFFIX}`), record);
+      return record;
     } catch (error) {
-      if (errorCode(error) !== "EEXIST") throw error;
+      if (!(error instanceof RunStoreError) || error.code !== "record_exists") {
+        throw error;
+      }
     }
   }
+  // Publication is serialized by the run mutation lock, so the identifier the
+  // journal reports as free is normally free. Exhausting the attempts means
+  // something outside that lock is writing into the journal.
   throw new RunStoreError(
     "record_exists",
-    `Run ${JSON.stringify(runId)} has too many concurrent coordination writers`,
+    `Run ${JSON.stringify(runId)} could not claim a coordination identifier`,
     directory,
   );
 }
 
 interface CoordinationEntry {
   readonly id: string;
-  readonly taskId: string;
   readonly path: string;
 }
 
 /**
  * Names every record after `cursor`, in sequence order, without reading any of
- * them. Filtered records still have to be read, so a page cannot be bounded
- * here, but a cursor prunes the common polling case to the new records alone.
+ * them. Both kinds share the journal and filtered records still have to be
+ * read, so a page cannot be bounded here, but a cursor prunes the common
+ * polling case to the new records alone.
  */
 async function coordinationEntries(
   stateRoot: string,
-  manifest: RunManifest,
-  name: CoordinationDirectory,
-  tasks: readonly RunManifestTask[],
+  runId: string,
   cursor: string | undefined,
 ): Promise<readonly CoordinationEntry[]> {
-  const entries = await Promise.all(
-    tasks.map(async (task) => {
-      const directory = coordinationDirectory(
-        stateRoot,
-        manifest.runId,
-        name,
-        task.key,
-      );
-      return (await coordinationFiles(directory))
-        .map((file) => ({
-          id: recordId(file),
-          taskId: task.id,
-          path: join(directory, file),
-        }))
-        .filter((entry) => cursor === undefined || entry.id > cursor);
-    }),
-  );
-  return entries.flat().sort((left, right) => left.id.localeCompare(right.id));
+  const directory = coordinationDirectory(stateRoot, runId);
+  return (await coordinationFiles(directory))
+    .map((file) => ({ id: recordId(file), path: join(directory, file) }))
+    .filter((entry) => cursor === undefined || entry.id > cursor);
 }
 
 interface CoordinationPage<TRecord> {
@@ -1959,9 +2113,21 @@ interface CoordinationPage<TRecord> {
 
 /**
  * Reads entries in sequence order until the requested count or the page byte
- * bound is reached, and reports the last included identifier as the cursor for
- * the rest. A cursor is returned whenever unread entries remain, so a following
- * page can be empty once filters are applied.
+ * bound is reached, and reports a cursor for the rest. A following page can be
+ * empty, because a cursor is also returned when what remains behind it is only
+ * entries this reader is never given.
+ *
+ * Both kinds share one journal, so a reader passes over entries it will never
+ * return: the other kind, and another task's mail. Those are behind the cursor
+ * once they have been examined, so a poller reads each of them once rather
+ * than re-reading the whole journal on every call. An entry examined but held
+ * back — the one that overflowed the page — stays ahead of the cursor. A
+ * cursor therefore belongs to the query that produced it: reused under a
+ * different filter or a different recipient, it starts past records that
+ * filter would have matched.
+ *
+ * Every record is bounded when it is published, so a page always has room for
+ * its first record and the byte bound holds without an exception for it.
  */
 async function readCoordinationPage<TRecord>(
   entries: readonly CoordinationEntry[],
@@ -1969,8 +2135,10 @@ async function readCoordinationPage<TRecord>(
   select: (entry: CoordinationEntry) => Promise<TRecord | undefined>,
 ): Promise<CoordinationPage<TRecord>> {
   const records: TRecord[] = [];
+  // Account for the JSON array brackets and separators as well as records.
   let bytes = 0;
   let cursor: string | undefined;
+  let examined: string | undefined;
   // Reached only with at least one record in the page, so the cursor is always
   // the identifier of a record the caller has now seen.
   const truncated = (): CoordinationPage<TRecord> =>
@@ -1978,16 +2146,64 @@ async function readCoordinationPage<TRecord>(
   for (const entry of entries) {
     if (records.length >= limit) return truncated();
     const record = await select(entry);
-    if (record === undefined) continue;
-    const size = Buffer.byteLength(JSON.stringify(record));
-    if (records.length > 0 && bytes + size > RUN_COORDINATION_MAX_PAGE_BYTES) {
-      return truncated();
+    if (record === undefined) {
+      examined = entry.id;
+      continue;
     }
+    const size = Buffer.byteLength(JSON.stringify(record));
+    if (size > RUN_COORDINATION_MAX_RECORD_BYTES) {
+      return invalidRecord(
+        entry.path,
+        "coordination record exceeds its serialized bound",
+      );
+    }
+    const pageBytes = bytes + size + (records.length === 0 ? 2 : 1);
+    if (pageBytes > RUN_COORDINATION_MAX_PAGE_BYTES) return truncated();
     records.push(record);
-    bytes += size;
+    bytes = pageBytes;
     cursor = entry.id;
+    examined = entry.id;
   }
-  return { records };
+  // Nothing was held back, so the position runs to the last entry examined.
+  return examined === undefined || examined === cursor
+    ? { records }
+    : { records, nextCursor: examined };
+}
+
+type CoordinationRecordKind = "run-event" | "run-message";
+
+/**
+ * Both kinds share the journal, so a reader has to look before validating.
+ * Anything else in there is a tampered record, not a record to skip.
+ */
+function coordinationRecordKind(
+  value: unknown,
+  path: string,
+): CoordinationRecordKind {
+  if (
+    !isRecord(value) ||
+    (value.kind !== "run-event" && value.kind !== "run-message")
+  ) {
+    return invalidRecord(
+      path,
+      "coordination record is neither an event nor a message",
+    );
+  }
+  return value.kind;
+}
+
+/**
+ * A record names its own task rather than inheriting one from its path, so a
+ * reader checks that the task is still one of the run's before returning it.
+ */
+function assertCoordinationTask(
+  manifest: RunManifest,
+  taskId: string,
+  path: string,
+): void {
+  if (!manifest.graph.tasks.some((task) => task.id === taskId)) {
+    invalidRecord(path, "coordination record names a task outside its run");
+  }
 }
 
 export async function publishRunEvent(
@@ -1996,33 +2212,36 @@ export async function publishRunEvent(
   input: PublishRunEvent,
 ): Promise<RunEventRecord> {
   const event = parsePublishRunEvent(input);
-  const manifest = await readActiveRun(stateRoot, runId);
-  const task = findTask(manifest, event.taskId);
-  for (const recipient of event.recipients ?? []) {
-    findTask(manifest, recipient);
-  }
-  const eventId = await claimCoordinationSequence(stateRoot, runId);
-  const record: RunEventRecord = {
-    schemaVersion: SCHEMA_VERSION,
-    kind: "run-event",
-    eventId,
-    runId,
-    taskId: task.id,
-    eventKind: event.eventKind,
-    timestamp: new Date().toISOString(),
-    message: event.message,
-    ...(event.paths === undefined ? {} : { paths: event.paths }),
-    ...(event.symbols === undefined ? {} : { symbols: event.symbols }),
-    ...(event.recipients === undefined ? {} : { recipients: event.recipients }),
-  };
-  const directory = coordinationDirectory(
+  return withActiveRunPublication(
     stateRoot,
     runId,
-    RUN_EVENTS_DIRECTORY,
-    task.key,
+    event.taskId,
+    async (manifest, task) => {
+      for (const recipient of event.recipients ?? []) {
+        findTask(manifest, recipient);
+      }
+      const record = await publishCoordinationRecord<RunEventRecord>(
+        stateRoot,
+        runId,
+        (eventId) => ({
+          schemaVersion: SCHEMA_VERSION,
+          kind: "run-event",
+          eventId,
+          runId,
+          taskId: task.id,
+          eventKind: event.eventKind,
+          timestamp: new Date().toISOString(),
+          message: event.message,
+          ...(event.paths === undefined ? {} : { paths: event.paths }),
+          ...(event.symbols === undefined ? {} : { symbols: event.symbols }),
+          ...(event.recipients === undefined
+            ? {}
+            : { recipients: event.recipients }),
+        }),
+      );
+      return Object.freeze(record);
+    },
   );
-  await publishRecord(join(directory, `${eventId}${RECORD_SUFFIX}`), record);
-  return Object.freeze(record);
 }
 
 export async function readRunEvents(
@@ -2034,26 +2253,25 @@ export async function readRunEvents(
   const query = parseRunEventQuery(options);
   const entries = await coordinationEntries(
     stateRoot,
-    manifest,
-    RUN_EVENTS_DIRECTORY,
-    manifest.graph.tasks,
+    manifest.runId,
     query.cursor,
   );
   const page = await readCoordinationPage(
     entries,
     query.limit ?? RUN_COORDINATION_MAX_READ,
     async (entry) => {
-      const record = validateRunEvent(await readJson(entry.path), entry.path);
-      if (
-        record.eventId !== entry.id ||
-        record.runId !== manifest.runId ||
-        record.taskId !== entry.taskId
-      ) {
+      const value = await readJson(entry.path);
+      if (coordinationRecordKind(value, entry.path) !== "run-event") {
+        return undefined;
+      }
+      const record = validateRunEvent(value, entry.path);
+      if (record.eventId !== entry.id || record.runId !== manifest.runId) {
         return invalidRecord(
           entry.path,
           "run event identity does not match its path",
         );
       }
+      assertCoordinationTask(manifest, record.taskId, entry.path);
       const matches =
         (query.eventKind === undefined ||
           record.eventKind === query.eventKind) &&
@@ -2077,28 +2295,29 @@ export async function sendRunMessage(
   input: PublishRunMessage,
 ): Promise<RunMessageRecord> {
   const message = parsePublishRunMessage(input);
-  const manifest = await readActiveRun(stateRoot, runId);
-  const sender = findTask(manifest, message.senderTaskId);
-  const recipient = findTask(manifest, message.recipientTaskId);
-  const messageId = await claimCoordinationSequence(stateRoot, runId);
-  const record: RunMessageRecord = {
-    schemaVersion: SCHEMA_VERSION,
-    kind: "run-message",
-    messageId,
-    runId,
-    senderTaskId: sender.id,
-    recipientTaskId: recipient.id,
-    timestamp: new Date().toISOString(),
-    message: message.message,
-  };
-  const directory = coordinationDirectory(
+  return withActiveRunPublication(
     stateRoot,
     runId,
-    RUN_INBOX_DIRECTORY,
-    recipient.key,
+    message.senderTaskId,
+    async (manifest, sender) => {
+      const recipient = findTask(manifest, message.recipientTaskId);
+      const record = await publishCoordinationRecord<RunMessageRecord>(
+        stateRoot,
+        runId,
+        (messageId) => ({
+          schemaVersion: SCHEMA_VERSION,
+          kind: "run-message",
+          messageId,
+          runId,
+          senderTaskId: sender.id,
+          recipientTaskId: recipient.id,
+          timestamp: new Date().toISOString(),
+          message: message.message,
+        }),
+      );
+      return Object.freeze(record);
+    },
   );
-  await publishRecord(join(directory, `${messageId}${RECORD_SUFFIX}`), record);
-  return Object.freeze(record);
 }
 
 export async function readRunMessages(
@@ -2112,27 +2331,29 @@ export async function readRunMessages(
   const query = parseRunMessageQuery(options);
   const entries = await coordinationEntries(
     stateRoot,
-    manifest,
-    RUN_INBOX_DIRECTORY,
-    [recipient],
+    manifest.runId,
     query.cursor,
   );
   const page = await readCoordinationPage(
     entries,
     query.limit ?? RUN_COORDINATION_MAX_READ,
     async (entry) => {
-      const record = validateRunMessage(await readJson(entry.path), entry.path);
-      if (
-        record.messageId !== entry.id ||
-        record.runId !== manifest.runId ||
-        record.recipientTaskId !== entry.taskId
-      ) {
+      const value = await readJson(entry.path);
+      if (coordinationRecordKind(value, entry.path) !== "run-message") {
+        return undefined;
+      }
+      const record = validateRunMessage(value, entry.path);
+      if (record.messageId !== entry.id || record.runId !== manifest.runId) {
         return invalidRecord(
           entry.path,
           "run message identity does not match its path",
         );
       }
-      return record;
+      assertCoordinationTask(manifest, record.senderTaskId, entry.path);
+      assertCoordinationTask(manifest, record.recipientTaskId, entry.path);
+      // An inbox is bound to the reading worker, so a record addressed to
+      // another task is skipped rather than refused.
+      return record.recipientTaskId === recipient.id ? record : undefined;
     },
   );
   return page.nextCursor === undefined

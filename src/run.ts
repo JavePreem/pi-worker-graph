@@ -28,12 +28,22 @@ import {
   publishNodeOutput,
   RUN_STORE_DEFAULT_MAX_RUNS,
   RUN_STORE_MAX_RUNS,
+  RunStoreError,
   readNodeOutput,
   readNodeState,
   readRun,
+  recoverRunMutationLock,
   releaseRunOwnership,
   writeNodeState,
 } from "./store.js";
+
+/**
+ * Attempts the parent makes at one store mutation when the run mutation lock
+ * is busy. Workers take the same lock to publish coordination records, so a
+ * parent mutation has to outlast ordinary contention; each attempt waits out
+ * the store's own lock deadline before giving up.
+ */
+const MUTATION_LOCK_ATTEMPTS = 4;
 
 export const RUN_GRAPH_LIMITS = Object.freeze({
   maxTasks: 32,
@@ -446,12 +456,50 @@ async function prerequisiteOutputs(
   );
 }
 
+/**
+ * Runs one parent-owned store mutation against a lock that workers also take
+ * to publish coordination records.
+ *
+ * A worker can be killed between acquiring the run mutation lock and releasing
+ * it, and to the parent that lock is indistinguishable from one a live sibling
+ * holds for an ordinary publication. The lock names its holder, so a lock left
+ * by a task whose promise has already settled is recovered and the mutation
+ * retried, while contention with a running sibling is waited out instead of
+ * failing the graph. Each mutation is guarded on its own: an immutable record
+ * that was already published must never be republished by a retry.
+ */
+type MutationGuard = <T>(mutate: () => Promise<T>) => Promise<T>;
+
+function createMutationGuard(
+  stateRoot: string,
+  ownership: RunOwnership,
+  isHolderFinished: (taskId: string) => boolean,
+): MutationGuard {
+  return async (mutate) => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await mutate();
+      } catch (error) {
+        if (
+          !(error instanceof RunStoreError) ||
+          error.code !== "locked" ||
+          attempt >= MUTATION_LOCK_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await recoverRunMutationLock(stateRoot, ownership, isHolderFinished);
+      }
+    }
+  };
+}
+
 async function settlePersistedBlocked(
   stateRoot: string,
   runId: string,
   graph: NormalizedGraph<JsonValue>,
   state: GraphState,
   ownership: RunOwnership,
+  guard: MutationGuard,
 ): Promise<GraphState> {
   const settled = settleBlocked(graph, state);
   for (const task of graph.tasks) {
@@ -459,7 +507,9 @@ async function settlePersistedBlocked(
       state.get(task.id) === "pending" &&
       settled.get(task.id) === "blocked"
     ) {
-      await writeNodeState(stateRoot, runId, task.id, "blocked", ownership);
+      await guard(() =>
+        writeNodeState(stateRoot, runId, task.id, "blocked", ownership),
+      );
     }
   }
   return settled;
@@ -470,10 +520,9 @@ async function persistCompletion(
   runId: string,
   completion: SettledTask,
   ownership: RunOwnership,
+  guard: MutationGuard,
 ): Promise<void> {
-  await publishNodeOutput(
-    stateRoot,
-    runId,
+  const output =
     completion.status === "succeeded"
       ? {
           taskId: completion.taskId,
@@ -500,15 +549,18 @@ async function persistCompletion(
             ...(completion.diagnostics === undefined
               ? {}
               : { diagnostics: completion.diagnostics }),
-          },
-    ownership,
-  );
-  await writeNodeState(
-    stateRoot,
-    runId,
-    completion.taskId,
-    completion.status,
-    ownership,
+          };
+  // Contention is detected before either record is written, so a guarded
+  // retry never republishes an immutable output it already stored.
+  await guard(() => publishNodeOutput(stateRoot, runId, output, ownership));
+  await guard(() =>
+    writeNodeState(
+      stateRoot,
+      runId,
+      completion.taskId,
+      completion.status,
+      ownership,
+    ),
   );
 }
 
@@ -518,6 +570,7 @@ async function abortPending(
   graph: NormalizedGraph<JsonValue>,
   initialState: GraphState,
   ownership: RunOwnership,
+  guard: MutationGuard,
 ): Promise<GraphState> {
   let state = await settlePersistedBlocked(
     stateRoot,
@@ -525,6 +578,7 @@ async function abortPending(
     graph,
     initialState,
     ownership,
+    guard,
   );
   while (!isGraphComplete(graph, state)) {
     const ready = readyFrontier(graph, state);
@@ -541,6 +595,7 @@ async function abortPending(
           diagnostics: "Graph run was aborted before task execution",
         },
         ownership,
+        guard,
       );
       state = setNodeStatus(graph, state, taskId, "aborted");
     }
@@ -550,9 +605,39 @@ async function abortPending(
       graph,
       state,
       ownership,
+      guard,
     );
   }
   return state;
+}
+
+/**
+ * Ends the parent's hold on a run once every task has settled, and reports the
+ * first failure rather than throwing.
+ *
+ * Ownership is released even when the mutation lock could not be recovered
+ * first: a run left owned admits no further work at all. In practice both
+ * steps fail together, because each reads the same owner record and the
+ * release takes the lock the recovery was meant to clear — so this orders the
+ * attempts and picks the more informative failure rather than rescuing a run
+ * whose state has already diverged.
+ */
+async function releaseRunHold(
+  stateRoot: string,
+  ownership: RunOwnership,
+): Promise<unknown> {
+  let failure: unknown;
+  try {
+    await recoverRunMutationLock(stateRoot, ownership);
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await releaseRunOwnership(stateRoot, ownership);
+  } catch (error) {
+    failure ??= error;
+  }
+  return failure;
 }
 
 function aggregateStatus(nodes: readonly NodeStateRecord[]): GraphRunStatus {
@@ -599,6 +684,17 @@ export async function runGraph<TPayload>(
   const signal = runController.signal;
   const running = new Map<string, Promise<SettledTask>>();
   let state = createInitialState(persistedGraph);
+  let result: GraphRunResult;
+  let cleanupFailure: unknown;
+  const underMutationLock = createMutationGuard(
+    options.stateRoot,
+    ownership,
+    // Answered only for a task of this graph that is no longer running, so a
+    // lock a live worker still holds is waited out rather than taken away.
+    (taskId) =>
+      !running.has(taskId) &&
+      persistedGraph.tasks.some((task) => task.id === taskId),
+  );
 
   try {
     while (!isGraphComplete(persistedGraph, state)) {
@@ -630,12 +726,14 @@ export async function runGraph<TPayload>(
             contextTooLarge = true;
           }
 
-          await writeNodeState(
-            options.stateRoot,
-            manifest.runId,
-            taskId,
-            "running",
-            ownership,
+          await underMutationLock(() =>
+            writeNodeState(
+              options.stateRoot,
+              manifest.runId,
+              taskId,
+              "running",
+              ownership,
+            ),
           );
           state = setNodeStatus(persistedGraph, state, taskId, "running");
           running.set(
@@ -679,6 +777,7 @@ export async function runGraph<TPayload>(
             persistedGraph,
             state,
             ownership,
+            underMutationLock,
           );
           break;
         }
@@ -688,6 +787,7 @@ export async function runGraph<TPayload>(
           persistedGraph,
           state,
           ownership,
+          underMutationLock,
         );
         if (!isGraphComplete(persistedGraph, state)) {
           throw new Error("Graph made no scheduling progress");
@@ -702,6 +802,7 @@ export async function runGraph<TPayload>(
         manifest.runId,
         completion,
         ownership,
+        underMutationLock,
       );
       state = setNodeStatus(
         persistedGraph,
@@ -715,6 +816,7 @@ export async function runGraph<TPayload>(
         persistedGraph,
         state,
         ownership,
+        underMutationLock,
       );
     }
     const nodes = await Promise.all(
@@ -722,7 +824,7 @@ export async function runGraph<TPayload>(
         readNodeState(options.stateRoot, manifest.runId, task.id),
       ),
     );
-    return {
+    result = {
       runId: manifest.runId,
       status: aggregateStatus(nodes),
       nodes,
@@ -733,6 +835,11 @@ export async function runGraph<TPayload>(
     throw error;
   } finally {
     options.signal?.removeEventListener("abort", abortRun);
-    await releaseRunOwnership(options.stateRoot, ownership);
+    cleanupFailure = await releaseRunHold(options.stateRoot, ownership);
   }
+  // Reached only when the run itself succeeded, because the catch above always
+  // rethrows. Cleanup therefore never replaces the error that ended a run,
+  // which says far more than a failure to tidy up after it.
+  if (cleanupFailure !== undefined) throw cleanupFailure;
+  return result;
 }
