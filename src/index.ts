@@ -64,6 +64,7 @@ export type {
   PublishNodeOutput,
   PublishRunEvent,
   PublishRunMessage,
+  RetainedRun,
   RunEventKind,
   RunEventQuery,
   RunEventQueryResult,
@@ -79,6 +80,8 @@ export type {
 export {
   acquireRunOwnership,
   createRun,
+  deleteRun,
+  listRetainedRuns,
   publishNodeOutput,
   publishRunEvent,
   RUN_COORDINATION_MAX_ITEM_BYTES,

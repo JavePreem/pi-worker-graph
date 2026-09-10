@@ -238,12 +238,17 @@ Reaching the limit rejects the new graph; run state is never deleted
 automatically.
 
 A creation interrupted between claiming its slot and publishing its run leaves
-the slot claimed. The rejection names how many slots belong to runs that were
-never published; deleting those slot files releases the capacity. Delete a run
-directory and its slot together: a published run whose slot is missing means the
-two disagree, and the store then admits no new work at all — rather than letting
-every waiting creator claim the same apparently free capacity — until they
-agree again.
+the slot claimed. `listRetainedRuns()` names everything holding capacity — each
+run with its slot and creation time, a slot whose run was never published, and
+a run whose slot is missing — and `deleteRun()` removes a named run's directory
+and its slot together. Cleanup is by name: nothing decides on the operator's
+behalf which diagnostic state is worth losing, so there is no deletion by age
+or by count. A run an orchestrator holds is refused. The directory goes first
+and the slot second, so an interruption strands a slot the store reports as
+reclaimable rather than leaving a published run whose slot is missing: that
+disagreement stops the store admitting any new work at all — rather than
+letting every waiting creator claim the same apparently free capacity — until
+the two agree again.
 
 Load the package and activate orchestration explicitly:
 

@@ -57,6 +57,9 @@ adapter. Automated tests remain provider-free:
   with deterministic arbitration between concurrent creators, no implicit
   deletion, stranded slots reported for explicit removal, and inconsistent
   run/slot state failing closed;
+- explicit retention cleanup: a listing of everything holding capacity, and
+  deletion of a named run with its slot, refused while an orchestrator holds
+  the run and ordered so an interruption can only strand a slot;
 - immutable bounded run-scoped coordination events and directed inbox messages,
   in one run-global journal, with cursor-based queries and child-only Pi tools;
 - a run mutation lock that names its holder, so contention between the parent
@@ -104,8 +107,8 @@ Prepare the vertical slice for a prerelease:
    intentionally skipped for the current local pass.
 2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
    and registry workflow.
-3. Decide whether the first prerelease needs explicit run-state cleanup tooling;
-   the current hard cap is safe but requires manual cleanup when full.
+3. Decide whether cleanup needs a surface inside Pi — a `/swarm` control command
+   or a parent tool — or whether the store API is enough for the prerelease.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
@@ -114,9 +117,8 @@ Prepare the vertical slice for a prerelease:
 Before a resumable or externally addressable run API is added, retain the
 fail-closed ownership contract so two orchestrators cannot advance one run, and
 the rule that a mutation lock is recovered only by a holder that can be shown
-to have finished. Retention cleanup must release a removed run's capacity slot
-together with its directory. Bounded text artifacts can be added with
-structured-output overflow handling.
+to have finished. Bounded text artifacts can be added with structured-output
+overflow handling, and their retained files must be removed with the run.
 
 ## Constraints to preserve
 

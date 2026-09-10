@@ -189,6 +189,26 @@ export interface RunManifest {
 }
 
 /**
+ * One unit of retained capacity, as `listRetainedRuns` reports it.
+ *
+ * A healthy run has both a directory and a slot. The two can disagree, and the
+ * listing names those cases rather than hiding them: a slot with no run
+ * directory is capacity an interrupted creation stranded, and a run directory
+ * with no slot is the disagreement that stops the store admitting any work at
+ * all. `deleteRun` resolves either by name.
+ */
+export interface RetainedRun {
+  /** Absent only for a slot whose record names no readable run. */
+  readonly runId?: string;
+  /** Absent when a published run holds no capacity slot. */
+  readonly slot?: number;
+  /** Absent when no run directory was published, or none can be read. */
+  readonly createdAt?: string;
+  /** An orchestrator holds this run, so `deleteRun` refuses to remove it. */
+  readonly owned: boolean;
+}
+
+/**
  * Exclusive ownership of one run's mutable lifecycle.
  *
  * The owner ID is an opaque capability held by the process that acquired the
@@ -383,7 +403,15 @@ async function slotOwner(path: string): Promise<string | undefined> {
 }
 
 async function readSlotClaims(slots: string): Promise<readonly SlotClaim[]> {
-  const entries = await readdir(slots, { withFileTypes: true });
+  let entries: readonly import("node:fs").Dirent<string>[];
+  try {
+    entries = await readdir(slots, { withFileTypes: true, encoding: "utf8" });
+  } catch (error) {
+    // No directory is no claims. A creator makes it before reading, so this
+    // is only reached by a reader looking at a store that holds no capacity.
+    if (errorCode(error) === "ENOENT") return [];
+    throw error;
+  }
   return Promise.all(
     entries
       .filter((entry) => entry.isFile() && RUN_SLOT_PATTERN.test(entry.name))
@@ -1410,6 +1438,160 @@ export async function acquireRunOwnership(
   } finally {
     await releaseMutationLock();
   }
+}
+
+/**
+ * Names every run and every capacity slot the store retains.
+ *
+ * Cleanup is explicit and by name, so an operator has to be able to see what
+ * holds capacity before choosing what to give up. Reads are per run, which is
+ * why this is a maintenance call and not something the run lifecycle uses.
+ */
+export async function listRetainedRuns(
+  stateRoot: string,
+): Promise<readonly RetainedRun[]> {
+  const runs = runsPath(stateRoot);
+  let published: ReadonlySet<string>;
+  try {
+    published = await publishedRunIds(runs);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return [];
+    throw error;
+  }
+  const claims = await readSlotClaims(join(runs, RUN_SLOT_DIRECTORY));
+  const slotted = new Set(claims.flatMap((claim) => claim.owner ?? []));
+  const entries = await Promise.all([
+    ...claims.map((claim) => retainedRun(stateRoot, claim.owner, claim.index)),
+    ...[...published]
+      .filter((runId) => !slotted.has(runId))
+      .map((runId) => retainedRun(stateRoot, runId, undefined)),
+  ]);
+  // Oldest first, so the entries an operator is most likely to give up come
+  // first; entries with no run directory sort last, by slot.
+  return Object.freeze(
+    entries.sort(
+      (left, right) =>
+        (left.createdAt ?? "\uffff").localeCompare(
+          right.createdAt ?? "\uffff",
+        ) ||
+        (left.runId ?? "").localeCompare(right.runId ?? "") ||
+        (left.slot ?? 0) - (right.slot ?? 0),
+    ),
+  );
+}
+
+async function retainedRun(
+  stateRoot: string,
+  runId: string | undefined,
+  slot: number | undefined,
+): Promise<RetainedRun> {
+  if (runId === undefined)
+    return { owned: false, ...(slot === undefined ? {} : { slot }) };
+  let createdAt: string | undefined;
+  try {
+    createdAt = (await readRun(stateRoot, runId)).createdAt;
+  } catch (error) {
+    // This listing is what an operator reads when the store is already in
+    // trouble, so one run it cannot read must not hide the rest. The entry
+    // still names the run, which is all `deleteRun` needs. A slot naming a run
+    // that was never published, or one already removed, reads the same way.
+    if (!(error instanceof RunStoreError)) throw error;
+  }
+  return {
+    runId,
+    ...(slot === undefined ? {} : { slot }),
+    ...(createdAt === undefined ? {} : { createdAt }),
+    // Read the way `deleteRun` reads it, so the listing never reports a run as
+    // free that deletion then refuses.
+    owned: await runHasOwner(stateRoot, runId),
+  };
+}
+
+/**
+ * Only a missing owner record proves a run is unowned. Anything else in its
+ * place is treated as an owner, so cleanup fails closed rather than deleting
+ * state an orchestrator may still be writing.
+ */
+async function runHasOwner(stateRoot: string, runId: string): Promise<boolean> {
+  try {
+    await readJson(ownerPath(stateRoot, runId));
+  } catch (error) {
+    return !(error instanceof RunStoreError && error.code === "not_found");
+  }
+  return true;
+}
+
+async function findRunSlot(
+  slots: string,
+  runId: string,
+): Promise<string | undefined> {
+  let entries: readonly import("node:fs").Dirent<string>[];
+  try {
+    entries = await readdir(slots, { withFileTypes: true, encoding: "utf8" });
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !RUN_SLOT_PATTERN.test(entry.name)) continue;
+    const path = join(slots, entry.name);
+    if ((await slotOwner(path)) === runId) return path;
+  }
+  return undefined;
+}
+
+/**
+ * Removes one run's directory and its capacity slot, and reports whether
+ * anything was there to remove.
+ *
+ * The run is named rather than selected by age or count: nothing here may
+ * decide on an operator's behalf which diagnostic state is worth losing. A run
+ * an orchestrator still holds is refused, and the mutation lock is held across
+ * that check so ownership cannot be acquired between it and the removal.
+ *
+ * The directory goes first and the slot second. An interruption then strands a
+ * slot, which the store already reports as reclaimable capacity, instead of
+ * leaving a published run whose slot is missing — the disagreement that stops
+ * the store admitting any work at all.
+ */
+export async function deleteRun(
+  stateRoot: string,
+  runId: string,
+): Promise<boolean> {
+  assertRunId(runId);
+  const runs = runsPath(stateRoot);
+  const slot = await findRunSlot(join(runs, RUN_SLOT_DIRECTORY), runId);
+  let removed = false;
+  let releaseMutationLock: (() => Promise<void>) | undefined;
+  try {
+    releaseMutationLock = await acquireRunMutationLock(stateRoot, runId);
+  } catch (error) {
+    // With no run directory there is only a stranded slot left to release.
+    if (!(error instanceof RunStoreError) || error.code !== "not_found") {
+      throw error;
+    }
+  }
+  if (releaseMutationLock !== undefined) {
+    try {
+      if (await runHasOwner(stateRoot, runId)) {
+        throw new RunStoreError(
+          "ownership",
+          `Run ${JSON.stringify(runId)} is owned by an orchestrator`,
+          ownerPath(stateRoot, runId),
+        );
+      }
+      await rm(join(runs, runId), { recursive: true, force: true });
+      removed = true;
+    } finally {
+      // The lock lived inside the directory, so this is now a no-op.
+      await releaseMutationLock();
+    }
+  }
+  if (slot !== undefined) {
+    await releaseRunSlot(slot, runId);
+    removed = true;
+  }
+  return removed;
 }
 
 /**

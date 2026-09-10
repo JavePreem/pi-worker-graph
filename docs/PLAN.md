@@ -59,7 +59,7 @@ Implement run-scoped persistence outside the target checkout:
 - [x] bounded reads with explicit malformed and overflow errors;
 - [x] bounded retained-run count with atomic capacity reservation;
 - [ ] explicit text truncation and retained artifact references;
-- [ ] cleanup by age and terminal status.
+- [x] explicit cleanup of a named run with its capacity slot.
 
 Acceptance tests:
 
@@ -67,6 +67,8 @@ Acceptance tests:
 - interrupted temporary writes are ignored safely;
 - malformed records fail visibly without hiding valid records;
 - runs cannot be mixed accidentally;
+- deleting a run releases its capacity slot and readmits work;
+- a run an orchestrator holds is never deleted;
 - task IDs cannot escape their run directory;
 - the default state root is outside the target checkout.
 

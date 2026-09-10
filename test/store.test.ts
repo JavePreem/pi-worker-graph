@@ -16,6 +16,8 @@ import type { NodeOutput, RunStoreErrorCode } from "../src/index.js";
 import {
   acquireRunOwnership,
   createRun,
+  deleteRun,
+  listRetainedRuns,
   normalizeGraph,
   publishNodeOutput,
   publishRunEvent,
@@ -644,6 +646,122 @@ test("refuses coordination beyond the retained record limit", async (t) => {
     () => publishRunEvent(root, manifest.runId, event),
     "retention_limit",
   );
+});
+
+test("lists retained capacity oldest first with slots and ownership", async (t) => {
+  const root = await temporaryStateRoot(t);
+  assert.deepEqual(await listRetainedRuns(root), []);
+
+  const first = await createRun(root, normalizeGraph({ tasks: [{ id: "a" }] }));
+  const second = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "b" }] }),
+  );
+  const ownership = await acquireRunOwnership(root, second.runId);
+
+  const listed = await listRetainedRuns(root);
+  assert.deepEqual(
+    listed.map((entry) => ({
+      runId: entry.runId,
+      slot: entry.slot,
+      owned: entry.owned,
+    })),
+    [
+      { runId: first.runId, slot: 0, owned: false },
+      { runId: second.runId, slot: 1, owned: true },
+    ],
+  );
+  assert.equal(listed[0]?.createdAt, first.createdAt);
+  await releaseRunOwnership(root, ownership);
+});
+
+test("deletes a run with its capacity slot and readmits work", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const kept = await createRun(root, normalizeGraph({ tasks: [{ id: "a" }] }));
+  const removed = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "b" }] }),
+    2,
+  );
+
+  assert.equal(await deleteRun(root, removed.runId), true);
+  // Nothing is left of the run, and its capacity is free again rather than
+  // stranded: run directories and slots still agree, so the store admits work.
+  await rejectsWithCode(() => readRun(root, removed.runId), "not_found");
+  assert.deepEqual(
+    (await listRetainedRuns(root)).map((entry) => entry.runId),
+    [kept.runId],
+  );
+  const replacement = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "c" }] }),
+    2,
+  );
+  assert.notEqual(replacement.runId, removed.runId);
+
+  // Deleting is idempotent, and never invents a run to delete.
+  assert.equal(await deleteRun(root, removed.runId), false);
+  await rejectsWithCode(
+    () => deleteRun(root, "not-a-run-id"),
+    "invalid_identifier",
+  );
+});
+
+test("lists a run it cannot read instead of hiding every other run", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const broken = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "a" }] }),
+  );
+  const intact = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "b" }] }),
+  );
+  await writeFile(join(root, "runs", broken.runId, "run.json"), "{ not json");
+
+  // This listing is read when the store is already in trouble, so one
+  // unreadable run must not defeat it. The entry still names the run.
+  assert.deepEqual(await listRetainedRuns(root), [
+    { runId: intact.runId, slot: 1, createdAt: intact.createdAt, owned: false },
+    { runId: broken.runId, slot: 0, owned: false },
+  ]);
+  assert.equal(await deleteRun(root, broken.runId), true);
+  assert.deepEqual(
+    (await listRetainedRuns(root)).map((entry) => entry.runId),
+    [intact.runId],
+  );
+});
+
+test("refuses to delete a run an orchestrator still holds", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  const ownership = await acquireRunOwnership(root, manifest.runId);
+
+  await rejectsWithCode(() => deleteRun(root, manifest.runId), "ownership");
+  assert.deepEqual(await readRun(root, manifest.runId), manifest);
+
+  await releaseRunOwnership(root, ownership);
+  assert.equal(await deleteRun(root, manifest.runId), true);
+});
+
+test("releases a slot stranded by an interrupted creation", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  // An interrupted creation leaves the slot without its run directory, which
+  // holds capacity that only an explicit deletion may reclaim.
+  await rm(join(root, "runs", manifest.runId), { recursive: true });
+
+  assert.deepEqual(await listRetainedRuns(root), [
+    { runId: manifest.runId, slot: 0, owned: false },
+  ]);
+  assert.equal(await deleteRun(root, manifest.runId), true);
+  assert.deepEqual(await listRetainedRuns(root), []);
 });
 
 test("refuses new runs at the retained-state limit", async (t) => {
