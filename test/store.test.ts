@@ -18,6 +18,7 @@ import {
   createRun,
   deleteRun,
   listRetainedRuns,
+  NODE_OUTPUT_LIMITS,
   normalizeGraph,
   publishNodeOutput,
   publishRunEvent,
@@ -29,6 +30,7 @@ import {
   RUN_COORDINATION_MAX_TEXT_BYTES,
   RUN_STORE_MAX_RECORD_BYTES,
   RunStoreError,
+  readNodeArtifact,
   readNodeOutput,
   readNodeState,
   readRun,
@@ -1490,6 +1492,10 @@ test("creates run directories and records with restrictive permissions", async (
   const runDirectory = join(root, "runs", manifest.runId);
 
   assert.equal((await stat(join(root, "runs"))).mode & 0o777, 0o700);
+  assert.equal(
+    (await stat(join(runDirectory, "artifacts"))).mode & 0o777,
+    0o700,
+  );
   assert.equal((await stat(join(root, "runs", "slots"))).mode & 0o777, 0o700);
   assert.equal(
     (await stat(join(root, "runs", "slots", "0.json"))).mode & 0o777,
@@ -1550,5 +1556,388 @@ test("rejects non-JSON graph payloads", async (t) => {
   await rejectsWithCode(
     () => createRun(root, customArrayGraph),
     "invalid_argument",
+  );
+});
+
+test("retains one bounded text artifact beside a node output", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await writeNodeState(root, manifest.runId, "task", "running", ownership);
+  const text = "# Findings\n\nThe long form of the report.\n";
+
+  const published = await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "task",
+      status: "succeeded",
+      output: nodeOutput("Implemented the change"),
+      artifact: text,
+    },
+    ownership,
+  );
+  await writeNodeState(root, manifest.runId, "task", "succeeded", ownership);
+
+  assert.deepEqual(published.artifact, {
+    bytes: Buffer.byteLength(text, "utf8"),
+  });
+  assert.deepEqual(
+    await readNodeOutput(root, manifest.runId, "task"),
+    published,
+  );
+  const artifact = await readNodeArtifact(root, manifest.runId, "task");
+  assert.equal(artifact.kind, "node-artifact");
+  assert.equal(artifact.text, text);
+  assert.equal(artifact.runId, manifest.runId);
+  assert.equal(artifact.taskId, "task");
+  assert.equal(artifact.taskKey, task.key);
+  assert.equal(artifact.attempt, published.attempt);
+  assert.equal(
+    (
+      await stat(
+        join(root, "runs", manifest.runId, "artifacts", `${task.key}.json`),
+      )
+    ).mode & 0o777,
+    0o600,
+  );
+});
+
+test("keeps a retained artifact immutable and removes it with its run", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact: "Retained text" },
+    ownership,
+  );
+  const artifactFile = join(
+    root,
+    "runs",
+    manifest.runId,
+    "artifacts",
+    `${task.key}.json`,
+  );
+
+  // Republication fails on the artifact, before the output it would precede.
+  await rejectsWithCode(
+    () =>
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        { taskId: "task", status: "failed", artifact: "Replacement" },
+        ownership,
+      ),
+    "record_exists",
+  );
+  assert.equal(
+    (await readNodeArtifact(root, manifest.runId, "task")).text,
+    "Retained text",
+  );
+
+  await releaseRunOwnership(root, ownership);
+  assert.equal(await deleteRun(root, manifest.runId), true);
+  await assert.rejects(() => stat(artifactFile));
+});
+
+test("rejects blank, oversized, and non-string artifact text", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  for (const artifact of [
+    "",
+    "   \n",
+    "a".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes + 1),
+    "\u00e9".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes / 2 + 1),
+    42,
+    { text: "Retained" },
+  ]) {
+    await rejectsWithCode(
+      () =>
+        publishNodeOutput(
+          root,
+          manifest.runId,
+          {
+            taskId: "task",
+            status: "failed",
+            artifact,
+          } as unknown as Parameters<typeof publishNodeOutput>[2],
+          ownership,
+        ),
+      "invalid_argument",
+    );
+  }
+  await rejectsWithCode(
+    () => readNodeArtifact(root, manifest.runId, "task"),
+    "not_found",
+  );
+});
+
+test("an aborted task retains no text artifact", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  await rejectsWithCode(
+    () =>
+      publishNodeOutput(
+        root,
+        manifest.runId,
+        {
+          taskId: "task",
+          status: "aborted",
+          artifact: "Retained",
+        } as unknown as Parameters<typeof publishNodeOutput>[2],
+        ownership,
+      ),
+    "invalid_argument",
+  );
+  await rejectsWithCode(
+    () => readNodeArtifact(root, manifest.runId, "task"),
+    "not_found",
+  );
+});
+
+test("reads an artifact only through the output that claims it", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  const published = await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed" },
+    ownership,
+  );
+  assert.equal(published.artifact, undefined);
+
+  // A stranded artifact from an interrupted publication has no reference.
+  const artifactFile = join(
+    root,
+    "runs",
+    manifest.runId,
+    "artifacts",
+    `${task.key}.json`,
+  );
+  await writeFile(
+    artifactFile,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      kind: "node-artifact",
+      runId: manifest.runId,
+      taskId: "task",
+      taskKey: task.key,
+      attempt: 1,
+      publishedAt: new Date().toISOString(),
+      text: "Stranded",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await rejectsWithCode(
+    () => readNodeArtifact(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+});
+
+test("rejects artifact records that misstate their identity or schema", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact: "Retained" },
+    ownership,
+  );
+  const artifactFile = join(
+    root,
+    "runs",
+    manifest.runId,
+    "artifacts",
+    `${task.key}.json`,
+  );
+  const valid = {
+    schemaVersion: 1,
+    kind: "node-artifact",
+    runId: manifest.runId,
+    taskId: "task",
+    taskKey: task.key,
+    attempt: 1,
+    publishedAt: new Date().toISOString(),
+    text: "Retained",
+  };
+
+  for (const record of [
+    { ...valid, taskId: "other" },
+    { ...valid, runId: "00000000-0000-4000-8000-000000000000" },
+    { ...valid, kind: "node-output" },
+    { ...valid, schemaVersion: 2 },
+    { ...valid, attempt: 0 },
+    { ...valid, text: "   " },
+    { ...valid, unexpected: true },
+  ]) {
+    await writeFile(artifactFile, `${JSON.stringify(record)}\n`, {
+      mode: 0o600,
+    });
+    await rejectsWithCode(
+      () => readNodeArtifact(root, manifest.runId, "task"),
+      "invalid_record",
+    );
+  }
+});
+
+test("rejects an output envelope with an invalid artifact reference", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  const published = await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact: "Retained" },
+    ownership,
+  );
+  const outputFile = join(
+    root,
+    "runs",
+    manifest.runId,
+    "outputs",
+    `${task.key}.json`,
+  );
+
+  for (const artifact of [
+    { bytes: 0 },
+    { bytes: 1.5 },
+    { bytes: NODE_OUTPUT_LIMITS.maxArtifactBytes + 1 },
+    { bytes: 8, path: "artifacts/task.json" },
+    "8",
+    null,
+  ]) {
+    await writeFile(
+      outputFile,
+      `${JSON.stringify({ ...published, artifact })}\n`,
+      { mode: 0o600 },
+    );
+    await rejectsWithCode(
+      () => readNodeOutput(root, manifest.runId, "task"),
+      "invalid_record",
+    );
+  }
+});
+
+test("reports an artifact whose text no longer matches its reference", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact: "Retained" },
+    ownership,
+  );
+  const artifactFile = join(
+    root,
+    "runs",
+    manifest.runId,
+    "artifacts",
+    `${task.key}.json`,
+  );
+  const record = JSON.parse(await readFile(artifactFile, "utf8")) as {
+    text: string;
+  };
+  await writeFile(
+    artifactFile,
+    `${JSON.stringify({ ...record, text: "Rewritten at a different length" })}\n`,
+    { mode: 0o600 },
+  );
+  await rejectsWithCode(
+    () => readNodeArtifact(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+});
+
+test("refuses an artifact whose output no longer agrees with node state", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact: "Retained" },
+    ownership,
+  );
+
+  // The store guards its own transitions, so the disagreement is written
+  // directly: a node settled as blocked has no terminal output to vouch for
+  // anything, and the artifact must not outlive that.
+  const state = await readNodeState(root, manifest.runId, "task");
+  await writeFile(
+    join(root, "runs", manifest.runId, "nodes", `${task.key}.json`),
+    `${JSON.stringify({ ...state, status: "blocked" })}\n`,
+    { mode: 0o600 },
+  );
+
+  await rejectsWithCode(
+    () => readNodeOutput(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+  await rejectsWithCode(
+    () => readNodeArtifact(root, manifest.runId, "task"),
+    "invalid_record",
+  );
+});
+
+test("stores an artifact at the bound that JSON escaping expands most", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  // Every byte escapes to six, the worst JSON.stringify can do. The published
+  // record must still fit the store's own record limit and read back whole.
+  const artifact = "\u0001".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes);
+  assert.equal(
+    Buffer.byteLength(artifact, "utf8"),
+    NODE_OUTPUT_LIMITS.maxArtifactBytes,
+  );
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(artifact), "utf8") >
+      5 * NODE_OUTPUT_LIMITS.maxArtifactBytes,
+  );
+
+  const published = await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", artifact },
+    ownership,
+  );
+
+  assert.deepEqual(published.artifact, {
+    bytes: NODE_OUTPUT_LIMITS.maxArtifactBytes,
+  });
+  assert.equal(
+    (await readNodeArtifact(root, manifest.runId, "task")).text,
+    artifact,
   );
 });

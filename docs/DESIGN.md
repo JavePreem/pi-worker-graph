@@ -128,13 +128,30 @@ prepend to its assignment. Worker-authored text is explicitly marked as
 untrusted report data within those blocks. Full transcripts and undeclared report
 fields are not propagated. The complete serialization, including block labels
 and the warning, is measured in UTF-8 bytes against a hard limit. Overflow fails
-the downstream node without truncation. If truncation is added later, it will be
-explicit and include a reference to a bounded retained artifact.
+the downstream node without truncation, and stays that way: truncating it would
+run a dependent worker against an incomplete prerequisite contract, and a
+retained artifact cannot repair that because artifacts never cross a dependency
+edge (D19).
 
 Persisted output records use their own envelope schema version, independently of
 the worker-report schema version. Current envelopes include run and task identity,
-attempt, completion time, status, and bounded diagnostics. Usage and truncation
-metadata will be added with the transport and artifact layers that consume them.
+attempt, completion time, status, bounded diagnostics, and, when one was
+retained, a reference to a text artifact. Usage metadata will be added with the
+transport layer that consumes it.
+
+A retained text artifact is bounded long-form text that does not belong in the
+structured report — a log, investigation notes, detailed review findings. A
+worker publishes one deliberately, through an optional `artifact` field on the
+final-report tool; it is never runtime spillover from a report that did not
+fit. The runtime never parses it and never propagates it over a dependency
+edge, so a report that leans on its artifact is an incomplete report. It is published under the same mutation lock as the output
+that references it, and before that output, so an interruption can only strand
+an artifact no output claims. An artifact is therefore readable only through
+its reference, which names the byte length the artifact must still have. An
+aborted task produced nothing to retain and may not publish one. Artifacts are
+records with the same identity envelope as every other stored record, rather
+than bare text files, so an artifact cannot be read as belonging to a run, task,
+or attempt other than the one that wrote it. They are removed with their run.
 
 ## Coordination journal
 
@@ -230,7 +247,7 @@ Per-run layout:
   owner.json                  exclusive active lifecycle owner
   nodes/<task-key>.json       parent-owned current node state
   outputs/<task-key>.json     terminal structured output
-  artifacts/<task-key>.md     bounded textual output
+  artifacts/<task-key>.json   bounded retained text for one task attempt
   coordination/<id>.json      immutable events and directed messages, in one
                               run-global sequence
   sessions/<task-key>/...     optional child session state
@@ -322,8 +339,10 @@ Worker children never register this lifecycle.
 - Abort: terminate running children and settle remaining nodes as aborted or
   blocked.
 - Journal failure: report it; never silently claim coordination succeeded.
-- Worker-report overflow: fail the node; compact parent review projections mark
-  every truncated field or omitted report explicitly.
+- Worker-report overflow: reject the report so the worker can correct and
+  resubmit it; compact parent review projections mark every truncated field or
+  omitted report explicitly. Truncating a report is the runtime choosing which
+  structured fields to cut, so it does not do that (D19).
 - Process crash: persisted terminal nodes remain terminal; running nodes become
   interrupted and require an explicit retry or recovery decision.
 

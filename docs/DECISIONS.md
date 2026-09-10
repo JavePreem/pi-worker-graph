@@ -177,6 +177,42 @@ Enabling the mode therefore requires a loadable configuration, where it
 previously required none. A graph cannot run without profiles anyway, so the
 error now surfaces at activation rather than mid-orchestration.
 
+### D19 — Artifacts are deliberate; overflow stays fail-closed
+
+A worker may retain one bounded text artifact beside its report: supplemental
+long-form material such as a log, investigation notes, or detailed review
+findings. It is published deliberately, through an optional field on the
+final-report tool, and never as runtime spillover from something that did not
+fit.
+
+An artifact is a sibling of the report, not part of it. The report envelope
+stays at schema version 1 and stays small enough for a dependency edge; the
+artifact is bounded separately, is never parsed, and never reaches a dependent
+task. The graph result names its byte length so the orchestrator learns it
+exists without the text entering that result.
+
+Report overflow and prerequisite-context overflow both keep failing closed.
+They are separate correctness boundaries and neither becomes generic
+truncation:
+
+- Truncating a report means the runtime choosing which structured fields to
+  cut. It could drop a blocker, an interface, a decision, a changed file, or a
+  failing validation result. A worker can instead correct and resubmit, which
+  is the recoverable path that already exists.
+- Truncating prerequisite context means a dependent worker edits the checkout
+  without the complete declared prerequisite contract. An artifact reference
+  does not repair that: artifacts are deliberately excluded from dependency
+  edges. The orchestrator's remedies — less verbose reports, a split graph,
+  less fan-in, an aggregation task — are all better than a dependent working
+  from partial context.
+
+Explicit truncation remains correct in the parent-facing review projection,
+where it is already marked, because that projection is evidence for a human or
+orchestrator judgment rather than input to execution.
+
+If dependency context later proves too restrictive, the answer is a separate
+versioned edge-projection or handoff contract, not generic text truncation.
+
 ## Open decisions
 
 1. Whether review feedback resumes a persisted child session or starts a fresh

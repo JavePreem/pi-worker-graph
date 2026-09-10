@@ -11,7 +11,11 @@ import {
 import { fileURLToPath } from "node:url";
 import type { TaskExecutionFailureCode } from "./execution-failure.js";
 import { TaskExecutionFailure } from "./execution-failure.js";
-import { NODE_OUTPUT_LIMITS, parseNodeOutput } from "./output.js";
+import {
+  NODE_OUTPUT_LIMITS,
+  parseNodeArtifact,
+  parseNodeOutput,
+} from "./output.js";
 import type {
   TaskExecutionInput,
   TaskExecutionResult,
@@ -40,10 +44,13 @@ const REPORT_DETAILS_KIND = "worker-graph-node-output";
  * Pi's JSON mode reports every session event, so single lines legitimately
  * carry whole tool results, whole assistant messages, and end-of-session
  * message arrays. Lines above this bound are skipped instead of failing the
- * task: the bound is derived from the report envelope, so a valid
- * `worker_graph_report` result always fits and can never be skipped.
+ * task: the bound is derived from everything one report call may carry — the
+ * report envelope and a retained artifact — so both the assistant message
+ * that calls `worker_graph_report` and its result always fit and can never be
+ * skipped. The multiple leaves room for JSON escaping and event framing.
  */
-const MAX_EVENT_LINE_BYTES = 16 * NODE_OUTPUT_LIMITS.maxBytes;
+const MAX_EVENT_LINE_BYTES =
+  16 * (NODE_OUTPUT_LIMITS.maxBytes + NODE_OUTPUT_LIMITS.maxArtifactBytes);
 /**
  * Runaway-child guard on total stdout. Event lines are parsed and discarded
  * rather than retained, so this bounds a child that never stops streaming
@@ -803,6 +810,7 @@ async function runNormalizedPiWorkerProcess(
     let stderrBytes = 0;
     let textBuffer = "";
     let output: ReturnType<typeof parseNodeOutput> | undefined;
+    let artifact: string | undefined;
     let failure: TaskExecutionFailure | undefined;
     let providerFailed = false;
     let reportToolFailed = false;
@@ -947,9 +955,14 @@ async function runNormalizedPiWorkerProcess(
         return;
       }
       try {
+        // Both are revalidated here: the details cross a process boundary, so
+        // the child's own validation is evidence rather than a guarantee.
         output = parseNodeOutput(event.result.details.output);
+        artifact = parseNodeArtifact(event.result.details.artifact);
         reportToolFailed = false;
       } catch {
+        output = undefined;
+        artifact = undefined;
         fail("report_tool");
       }
     };
@@ -1039,7 +1052,10 @@ async function runNormalizedPiWorkerProcess(
         emitProgress("finished", {
           status: output.blockers.length > 0 ? "failed" : "succeeded",
         });
-        resolve({ output });
+        resolve({
+          output,
+          ...(artifact === undefined ? {} : { artifact }),
+        });
       } else if (reportToolFailed) {
         emitProgress("finished", { status: "failed" });
         reject(new TaskExecutionFailure("report_tool"));

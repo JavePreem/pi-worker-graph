@@ -19,7 +19,9 @@ import {
 import {
   NODE_OUTPUT_LIMITS,
   NODE_OUTPUT_SCHEMA_VERSION,
+  parseNodeArtifact,
   parseNodeOutput,
+  splitReportArtifact,
 } from "./output.js";
 import type {
   PiOrchestratorProfile,
@@ -214,51 +216,74 @@ const boundedText = (purpose: string) =>
     description: `${purpose} At most ${NODE_OUTPUT_LIMITS.maxTextBytes} bytes of UTF-8.`,
   });
 
-const nodeOutputSchema = Type.Object(
+const nodeOutputProperties = {
+  // Expressed as a bounded integer rather than a literal: a `const` keyword
+  // is rejected by some providers' strict function-schema validation.
+  schemaVersion: Type.Integer({
+    minimum: NODE_OUTPUT_SCHEMA_VERSION,
+    maximum: NODE_OUTPUT_SCHEMA_VERSION,
+    description: `Report format version. Always ${NODE_OUTPUT_SCHEMA_VERSION}.`,
+  }),
+  summary: boundedText("What was done, and whether the assignment is met."),
+  changedFiles: Type.Array(
+    Type.Object(
+      {
+        path: Type.String({
+          minLength: 1,
+          maxLength: NODE_OUTPUT_LIMITS.maxPathBytes,
+          description: `Repository-relative path. At most ${NODE_OUTPUT_LIMITS.maxPathBytes} bytes of UTF-8.`,
+        }),
+        description: boundedText("What changed in this file, and why."),
+      },
+      { additionalProperties: false },
+    ),
+    { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+  ),
+  interfaces: Type.Array(
+    boundedText("One interface downstream tasks must build against."),
+    { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+  ),
+  decisions: Type.Array(
+    boundedText("One decision downstream tasks need to know about."),
+    { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+  ),
+  validation: Type.Array(
+    Type.Object(
+      {
+        command: boundedText("The command that was run."),
+        result: boundedText("What the command reported."),
+      },
+      { additionalProperties: false },
+    ),
+    { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+  ),
+  blockers: Type.Array(
+    boundedText("One reason the assignment could not be completed."),
+    { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+  ),
+};
+
+/**
+ * The artifact is a sibling of the report, not a field of it: it is retained
+ * under the run for later review and never reaches a dependent task, so it is
+ * bounded on its own and leaves the report envelope at schema version 1.
+ */
+const workerReportSchema = Type.Object(
   {
-    // Expressed as a bounded integer rather than a literal: a `const` keyword
-    // is rejected by some providers' strict function-schema validation.
-    schemaVersion: Type.Integer({
-      minimum: NODE_OUTPUT_SCHEMA_VERSION,
-      maximum: NODE_OUTPUT_SCHEMA_VERSION,
-      description: `Report format version. Always ${NODE_OUTPUT_SCHEMA_VERSION}.`,
-    }),
-    summary: boundedText("What was done, and whether the assignment is met."),
-    changedFiles: Type.Array(
-      Type.Object(
-        {
-          path: Type.String({
-            minLength: 1,
-            maxLength: NODE_OUTPUT_LIMITS.maxPathBytes,
-            description: `Repository-relative path. At most ${NODE_OUTPUT_LIMITS.maxPathBytes} bytes of UTF-8.`,
-          }),
-          description: boundedText("What changed in this file, and why."),
-        },
-        { additionalProperties: false },
-      ),
-      { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
-    ),
-    interfaces: Type.Array(
-      boundedText("One interface downstream tasks must build against."),
-      { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
-    ),
-    decisions: Type.Array(
-      boundedText("One decision downstream tasks need to know about."),
-      { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
-    ),
-    validation: Type.Array(
-      Type.Object(
-        {
-          command: boundedText("The command that was run."),
-          result: boundedText("What the command reported."),
-        },
-        { additionalProperties: false },
-      ),
-      { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
-    ),
-    blockers: Type.Array(
-      boundedText("One reason the assignment could not be completed."),
-      { maxItems: NODE_OUTPUT_LIMITS.maxItemsPerSection },
+    ...nodeOutputProperties,
+    artifact: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: NODE_OUTPUT_LIMITS.maxArtifactBytes,
+        description: [
+          "Optional supplemental long-form text retained beside the report:",
+          "logs, investigation notes, or detailed review findings.",
+          "It is stored under the run for later review and is never given to",
+          "dependent tasks, so the structured report above must still stand",
+          "on its own.",
+          `At most ${NODE_OUTPUT_LIMITS.maxArtifactBytes} bytes of UTF-8.`,
+        ].join(" "),
+      }),
     ),
   },
   { additionalProperties: false },
@@ -275,27 +300,36 @@ function registerWorkerReportTool(pi: ExtensionAPI): void {
       `The whole report must serialize to at most ${NODE_OUTPUT_LIMITS.maxBytes} bytes of UTF-8,`,
       "which is a smaller budget than the per-field limits allow together;",
       "a rejected report can be corrected and resubmitted.",
+      "Supplemental long-form material belongs in the optional artifact field,",
+      "which is retained separately and never shortens the report.",
     ].join(" "),
     promptSnippet: "Submit the final worker report and end the task",
     promptGuidelines: [
       "Use worker_graph_report exactly once as the final action after completing or blocking the assigned task.",
       "Report blockers honestly; do not claim success when required work or validation is incomplete.",
       `Keep the whole report within ${NODE_OUTPUT_LIMITS.maxBytes} bytes by summarizing rather than pasting file contents or command transcripts.`,
+      "Put logs, investigation notes, and detailed findings in artifact rather than in the report, and never at the cost of a complete report: every blocker, interface, decision, changed file, and validation result belongs in the structured fields, because dependent tasks receive those and never the artifact.",
     ],
-    parameters: nodeOutputSchema,
+    parameters: workerReportSchema,
     async execute(_toolCallId, params) {
       if (submitted)
         throw new Error("A final worker report was already submitted");
       // Thrown validation errors reach the model as a tool error, so the
       // message must say what to change. The parent treats a rejected report
-      // as recoverable and waits for a corrected resubmission.
-      const output = parseNodeOutput(params);
+      // as recoverable and waits for a corrected resubmission. The artifact
+      // is separated before validation, so it is never mistaken for an
+      // undeclared report field, and the split is defensive rather than a
+      // destructuring: the submitted value is never read through an accessor.
+      const parts = splitReportArtifact(params);
+      const output = parseNodeOutput(parts.report);
+      const artifact = parseNodeArtifact(parts.artifact);
       submitted = true;
       return {
         content: [{ type: "text", text: "Final worker report submitted." }],
         details: {
           kind: "worker-graph-node-output",
           output,
+          ...(artifact === undefined ? {} : { artifact }),
         },
         terminate: true,
       };
@@ -620,6 +654,14 @@ export default function registerWorkerGraph(
     }
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    /**
+     * A failed restore is discarded rather than notified here. Pi stops the
+     * TUI before it emits this event on the interactive quit path, so a
+     * notification would go nowhere. Nothing is lost by staying quiet: the
+     * branch still records the model the session started from, so a resumed
+     * session carries that record forward and `/swarm off` there restores it,
+     * reporting a failure where it can actually be seen.
+     */
     await deactivate(ctx);
   });
 

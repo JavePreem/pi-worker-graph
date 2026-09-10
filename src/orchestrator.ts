@@ -156,6 +156,12 @@ interface WorkerGraphNodeReview {
   readonly taskId: string;
   readonly status: string;
   readonly report?: CompactWorkerReport;
+  /**
+   * Present when the worker retained supplemental text beside its report.
+   * The text itself is never projected here: it is unbounded relative to this
+   * result and was published precisely because it does not belong in a report.
+   */
+  readonly artifactBytes?: number;
   readonly diagnostics?: string;
   readonly reportOmitted?: "result_limit" | "unavailable";
 }
@@ -445,10 +451,14 @@ function reviewBytes(nodes: readonly WorkerGraphNodeReview[]): number {
   return Buffer.byteLength(serializeReviews(nodes));
 }
 
-function omittedReview(node: NodeStateRecord): WorkerGraphNodeReview {
+function omittedReview(
+  node: NodeStateRecord,
+  artifactBytes?: number,
+): WorkerGraphNodeReview {
   return {
     taskId: node.taskId,
     status: node.status,
+    ...(artifactBytes === undefined ? {} : { artifactBytes }),
     reportOmitted: "result_limit",
   };
 }
@@ -478,15 +488,20 @@ async function collectNodeReviews(
   );
   const reviews: WorkerGraphNodeReview[] = [];
   for (const [index, { node, record, unavailable }] of collected.entries()) {
+    // Reserved at each node's smallest form, which still names a retained
+    // artifact: a fixed-size field, so the reservation stays exact.
     const remaining = collected
       .slice(index + 1)
-      .map((entry) => omittedReview(entry.node));
+      .map((entry) => omittedReview(entry.node, entry.record?.artifact?.bytes));
     const fits = (candidate: WorkerGraphNodeReview) =>
       reviewBytes([...reviews, candidate, ...remaining]) <=
       MAX_RESULT_REPORT_BYTES;
     const base: WorkerGraphNodeReview = {
       taskId: node.taskId,
       status: node.status,
+      ...(record?.artifact === undefined
+        ? {}
+        : { artifactBytes: record.artifact.bytes }),
       ...(unavailable ? { reportOmitted: "unavailable" as const } : {}),
       ...(record?.diagnostics
         ? {
@@ -504,7 +519,9 @@ async function collectNodeReviews(
       continue;
     }
     const summary = { ...base, report: compactReport(record.output, false) };
-    reviews.push(fits(summary) ? summary : omittedReview(node));
+    reviews.push(
+      fits(summary) ? summary : omittedReview(node, record.artifact?.bytes),
+    );
   }
   return Object.freeze(reviews);
 }
@@ -552,6 +569,7 @@ export function registerWorkerGraphOrchestratorTool(
       "Treat expected paths as advisory: tell workers to re-read files before editing and preserve concurrent changes.",
       "Include dependent validation tasks for relevant checks, then inspect the shared checkout with read-only parent tools.",
       "A worker report is evidence, not acceptance: read the changes yourself before accepting them, and weigh a reported validation result rather than trusting the claim.",
+      "artifactBytes on a node review means that worker retained supplemental long-form text under the run; the report itself must still stand alone, so treat a report that defers its facts to an artifact as incomplete and delegate a repair task that reports them.",
       "If review finds a defect, call worker_graph again with narrow repair tasks and fresh acceptance criteria.",
     ],
     parameters: workerGraphSchema,

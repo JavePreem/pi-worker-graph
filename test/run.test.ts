@@ -17,6 +17,7 @@ import {
   NODE_OUTPUT_LIMITS,
   RUN_GRAPH_LIMITS,
   RunGraphValidationError,
+  readNodeArtifact,
   readNodeOutput,
   readNodeState,
   releaseRunOwnership,
@@ -811,6 +812,15 @@ test("turns hostile and malformed executor results into bounded failures", async
   const { blockers: _blockers, ...incompleteReport } = nodeOutput();
   const malformed = new Map<string, unknown>([
     ["array", []],
+    ["blank-artifact", { output: nodeOutput(), artifact: "  \n" }],
+    ["non-string-artifact", { output: nodeOutput(), artifact: 42 }],
+    [
+      "oversized-artifact",
+      {
+        output: nodeOutput(),
+        artifact: "x".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes + 1),
+      },
+    ],
     ["custom-serialization", customSerialization],
     ["deep", { output: deepOutput }],
     ["getter", throwingResult],
@@ -921,4 +931,88 @@ test("completes an empty graph without invoking the executor", async (t) => {
   assert.equal(called, false);
   assert.equal(result.status, "succeeded");
   assert.deepEqual(result.nodes, []);
+});
+
+test("retains an executor artifact without propagating it downstream", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const artifact = `# Review notes\n\n${"detail ".repeat(4096)}`;
+  const seen = new Map<string, string>();
+  const executor: TaskExecutor = async (input) => {
+    seen.set(input.taskId, input.prerequisiteContext);
+    return input.taskId === "root"
+      ? { output: nodeOutput("Wrote the long form"), artifact }
+      : { output: nodeOutput("Consumed the report") };
+  };
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "root" }, { id: "leaf", needs: ["root"] }] },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "succeeded");
+  const output = await readNodeOutput(stateRoot, result.runId, "root");
+  assert.deepEqual(output.artifact, {
+    bytes: Buffer.byteLength(artifact, "utf8"),
+  });
+  assert.equal(
+    (await readNodeArtifact(stateRoot, result.runId, "root")).text,
+    artifact,
+  );
+
+  // The retained text is not part of the report a dependent task receives.
+  const leafContext = seen.get("leaf");
+  assert.ok(leafContext);
+  assert.equal(leafContext.includes("Wrote the long form"), true);
+  assert.equal(leafContext.includes("Review notes"), false);
+  assert.equal(
+    (await readNodeOutput(stateRoot, result.runId, "leaf")).artifact,
+    undefined,
+  );
+});
+
+test("retains an artifact from a blocked worker report", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const executor: TaskExecutor = async () => ({
+    output: { ...nodeOutput("Stopped"), blockers: ["Ambiguous interface"] },
+    artifact: "The full trace of what the worker tried.",
+  });
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "failed");
+  const output = await readNodeOutput(stateRoot, result.runId, "task");
+  assert.equal(output.status, "failed");
+  assert.ok(output.artifact);
+  assert.equal(
+    (await readNodeArtifact(stateRoot, result.runId, "task")).text,
+    "The full trace of what the worker tried.",
+  );
+});
+
+test("an artifact does not consume the propagated report budget", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const executor: TaskExecutor = async () => ({
+    output: nodeOutput("Small report"),
+    artifact: "x".repeat(RUN_GRAPH_LIMITS.maxOutputBytes),
+  });
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    (await readNodeOutput(stateRoot, result.runId, "task")).artifact,
+    { bytes: RUN_GRAPH_LIMITS.maxOutputBytes },
+  );
 });

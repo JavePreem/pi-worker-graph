@@ -58,6 +58,8 @@ export {
 } from "./run.js";
 export type {
   JsonValue,
+  NodeArtifactRecord,
+  NodeArtifactReference,
   NodeOutputRecord,
   NodeOutputStatus,
   NodeStateRecord,
@@ -95,6 +97,7 @@ export {
   RUN_STORE_MAX_RECORD_BYTES,
   RUN_STORE_MAX_RUNS,
   RunStoreError,
+  readNodeArtifact,
   readNodeOutput,
   readNodeState,
   readRun,

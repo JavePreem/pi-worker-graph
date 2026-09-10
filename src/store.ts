@@ -15,7 +15,12 @@ import { normalizeGraph, setNodeStatus, settleBlocked } from "./graph.js";
 import type { JsonValue } from "./json.js";
 import { isJsonValue, isRecord } from "./json.js";
 import type { NodeOutput } from "./output.js";
-import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
+import {
+  NODE_OUTPUT_LIMITS,
+  parseNodeArtifact,
+  parseNodeDiagnostics,
+  parseNodeOutput,
+} from "./output.js";
 
 export type { JsonValue } from "./json.js";
 
@@ -62,6 +67,7 @@ const RUN_SLOT_RECORD = "slot.json";
 const RUN_SLOT_PATTERN = /^(0|[1-9][0-9]*)\.json$/;
 const RUN_MUTATION_LOCK = "mutation.lock";
 const RUN_COORDINATION_DIRECTORY = "coordination";
+const RUN_ARTIFACT_DIRECTORY = "artifacts";
 const RECORD_SUFFIX = ".json";
 const COORDINATION_ID_PATTERN = new RegExp(
   `^[0-9]{${RUN_COORDINATION_ID_LENGTH}}$`,
@@ -93,7 +99,18 @@ const NODE_OUTPUT_RECORD_FIELDS = new Set([
   "status",
   "completedAt",
   "output",
+  "artifact",
   "diagnostics",
+]);
+const NODE_ARTIFACT_RECORD_FIELDS = new Set([
+  "schemaVersion",
+  "kind",
+  "runId",
+  "taskId",
+  "taskKey",
+  "attempt",
+  "publishedAt",
+  "text",
 ]);
 const RUN_OWNER_RECORD_FIELDS = new Set([
   "schemaVersion",
@@ -305,6 +322,37 @@ export interface NodeStateRecord {
 
 export type NodeOutputStatus = "succeeded" | "failed" | "aborted";
 
+/**
+ * A retained text artifact is worker-authored long-form text that does not
+ * belong in the structured report: it is not propagated over dependency edges
+ * and is never parsed, only retained under the run for later review. One
+ * artifact belongs to one task attempt, is published under the same mutation
+ * lock as that attempt's output, and is removed with its run.
+ *
+ * `NODE_OUTPUT_LIMITS.maxArtifactBytes` bounds the text. JSON escaping can
+ * expand one byte sixfold, so that bound stays far enough beneath
+ * `RUN_STORE_MAX_RECORD_BYTES` that no text it admits can produce a record
+ * the store would then refuse to write or read back.
+ */
+export interface NodeArtifactRecord {
+  readonly schemaVersion: 1;
+  readonly kind: "node-artifact";
+  readonly runId: string;
+  readonly taskId: string;
+  readonly taskKey: string;
+  readonly attempt: number;
+  readonly publishedAt: string;
+  readonly text: string;
+}
+
+/**
+ * Recorded in the output envelope so a reader learns that an artifact exists,
+ * and how large it is, without reading the artifact itself.
+ */
+export interface NodeArtifactReference {
+  readonly bytes: number;
+}
+
 interface NodeOutputRecordBase {
   readonly schemaVersion: 1;
   readonly kind: "node-output";
@@ -313,6 +361,7 @@ interface NodeOutputRecordBase {
   readonly taskKey: string;
   readonly attempt: number;
   readonly completedAt: string;
+  readonly artifact?: NodeArtifactReference;
   readonly diagnostics?: string;
 }
 
@@ -337,18 +386,22 @@ export type PublishNodeOutput =
       readonly taskId: string;
       readonly status: "succeeded";
       readonly output: NodeOutput;
+      /** Retained verbatim beside the report; never propagated downstream. */
+      readonly artifact?: string;
       readonly diagnostics?: string;
     }
   | {
       readonly taskId: string;
       readonly status: "failed";
       readonly output?: NodeOutput;
+      readonly artifact?: string;
       readonly diagnostics?: string;
     }
   | {
       readonly taskId: string;
       readonly status: "aborted";
       readonly output?: never;
+      readonly artifact?: never;
       readonly diagnostics?: string;
     };
 
@@ -1159,6 +1212,74 @@ function validateNodeState(value: unknown, path: string): NodeStateRecord {
   return value as unknown as NodeStateRecord;
 }
 
+/**
+ * Artifact text is bounded and non-blank but otherwise unconstrained: it is
+ * retained verbatim for a reader, never interpreted by the runtime. Absence
+ * is rejected here, because every caller has already decided the artifact is
+ * present.
+ */
+function parseArtifactText(value: unknown): string {
+  let text: string | undefined;
+  try {
+    text = parseNodeArtifact(value);
+  } catch {
+    text = undefined;
+  }
+  if (text === undefined) {
+    throw new RunStoreError(
+      "invalid_argument",
+      `A text artifact must be non-blank and at most ${NODE_OUTPUT_LIMITS.maxArtifactBytes} bytes`,
+    );
+  }
+  return text;
+}
+
+function validArtifactReference(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    Number.isInteger(value.bytes) &&
+    (value.bytes as number) > 0 &&
+    (value.bytes as number) <= NODE_OUTPUT_LIMITS.maxArtifactBytes
+  );
+}
+
+function validateNodeArtifact(
+  value: unknown,
+  path: string,
+): NodeArtifactRecord {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.kind !== "node-artifact" ||
+    typeof value.runId !== "string" ||
+    typeof value.taskId !== "string" ||
+    typeof value.taskKey !== "string" ||
+    !Number.isInteger(value.attempt) ||
+    (value.attempt as number) <= 0 ||
+    !isTimestamp(value.publishedAt) ||
+    Object.keys(value).some((field) => !NODE_ARTIFACT_RECORD_FIELDS.has(field))
+  ) {
+    return invalidRecord(path, "node artifact does not match schema version 1");
+  }
+  let text: string;
+  try {
+    text = parseArtifactText(value.text);
+  } catch {
+    return invalidRecord(path, "node artifact text is invalid or oversized");
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    kind: "node-artifact",
+    runId: value.runId,
+    taskId: value.taskId,
+    taskKey: value.taskKey,
+    attempt: value.attempt as number,
+    publishedAt: value.publishedAt,
+    text,
+  };
+}
+
 function validateNodeOutputRecord(
   value: unknown,
   path: string,
@@ -1179,6 +1300,9 @@ function validateNodeOutputRecord(
   ) {
     return invalidRecord(path, "node output does not match schema version 1");
   }
+  if ("artifact" in value && !validArtifactReference(value.artifact)) {
+    return invalidRecord(path, "node output has an invalid artifact reference");
+  }
 
   let diagnostics: string | undefined;
   try {
@@ -1194,6 +1318,11 @@ function validateNodeOutputRecord(
     taskKey: value.taskKey,
     attempt: value.attempt as number,
     completedAt: value.completedAt,
+    ...(value.artifact === undefined
+      ? {}
+      : {
+          artifact: { bytes: (value.artifact as NodeArtifactReference).bytes },
+        }),
     ...(diagnostics === undefined ? {} : { diagnostics }),
   };
 
@@ -1250,7 +1379,7 @@ function assertIdentity(
   path: string,
   manifest: RunManifest,
   task: RunManifestTask,
-  record: NodeStateRecord | NodeOutputRecord,
+  record: NodeStateRecord | NodeOutputRecord | NodeArtifactRecord,
 ): void {
   if (
     record.runId !== manifest.runId ||
@@ -1287,6 +1416,29 @@ async function readNodeOutputRecord(
     `${task.key}.json`,
   );
   const record = validateNodeOutputRecord(await readJson(path), path);
+  assertIdentity(path, manifest, task, record);
+  return record;
+}
+
+function artifactPath(
+  stateRoot: string,
+  runId: string,
+  taskKey: string,
+): string {
+  return join(
+    runPath(stateRoot, runId),
+    RUN_ARTIFACT_DIRECTORY,
+    `${taskKey}.json`,
+  );
+}
+
+async function readNodeArtifactRecord(
+  stateRoot: string,
+  manifest: RunManifest,
+  task: RunManifestTask,
+): Promise<NodeArtifactRecord> {
+  const path = artifactPath(stateRoot, manifest.runId, task.key);
+  const record = validateNodeArtifact(await readJson(path), path);
   assertIdentity(path, manifest, task, record);
   return record;
 }
@@ -1367,7 +1519,12 @@ export async function createRun<TPayload>(
   let published = false;
   try {
     await mkdir(temporaryRunPath, { mode: DIRECTORY_MODE });
-    for (const directory of ["nodes", "outputs", RUN_COORDINATION_DIRECTORY]) {
+    for (const directory of [
+      "nodes",
+      "outputs",
+      RUN_ARTIFACT_DIRECTORY,
+      RUN_COORDINATION_DIRECTORY,
+    ]) {
       await mkdir(join(temporaryRunPath, directory), { mode: DIRECTORY_MODE });
     }
     await writeNewFile(join(temporaryRunPath, "run.json"), manifest);
@@ -1886,6 +2043,25 @@ async function publishNodeOutputUnlocked(
       `Succeeded task ${JSON.stringify(input.taskId)} must not report blockers`,
     );
   }
+  // An aborted task published nothing, so it has no long-form text to retain.
+  // Every other status may, whether or not it also produced a report.
+  let artifact: string | undefined;
+  if ((input as { artifact?: unknown }).artifact !== undefined) {
+    if (input.status === "aborted") {
+      throw new RunStoreError(
+        "invalid_argument",
+        `Aborted task ${JSON.stringify(input.taskId)} must not publish a text artifact`,
+      );
+    }
+    try {
+      artifact = parseArtifactText((input as { artifact?: unknown }).artifact);
+    } catch {
+      throw new RunStoreError(
+        "invalid_argument",
+        `Text artifact for task ${JSON.stringify(input.taskId)} is invalid or oversized`,
+      );
+    }
+  }
   let diagnostics: string | undefined;
   try {
     diagnostics = parseNodeDiagnostics(input.diagnostics);
@@ -1909,6 +2085,27 @@ async function publishNodeOutputUnlocked(
     );
   }
 
+  // The artifact is published first, so an interruption can only strand an
+  // artifact no output claims. Publishing the output first would leave a
+  // reference to a file that does not exist.
+  const publishedAt = new Date().toISOString();
+  if (artifact !== undefined) {
+    const artifactRecord: NodeArtifactRecord = {
+      schemaVersion: SCHEMA_VERSION,
+      kind: "node-artifact",
+      runId,
+      taskId: task.id,
+      taskKey: task.key,
+      attempt: state.attempt,
+      publishedAt,
+      text: artifact,
+    };
+    await publishRecord(
+      artifactPath(stateRoot, runId, task.key),
+      artifactRecord,
+    );
+  }
+
   const path = join(runPath(stateRoot, runId), "outputs", `${task.key}.json`);
   const baseRecord: NodeOutputRecordBase = {
     schemaVersion: SCHEMA_VERSION,
@@ -1917,7 +2114,10 @@ async function publishNodeOutputUnlocked(
     taskId: task.id,
     taskKey: task.key,
     attempt: state.attempt,
-    completedAt: new Date().toISOString(),
+    completedAt: publishedAt,
+    ...(artifact === undefined
+      ? {}
+      : { artifact: { bytes: Buffer.byteLength(artifact, "utf8") } }),
     ...(diagnostics === undefined ? {} : { diagnostics }),
   };
   let record: NodeOutputRecord;
@@ -2541,6 +2741,39 @@ export async function readRunMessages(
   return page.nextCursor === undefined
     ? { messages: Object.freeze(page.records) }
     : { messages: Object.freeze(page.records), nextCursor: page.nextCursor };
+}
+
+/**
+ * Reads the retained text artifact of a task's current attempt.
+ *
+ * The artifact is only readable through the output that claims it, and only
+ * while that output itself agrees with the node's current state: an artifact
+ * left behind by an interrupted publication has no reference vouching for it,
+ * and is reported as inconsistent rather than returned as if it were current.
+ */
+export async function readNodeArtifact(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+): Promise<NodeArtifactRecord> {
+  const manifest = await readRun(stateRoot, runId);
+  const task = findTask(manifest, taskId);
+  const [record, output] = await Promise.all([
+    readNodeArtifactRecord(stateRoot, manifest, task),
+    readNodeOutput(stateRoot, runId, taskId),
+  ]);
+  if (
+    output.artifact === undefined ||
+    record.attempt !== output.attempt ||
+    output.artifact.bytes !== Buffer.byteLength(record.text, "utf8")
+  ) {
+    throw new RunStoreError(
+      "invalid_record",
+      "Node artifact does not match the published node output",
+      artifactPath(stateRoot, runId, task.key),
+    );
+  }
+  return record;
 }
 
 export async function readNodeOutput(

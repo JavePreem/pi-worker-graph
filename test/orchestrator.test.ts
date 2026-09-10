@@ -37,6 +37,7 @@ interface RegisteredTool {
           readonly blockers: readonly string[];
           readonly omittedItems?: Readonly<Record<string, number>>;
         };
+        readonly artifactBytes?: number;
         readonly diagnostics?: string;
         readonly reportOmitted?: string;
       }[];
@@ -455,5 +456,44 @@ test("bounds review reports and marks every omission explicitly", async (t) => {
   });
   assert.ok(
     result.details.nodes.some((node) => node.reportOmitted === "result_limit"),
+  );
+});
+
+test("names a retained artifact in the review without projecting its text", async (t) => {
+  const paths = await fixture(t);
+  const artifact = `# Investigation\n\n${"detail ".repeat(4096)}`;
+  const tool = captureTool(
+    paths.agentDirectory,
+    () => async (input) =>
+      input.taskId === "investigate"
+        ? { output: nodeOutput("Investigated"), artifact }
+        : { output: nodeOutput("Reviewed") },
+  );
+
+  const result = await tool.execute(
+    "call-id",
+    {
+      tasks: [
+        { id: "investigate", profile: "writer", assignment: "Investigate" },
+        { id: "review", profile: "writer", assignment: "Review" },
+      ],
+    },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  const nodes = new Map(
+    result.details.nodes.map((node) => [node.taskId, node]),
+  );
+  assert.equal(
+    nodes.get("investigate")?.artifactBytes,
+    Buffer.byteLength(artifact, "utf8"),
+  );
+  assert.equal(nodes.get("review")?.artifactBytes, undefined);
+  // The orchestrator learns the artifact exists; the text stays in the store.
+  assert.equal(
+    (result.content[0]?.text ?? "").includes("Investigation"),
+    false,
   );
 });

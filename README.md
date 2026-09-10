@@ -138,6 +138,22 @@ untrusted-worker-data warning, is measured against a hard byte limit. Oversized
 context fails the downstream node and is never silently truncated. Only the
 validated reports of declared direct prerequisites are included.
 
+A worker may also retain one bounded text artifact beside its report, through
+the optional `artifact` field on `worker_graph_report`: supplemental long-form
+material such as a log, investigation notes, or detailed review findings. It is
+a sibling of the report rather than a field of it, so the report envelope stays
+at schema version 1 and the artifact is bounded separately. The runtime never
+parses it and never places it on a dependency edge, so a report that leans on
+its artifact is an incomplete report. It is stored under the run, the output
+envelope records the byte length that vouches for it, and it is removed when
+the run is deleted. `readNodeArtifact()` reads it back, and the orchestrator
+tool result names its byte length so a retained artifact is discoverable. An
+aborted task produced nothing to retain and may not publish one.
+
+Neither overflow becomes truncation. An oversized report is rejected so the
+worker can correct and resubmit it, and oversized prerequisite context fails
+the downstream node rather than handing it a partial prerequisite contract.
+
 ## Pi worker adapter
 
 `createPiSubprocessExecutor()` selects an explicitly named worker profile for
@@ -352,7 +368,6 @@ read-only tools, invoke another narrow graph for any repairs.
 
 The remaining runtime will add:
 
-- retained report artifacts if explicit truncation is added;
 - persisted worker attempts and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not

@@ -43,22 +43,23 @@ Acceptance tests cover:
 
 ## Phase 2 — Run store
 
-The basic record lifecycle is complete. Exclusive ownership now protects the
-active graph lifecycle; coordination, artifacts, and cleanup remain incremental
-follow-up work rather than prerequisites for the fake-backed scheduler core.
+The record lifecycle is complete: ownership protects the active graph
+lifecycle, and coordination, retained artifacts, and cleanup are all in place.
+Report and edge-context overflow stay fail-closed rather than truncating into
+an artifact (D19).
 
 Implement run-scoped persistence outside the target checkout:
 
 - [x] immutable versioned graph definition;
 - [x] parent-owned node and attempt status;
 - [x] immutable node outputs;
-- [ ] bounded text artifacts;
+- [x] bounded text artifacts;
 - [x] immutable events and directed messages;
 - [x] restrictive permissions and atomic publication;
 - [x] exclusive run ownership for active graph lifecycles;
 - [x] bounded reads with explicit malformed and overflow errors;
 - [x] bounded retained-run count with atomic capacity reservation;
-- [ ] explicit text truncation and retained artifact references;
+- [x] deliberate artifact publication through the final-report tool;
 - [x] explicit cleanup of a named run with its capacity slot.
 
 Acceptance tests:
@@ -115,7 +116,7 @@ Connect the scheduler to worker execution:
 - [x] return deterministic aggregate graph and node status;
 - [x] validate the versioned structured worker output contract;
 - [x] serialize canonical named prerequisite-report blocks;
-- [ ] return retained artifact references when truncation is implemented.
+- [x] return retained artifact references in the parent-facing result.
 
 Acceptance tests:
 
@@ -123,7 +124,8 @@ Acceptance tests:
 - dependent nodes never start early;
 - each node sees exactly its declared prerequisite outputs;
 - unrelated branches continue after another branch fails;
-- truncation is explicit and recoverable when an artifact is retained.
+- a retained artifact is named in the result but never projected into it;
+- report and prerequisite-context overflow fail the node rather than truncate.
 
 ## Phase 5 — Coordination tools
 

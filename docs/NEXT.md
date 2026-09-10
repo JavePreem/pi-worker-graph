@@ -9,6 +9,13 @@ adapter. Automated tests remain provider-free:
 - deterministic frontiers and guarded node transitions;
 - failed and aborted dependency blocking;
 - immutable versioned run manifests with opaque task storage keys;
+- one bounded retained text artifact per task attempt, published deliberately
+  through an optional `worker_graph_report` field, revalidated at every
+  boundary it crosses, published before and vouched for by the output that
+  references it, kept off dependency edges, named by byte length in the
+  parent-facing result, and removed with its run;
+- report and prerequisite-context overflow that stay fail-closed rather than
+  truncating into an artifact;
 - parent-owned node state and immutable terminal outputs;
 - restrictive permissions and atomic filesystem publication;
 - bounded UTF-8 JSON records with explicit read and identity errors;
@@ -132,16 +139,28 @@ Prepare the vertical slice for a prerelease:
    activation, refusal, and restore paths are covered by fakes; what no test
    can cover is Pi's own `setModel` against a real provider catalogue and real
    authentication. Confirm specifically whether the shutdown restore lands:
-   `session_shutdown` awaits an asynchronous model change, and whether Pi waits
-   for that handler before exiting is unverified.
+   `session_shutdown` awaits an asynchronous model change, and Pi does wait for
+   that handler on both quit paths: `interactive-mode.js` awaits
+   `runtimeHost.dispose()`, which awaits `emitSessionShutdownEvent`, which
+   awaits each handler in turn. It is not awaited on `emergencyTerminalExit`
+   or `uncaughtCrash`, where the terminal is already gone.
 
 ## Deferred run-store work
 
 Before a resumable or externally addressable run API is added, retain the
 fail-closed ownership contract so two orchestrators cannot advance one run, and
 the rule that a mutation lock is recovered only by a holder that can be shown
-to have finished. Bounded text artifacts can be added with structured-output
-overflow handling, and their retained files must be removed with the run.
+to have finished.
+
+Retained text artifacts are complete end to end and their policy is settled in
+D19: publication is deliberate, and neither overflow becomes truncation.
+
+One question is left open deliberately. The orchestrator learns that an
+artifact exists, and how large it is, but has no way to read it: the review
+names `artifactBytes` and not a path, and no tool returns the text. A library
+caller uses `readNodeArtifact()`. Giving the orchestrator the artifact's path
+would make its own `read` tool sufficient, but that widens what the parent may
+reach outside the checkout, so it is a decision rather than an addition.
 
 ## Deferred worker instruction work
 
@@ -156,11 +175,17 @@ guessing. The orchestrator guidance in `src/orchestrator.ts` carries the
 matching parent-side decomposition, overlap, serialization, and acceptance
 rules.
 
-What remains undecided is one report field. Observed concurrent changes have
-nowhere structured to go: `NodeOutput` carries `summary`, `changedFiles`,
-`interfaces`, `decisions`, `validation`, and `blockers` (`src/output.ts`), so
-an observation about another worker's edits can only arrive as prose in
-`summary` or as a blocker. Adding a field is a schema version change.
+What remains undecided is one report field. `NodeOutput` carries `summary`,
+`changedFiles`, `interfaces`, `decisions`, `validation`, and `blockers`
+(`src/output.ts`), so an observation about another worker's edits can only
+reach the parent's terminal report as prose in `summary` or as a blocker.
+Adding a field is a schema version change.
+
+It is less pressing than it was. A worker that notices a concurrent change
+already has a structured channel while it runs — a `conflict` coordination
+event (`src/store.ts`), which the parent and other workers can read — and a
+retained artifact for the long form of what it saw. Neither is the terminal
+report, so the question stands; it is no longer a dead end.
 
 ## Constraints to preserve
 

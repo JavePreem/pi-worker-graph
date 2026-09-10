@@ -20,7 +20,11 @@ import {
 import type { JsonValue } from "./json.js";
 import { isJsonValue, jsonByteLength } from "./json.js";
 import type { NodeOutput } from "./output.js";
-import { parseNodeDiagnostics, parseNodeOutput } from "./output.js";
+import {
+  parseNodeArtifact,
+  parseNodeDiagnostics,
+  parseNodeOutput,
+} from "./output.js";
 import type { NodeStateRecord, RunManifest, RunOwnership } from "./store.js";
 import {
   acquireRunOwnership,
@@ -101,6 +105,11 @@ export interface TaskExecutionInput {
 
 export interface TaskExecutionResult {
   readonly output: NodeOutput;
+  /**
+   * Long-form text retained beside the report, under the run, for later
+   * review. It is never parsed and never reaches a dependent task.
+   */
+  readonly artifact?: string;
   readonly diagnostics?: string;
 }
 
@@ -147,12 +156,14 @@ type SettledTask =
       readonly taskId: string;
       readonly status: "succeeded";
       readonly output: NodeOutput;
+      readonly artifact?: string;
       readonly diagnostics?: string;
     }
   | {
       readonly taskId: string;
       readonly status: "failed";
       readonly output?: NodeOutput;
+      readonly artifact?: string;
       readonly diagnostics?: string;
     }
   | {
@@ -297,17 +308,21 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
     const keys = Reflect.ownKeys(value);
     if (
       keys.length === 0 ||
-      keys.length > 2 ||
+      keys.length > 3 ||
       !keys.includes("output") ||
       !keys.every(
         (key) =>
           typeof key === "string" &&
-          (key === "output" || key === "diagnostics"),
+          (key === "output" || key === "artifact" || key === "diagnostics"),
       )
     ) {
       return invalidExecutorResult(taskId);
     }
     const outputDescriptor = Object.getOwnPropertyDescriptor(value, "output");
+    const artifactDescriptor = Object.getOwnPropertyDescriptor(
+      value,
+      "artifact",
+    );
     const diagnosticsDescriptor = Object.getOwnPropertyDescriptor(
       value,
       "diagnostics",
@@ -316,6 +331,8 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
       outputDescriptor === undefined ||
       !outputDescriptor.enumerable ||
       !("value" in outputDescriptor) ||
+      (artifactDescriptor !== undefined &&
+        (!artifactDescriptor.enumerable || !("value" in artifactDescriptor))) ||
       (diagnosticsDescriptor !== undefined &&
         (!diagnosticsDescriptor.enumerable ||
           !("value" in diagnosticsDescriptor)))
@@ -324,17 +341,25 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
     }
 
     const output = parseNodeOutput(outputDescriptor.value);
+    const artifact = parseNodeArtifact(artifactDescriptor?.value);
     const diagnostics = parseNodeDiagnostics(diagnosticsDescriptor?.value);
-    const boundedValue = {
+    // Only what a dependent task and the parent are handed is weighed against
+    // this limit. `parseNodeArtifact` bounds the artifact separately, because
+    // it reaches neither.
+    const reported = {
       output,
       ...(diagnostics === undefined ? {} : { diagnostics }),
     };
     if (
-      jsonByteLength(boundedValue as unknown as JsonValue) >
+      jsonByteLength(reported as unknown as JsonValue) >
       RUN_GRAPH_LIMITS.maxOutputBytes
     ) {
       return invalidExecutorResult(taskId);
     }
+    const boundedValue = {
+      ...reported,
+      ...(artifact === undefined ? {} : { artifact }),
+    };
     return output.blockers.length > 0
       ? {
           taskId,
@@ -528,6 +553,9 @@ async function persistCompletion(
           taskId: completion.taskId,
           status: completion.status,
           output: completion.output,
+          ...(completion.artifact === undefined
+            ? {}
+            : { artifact: completion.artifact }),
           ...(completion.diagnostics === undefined
             ? {}
             : { diagnostics: completion.diagnostics }),
@@ -539,6 +567,9 @@ async function persistCompletion(
             ...(completion.output === undefined
               ? {}
               : { output: completion.output }),
+            ...(completion.artifact === undefined
+              ? {}
+              : { artifact: completion.artifact }),
             ...(completion.diagnostics === undefined
               ? {}
               : { diagnostics: completion.diagnostics }),

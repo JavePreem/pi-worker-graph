@@ -6,6 +6,12 @@ export const NODE_OUTPUT_LIMITS = Object.freeze({
   maxTextBytes: 16 * 1024,
   maxPathBytes: 4 * 1024,
   maxDiagnosticsBytes: 16 * 1024,
+  /**
+   * Supplemental long-form text a worker may retain beside its report. It is
+   * not part of the report envelope and is not counted against `maxBytes`:
+   * the runtime never parses it and never places it on a dependency edge.
+   */
+  maxArtifactBytes: 128 * 1024,
 });
 
 export interface NodeOutput {
@@ -327,6 +333,48 @@ export function parseNodeOutput(value: unknown): NodeOutput {
     if (error instanceof NodeOutputValidationError) throw error;
     return fail("invalid_value", "$", "value cannot be inspected safely");
   }
+}
+
+/**
+ * Splits a submitted worker report into the report envelope and the optional
+ * artifact submitted beside it.
+ *
+ * The split reads the value through the same field discipline
+ * `parseNodeOutput` applies, before reading anything: an exotic prototype, a
+ * symbol key, and an accessor property are rejected here rather than invoked.
+ * Separating the artifact must never become a way past that check, which a
+ * rest-destructuring of the submitted value would be.
+ */
+export function splitReportArtifact(value: unknown): {
+  readonly report: unknown;
+  readonly artifact: unknown;
+} {
+  const fields = dataFields(value, "$", OUTPUT_FIELDS.size + 2);
+  const report: Record<string, unknown> = {};
+  for (const [field, item] of fields) {
+    if (field !== "artifact") report[field] = item;
+  }
+  return { report, artifact: fields.get("artifact") };
+}
+
+/**
+ * Internal shared validation for a retained text artifact, at every boundary
+ * it crosses: the worker report tool, the adapter that reads a child's tool
+ * result, the graph runner, and the store that publishes it.
+ */
+export function parseNodeArtifact(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return fail("invalid_field", "$.artifact", "expected non-blank text");
+  }
+  if (Buffer.byteLength(value) > NODE_OUTPUT_LIMITS.maxArtifactBytes) {
+    fail(
+      "text_limit",
+      "$.artifact",
+      `artifact exceeds ${NODE_OUTPUT_LIMITS.maxArtifactBytes} bytes`,
+    );
+  }
+  return value;
 }
 
 /** Internal shared validation for persisted and executor diagnostics. */

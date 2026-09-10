@@ -24,7 +24,11 @@ interface RegisteredTool {
     params: unknown,
   ) => Promise<{
     readonly terminate?: boolean;
-    readonly details?: { readonly kind?: string; readonly output?: NodeOutput };
+    readonly details?: {
+      readonly kind?: string;
+      readonly output?: NodeOutput;
+      readonly artifact?: string;
+    };
   }>;
 }
 
@@ -1061,4 +1065,86 @@ test("enabling an enabled mode reports that rather than re-entering", async (t) 
     message: "Worker-graph mode is already enabled",
     type: "info",
   });
+});
+
+test("accepts a supplemental artifact beside the final report", async (t) => {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
+  process.env.PI_WORKER_GRAPH_ROLE = "worker";
+  const definition = captureWorkerTool();
+
+  const output = nodeOutput("Investigated the failure");
+  const artifact = `# Investigation log\n\n${"line\n".repeat(2048)}`;
+  const result = await definition.execute("call-id", { ...output, artifact });
+
+  assert.equal(result.terminate, true);
+  assert.equal(result.details?.kind, "worker-graph-node-output");
+  // The artifact stays a sibling of the report rather than a report field, so
+  // the report envelope is unchanged at schema version 1.
+  assert.deepEqual(result.details?.output, output);
+  assert.equal(result.details?.artifact, artifact);
+});
+
+test("rejects a blank or oversized artifact without consuming the report", async (t) => {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
+  process.env.PI_WORKER_GRAPH_ROLE = "worker";
+  const definition = captureWorkerTool();
+
+  await assert.rejects(
+    definition.execute("first", { ...nodeOutput(), artifact: "   \n" }),
+    /artifact/,
+  );
+  await assert.rejects(
+    definition.execute("second", {
+      ...nodeOutput(),
+      artifact: "é".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes / 2 + 1),
+    }),
+    /artifact exceeds 131072 bytes/,
+  );
+
+  // The single submission was never spent, so the corrected call still lands.
+  const result = await definition.execute("third", nodeOutput("Corrected"));
+  assert.equal(result.terminate, true);
+  assert.equal(result.details?.artifact, undefined);
+});
+
+test("never reads a submitted report through an accessor or an exotic prototype", async (t) => {
+  const previousRole = process.env.PI_WORKER_GRAPH_ROLE;
+  t.after(() => restoreWorkerRole(previousRole));
+  process.env.PI_WORKER_GRAPH_ROLE = "worker";
+  const definition = captureWorkerTool();
+
+  // Separating the artifact from the report must not become a way past the
+  // field discipline the report parser applies: the getter is rejected, not
+  // invoked.
+  const accessorArtifact = Object.defineProperty(
+    { ...nodeOutput() },
+    "artifact",
+    {
+      enumerable: true,
+      get() {
+        throw new Error("artifact secret must not escape");
+      },
+    },
+  );
+  await assert.rejects(
+    definition.execute("first", accessorArtifact),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message.includes("artifact secret"), false);
+      return true;
+    },
+  );
+
+  const inheritedFields = Object.assign(
+    Object.create({ artifact: "inherited" }),
+    nodeOutput(),
+  );
+  await assert.rejects(definition.execute("second", inheritedFields));
+
+  // Neither rejection consumed the single submission.
+  const result = await definition.execute("third", nodeOutput("Corrected"));
+  assert.equal(result.terminate, true);
+  assert.equal(result.details?.artifact, undefined);
 });

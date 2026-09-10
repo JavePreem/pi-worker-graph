@@ -14,7 +14,10 @@ import type {
   TaskExecutionInput,
   TaskExecutionResult,
 } from "../src/index.js";
-import { createPiSubprocessExecutor } from "../src/index.js";
+import {
+  createPiSubprocessExecutor,
+  NODE_OUTPUT_LIMITS,
+} from "../src/index.js";
 import type {
   PiSubprocessExecutorOptions,
   PiWorkerProfile,
@@ -74,14 +77,18 @@ const options: PiSubprocessExecutorOptions = {
   extensionPath: "/package/extensions/index.ts",
 };
 
-function reportEvent(output: NodeOutput): string {
+function reportEvent(output: NodeOutput, artifact?: unknown): string {
   return JSON.stringify({
     type: "tool_execution_end",
     toolName: "worker_graph_report",
     isError: false,
     result: {
       content: [{ type: "text", text: "Final worker report submitted." }],
-      details: { kind: "worker-graph-node-output", output },
+      details: {
+        kind: "worker-graph-node-output",
+        output,
+        ...(artifact === undefined ? {} : { artifact }),
+      },
     },
   });
 }
@@ -1065,4 +1072,56 @@ test("rejects configuration that is not a plain identifier or path", async () =>
       command: "C:\\Program Files\\A & B\\pi.exe",
     }),
   );
+});
+
+test("returns a retained artifact alongside the worker report", async () => {
+  const child = new FakeChild();
+  const output = nodeOutput("Investigated and reported");
+  const artifact = `# Log\n\n${"entry\n".repeat(1024)}`;
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.end(`${reportEvent(output, artifact)}\n`);
+      child.close(0);
+    });
+  });
+
+  const result = await runPiWorkerProcess(
+    input(new AbortController().signal),
+    options,
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+
+  assert.deepEqual(result, { output, artifact });
+});
+
+test("revalidates a child's artifact rather than trusting the details", async () => {
+  // The child validated this already, but details cross a process boundary,
+  // so the adapter treats the child's validation as evidence, not guarantee.
+  for (const artifact of [
+    "   ",
+    42,
+    "x".repeat(NODE_OUTPUT_LIMITS.maxArtifactBytes + 1),
+  ]) {
+    const child = new FakeChild();
+    child.stdin.on("finish", () => {
+      queueMicrotask(() => {
+        child.stdout.end(`${reportEvent(nodeOutput(), artifact)}\n`);
+        child.close(0);
+      });
+    });
+
+    await assert.rejects(
+      runPiWorkerProcess(input(new AbortController().signal), options, {
+        spawnProcess: (() =>
+          child as unknown as ChildProcessWithoutNullStreams) as never,
+        terminateProcessTree: () => {},
+      }),
+      (error: unknown) =>
+        error instanceof TaskExecutionFailure && error.code === "report_tool",
+    );
+  }
 });
