@@ -147,6 +147,7 @@ Acceptance tests:
 Implement:
 
 - [x] explicit on, status, and off commands;
+- [x] operator-only run-store listing and deletion subcommands;
 - [x] an opt-in startup flag;
 - [x] session setting snapshot and restoration;
 - [x] orchestrator guidance for decomposition, bounded overlap, review, validation,

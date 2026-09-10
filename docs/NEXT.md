@@ -57,9 +57,10 @@ adapter. Automated tests remain provider-free:
   with deterministic arbitration between concurrent creators, no implicit
   deletion, stranded slots reported for explicit removal, and inconsistent
   run/slot state failing closed;
-- explicit retention cleanup: a listing of everything holding capacity, and
-  deletion of a named run with its slot, refused while an orchestrator holds
-  the run and ordered so an interruption can only strand a slot;
+- explicit retention cleanup through `/swarm runs` and `/swarm delete`: a
+  listing of everything holding capacity, and deletion of a named run with its
+  slot, refused while an orchestrator holds the run and ordered so an
+  interruption can only strand a slot;
 - immutable bounded run-scoped coordination events and directed inbox messages,
   in one run-global journal, with cursor-based queries and child-only Pi tools;
 - a run mutation lock that names its holder, so contention between the parent
@@ -89,14 +90,14 @@ pi -e .
 
 `npm run check` currently runs the adapter, configuration, context, extension,
 graph, orchestrator, report, store, and runner suites. `npm run build` must run
-before `pi -e .`, because
-`extensions/index.ts` re-exports the compiled entry point from `dist/`.
-Loading the package in Pi adds the `/swarm` control command but leaves the parent
-tool set unchanged. The entry point registers the worker report tool only when
-`PI_WORKER_GRAPH_ROLE=worker`, which the parent sets on worker subprocesses and
-never on its own session. Active graph lifecycles claim an exclusive owner
-record before mutating run state; resumable or externally addressable runs are
-not implemented yet.
+before `pi -e .`, because `extensions/index.ts` re-exports the compiled entry
+point from `dist/`. Loading the package in Pi adds the `/swarm` control
+command, whose `runs` and `delete` subcommands work whether or not the mode is
+enabled, but leaves the parent tool set unchanged. The entry point registers
+the worker report tool only when `PI_WORKER_GRAPH_ROLE=worker`, which the
+parent sets on worker subprocesses and never on its own session. Active graph
+lifecycles claim an exclusive owner record before mutating run state; resumable
+or externally addressable runs are not implemented yet.
 
 ## Next implementation slice
 
@@ -107,8 +108,9 @@ Prepare the vertical slice for a prerelease:
    intentionally skipped for the current local pass.
 2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
    and registry workflow.
-3. Decide whether cleanup needs a surface inside Pi — a `/swarm` control command
-   or a parent tool — or whether the store API is enough for the prerelease.
+3. Exercise `/swarm runs` and `/swarm delete` against a real agent directory
+   once, since their state-root resolution is only covered by an injected
+   configuration in tests.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 

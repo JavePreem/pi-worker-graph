@@ -116,11 +116,11 @@ untrusted data.
 The store has a fixed default retained-run count and a bounded configuration
 override. Capacity is a fixed set of atomically claimed slot files, so the limit
 is structural and concurrent creators are arbitrated by the filesystem instead
-of by counting. Runs and slots that disagree stop new work rather than admitting
-it on an accounting the store cannot trust. Automatic deletion is deferred so an orchestration
-request never destroys prior diagnostic state as a side effect, and no
-elapsed-time heuristic may reclaim a claimed slot: a stranded slot is reported
-for explicit removal rather than guessed to be free.
+of by counting. Runs and slots that disagree stop new work rather than
+admitting it on an accounting the store cannot trust. Automatic deletion is
+deferred so an orchestration request never destroys prior diagnostic state as a
+side effect, and no elapsed-time heuristic may reclaim a claimed slot: a
+stranded slot is reported for explicit removal rather than guessed to be free.
 
 ### D17 — Retention cleanup names the run
 
@@ -128,20 +128,21 @@ Cleanup removes a run the caller names. It does not select by age, by count, or
 by terminal status: D16 already refuses to let elapsed time reclaim a capacity
 slot, and choosing victims by age or count is that same guess one level up,
 where the thing discarded is the diagnostic state an operator kept the run for.
-`listRetainedRuns` reports what holds capacity — including a slot whose run was
-never published, and a run whose slot is missing — so a name is a practical
-thing to supply. `deleteRun` removes the run directory first and the slot
-second, so an interruption strands a slot the store already reports as
-reclaimable rather than leaving the run/slot disagreement that stops the store
-admitting any work. A run an orchestrator holds is refused, under the run
-mutation lock so ownership cannot be acquired between the check and the
-removal.
+It is reached through `/swarm runs` and `/swarm delete <run-id>` rather than a
+second parent tool: D15 keeps the parent's tool surface at one static tool, and
+an operation that destroys retained state must not be something an
+orchestration request can reach. `listRetainedRuns` reports what holds capacity
+— including a slot whose run was never published, and a run whose slot is
+missing — so a name is a practical thing to supply. `deleteRun` removes the run
+directory first and the slot second, so an interruption strands a slot the
+store already reports as reclaimable rather than leaving the run/slot
+disagreement that stops the store admitting any work. A run an orchestrator
+holds is refused, under the run mutation lock so ownership cannot be acquired
+between the check and the removal.
 
 ## Open decisions
 
 1. Whether review feedback resumes a persisted child session or starts a fresh
    attempt with the prior structured output.
 2. Whether advisory path and symbol claims belong in the MVP or a follow-up.
-3. Whether cleanup is reachable from inside Pi, as a `/swarm` control command
-   or a parent tool, or stays a store API a maintainer calls.
-4. Whether graph execution pauses at explicit review barriers between frontiers.
+3. Whether graph execution pauses at explicit review barriers between frontiers.

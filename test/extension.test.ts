@@ -29,6 +29,7 @@ interface RegisteredTool {
 }
 
 interface SessionContext {
+  readonly cwd: string;
   readonly sessionManager: { getBranch(): readonly unknown[] };
   readonly ui: { notify(message: string, type?: string): void };
 }
@@ -62,14 +63,24 @@ interface ModeSession {
   tree(entries?: readonly unknown[]): void;
   shutdown(): void;
   swarm(action: string): Promise<void>;
+  readonly stateRoot: string;
+  /** Every configuration load the extension performed, in order. */
+  readonly configurationLoads: {
+    readonly agentDirectory: string;
+    readonly workingDirectory: string;
+  }[];
 }
 
 function modeSession(
   options: {
     readonly active?: readonly string[];
     readonly flag?: boolean;
+    readonly stateRoot?: string;
+    readonly cwd?: string;
   } = {},
 ): ModeSession {
+  const stateRoot = options.stateRoot;
+  const cwd = options.cwd ?? "/workspace";
   const handlers = new Map<string, SessionHandler>();
   let swarmCommand:
     | ((args: string, ctx: SessionContext) => Promise<void>)
@@ -81,6 +92,7 @@ function modeSession(
     });
   };
   const context = (entries?: readonly unknown[]): SessionContext => ({
+    cwd,
     sessionManager: { getBranch: () => entries ?? session.entries },
     ui: { notify },
   });
@@ -90,6 +102,8 @@ function modeSession(
     handler({}, context(entries));
   };
   const session: ModeSession = {
+    stateRoot: stateRoot ?? "",
+    configurationLoads: [],
     active: [...(options.active ?? ["read", "bash", "edit", "write"])],
     tools: [],
     commands: [],
@@ -104,39 +118,53 @@ function modeSession(
       await swarmCommand(action, context());
     },
   };
-  registerWorkerGraph({
-    registerTool(tool: { name: string }) {
-      session.tools.push(tool.name);
-      session.active = [...session.active, tool.name];
-    },
-    registerCommand(
-      name: string,
-      definition: {
-        handler: (args: string, ctx: SessionContext) => Promise<void>;
+  registerWorkerGraph(
+    {
+      registerTool(tool: { name: string }) {
+        session.tools.push(tool.name);
+        session.active = [...session.active, tool.name];
       },
-    ) {
-      session.commands.push(name);
-      swarmCommand = definition.handler;
-    },
-    registerFlag(name: string) {
-      session.flags.push(name);
-    },
-    getFlag() {
-      return options.flag === true;
-    },
-    getActiveTools() {
-      return [...session.active];
-    },
-    setActiveTools(names: string[]) {
-      session.active = [...names];
-    },
-    appendEntry(customType: string, data: unknown) {
-      session.entries.push({ type: "custom", customType, data });
-    },
-    on(event: string, handler: SessionHandler) {
-      handlers.set(event, handler);
-    },
-  } as never);
+      registerCommand(
+        name: string,
+        definition: {
+          handler: (args: string, ctx: SessionContext) => Promise<void>;
+        },
+      ) {
+        session.commands.push(name);
+        swarmCommand = definition.handler;
+      },
+      registerFlag(name: string) {
+        session.flags.push(name);
+      },
+      getFlag() {
+        return options.flag === true;
+      },
+      getActiveTools() {
+        return [...session.active];
+      },
+      setActiveTools(names: string[]) {
+        session.active = [...names];
+      },
+      appendEntry(customType: string, data: unknown) {
+        session.entries.push({ type: "custom", customType, data });
+      },
+      on(event: string, handler: SessionHandler) {
+        handlers.set(event, handler);
+      },
+    } as never,
+    stateRoot === undefined
+      ? {}
+      : {
+          getAgentDirectory: () => stateRoot,
+          loadConfiguration: async (loadOptions) => {
+            session.configurationLoads.push({
+              agentDirectory: loadOptions.agentDirectory,
+              workingDirectory: loadOptions.workingDirectory,
+            });
+            return { stateRoot, maxRetainedRuns: 64, profiles: {} };
+          },
+        },
+  );
   return session;
 }
 
@@ -592,4 +620,117 @@ test("publishes the model-facing schema without provider-hostile keywords", asyn
     JSON.stringify(definition.parameters),
     new RegExp(`${NODE_OUTPUT_LIMITS.maxTextBytes} bytes`),
   );
+});
+
+async function storeSession(t: test.TestContext): Promise<ModeSession> {
+  const stateRoot = await mkdtemp(join(tmpdir(), "pi-worker-graph-swarm-"));
+  t.after(async () => {
+    await rm(stateRoot, { recursive: true, force: true });
+  });
+  return modeSession({ stateRoot, cwd: join(stateRoot, "checkout") });
+}
+
+test("reports and deletes retained run state from the swarm command", async (t) => {
+  const session = await storeSession(t);
+  const stateRoot = session.stateRoot;
+
+  await session.swarm("runs");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "The run store retains no runs",
+    type: "info",
+  });
+
+  const first = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "a" }] }),
+  );
+  const second = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "b" }] }),
+  );
+  await session.swarm("runs");
+  const listing = session.notifications.at(-1)?.message ?? "";
+  assert.ok(
+    listing.startsWith("The run store retains 2 run(s), oldest first:"),
+  );
+  assert.ok(listing.indexOf(first.runId) < listing.indexOf(second.runId));
+  assert.ok(
+    listing.includes(`${first.runId}  slot 0  ${first.createdAt}  free`),
+  );
+
+  // Deleting is the operator's act, so it reports exactly what it removed.
+  await session.swarm(`delete ${second.runId}`);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: `Deleted run ${second.runId} and released its capacity`,
+    type: "info",
+  });
+  await session.swarm(`delete ${second.runId}`);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: `No run ${second.runId} is retained`,
+    type: "info",
+  });
+  await session.swarm("runs");
+  assert.ok(
+    !(session.notifications.at(-1)?.message ?? "").includes(second.runId),
+  );
+});
+
+test("refuses swarm deletion of an owned run and reports misuse", async (t) => {
+  const session = await storeSession(t);
+  const stateRoot = session.stateRoot;
+  const manifest = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  const ownership = await acquireRunOwnership(stateRoot, manifest.runId);
+
+  await session.swarm(`delete ${manifest.runId}`);
+  assert.equal(session.notifications.at(-1)?.type, "error");
+  await session.swarm("runs");
+  assert.ok((session.notifications.at(-1)?.message ?? "").includes("owned"));
+  await releaseRunOwnership(stateRoot, ownership);
+
+  await session.swarm("delete");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm delete <run-id>",
+    type: "warning",
+  });
+  await session.swarm("delete not-a-run-id");
+  assert.equal(session.notifications.at(-1)?.type, "error");
+  await session.swarm("nonsense");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm on|status|off|runs|delete <run-id>",
+    type: "warning",
+  });
+});
+
+test("resolves the run store the way a graph run resolves it", async (t) => {
+  const session = await storeSession(t);
+
+  await session.swarm("runs");
+
+  // The command must load configuration from the session's working directory,
+  // not the process one, or it can act on a different store than the tool.
+  assert.deepEqual(session.configurationLoads, [
+    {
+      agentDirectory: session.stateRoot,
+      workingDirectory: join(session.stateRoot, "checkout"),
+    },
+  ]);
+});
+
+test("answers a misused run-store subcommand before touching the store", async (t) => {
+  const session = await storeSession(t);
+
+  await session.swarm("runs extra");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm on|status|off|runs|delete <run-id>",
+    type: "warning",
+  });
+  await session.swarm("delete one two");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm delete <run-id>",
+    type: "warning",
+  });
+  assert.deepEqual(session.configurationLoads, []);
 });

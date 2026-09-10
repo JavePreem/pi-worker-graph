@@ -238,17 +238,20 @@ Reaching the limit rejects the new graph; run state is never deleted
 automatically.
 
 A creation interrupted between claiming its slot and publishing its run leaves
-the slot claimed. `listRetainedRuns()` names everything holding capacity — each
-run with its slot and creation time, a slot whose run was never published, and
-a run whose slot is missing — and `deleteRun()` removes a named run's directory
-and its slot together. Cleanup is by name: nothing decides on the operator's
-behalf which diagnostic state is worth losing, so there is no deletion by age
-or by count. A run an orchestrator holds is refused. The directory goes first
-and the slot second, so an interruption strands a slot the store reports as
-reclaimable rather than leaving a published run whose slot is missing: that
-disagreement stops the store admitting any new work at all — rather than
-letting every waiting creator claim the same apparently free capacity — until
-the two agree again.
+the slot claimed. `/swarm runs` names everything holding capacity — each run
+with its slot and creation time, a slot whose run was never published, and a
+run whose slot is missing — and `/swarm delete <run-id>` removes a named run's
+directory and its slot together. The same operations are exported as
+`listRetainedRuns()` and `deleteRun()`. They are a command and not a parent
+tool: deleting a run destroys the diagnostic state it was kept for, so it is an
+operator's act and the model has no way to reach it. Cleanup is by name:
+nothing decides on the operator's behalf which diagnostic state is worth
+losing, so there is no deletion by age or by count. A run an orchestrator holds
+is refused. The directory goes first and the slot second, so an interruption
+strands a slot the store reports as reclaimable rather than leaving a published
+run whose slot is missing: that disagreement stops the store admitting any new
+work at all — rather than letting every waiting creator claim the same
+apparently free capacity — until the two agree again.
 
 Load the package and activate orchestration explicitly:
 
@@ -256,21 +259,24 @@ Load the package and activate orchestration explicitly:
 /swarm on
 /swarm status
 /swarm off
+/swarm runs
+/swarm delete <run-id>
 ```
 
-The `--swarm` extension flag enables the mode at startup. While the mode is off,
-the `worker_graph` tool is excluded from the active tool set. Enabling the mode
-snapshots the active tools, disables the built-in `bash`, `edit`, and `write`
-tools in the parent, and persists the mode state in the Pi session. Turning it
-off restores the exact snapshot. Navigating the session tree restores whatever
-the target branch recorded, so `/swarm off` is never undone by the flag that
-started the session. A tool set the extension could not read back — more than
-256 tools, or a tool name longer than 256 bytes — refuses to enable the mode
-rather than suppressing parent tools it could not restore after a reload. While a graph runs, the tool streams bounded status and
-returns deterministic node statuses, aggregate usage, and a compact bounded
-projection of worker reports. Worker transcripts never enter the parent model
-context; projected report fields are marked as untrusted data inside a labeled
-block that worker text cannot close.
+The `--swarm` extension flag enables the mode at startup. While the mode is
+off, the `worker_graph` tool is excluded from the active tool set. Enabling the
+mode snapshots the active tools, disables the built-in `bash`, `edit`, and
+`write` tools in the parent, and persists the mode state in the Pi session.
+Turning it off restores the exact snapshot. Navigating the session tree
+restores whatever the target branch recorded, so `/swarm off` is never undone
+by the flag that started the session. A tool set the extension could not read
+back — more than 256 tools, or a tool name longer than 256 bytes — refuses to
+enable the mode rather than suppressing parent tools it could not restore after
+a reload. While a graph runs, the tool streams bounded status and returns
+deterministic node statuses, aggregate usage, and a compact bounded projection
+of worker reports. Worker transcripts never enter the parent model context;
+projected report fields are marked as untrusted data inside a labeled block
+that worker text cannot close.
 
 Only one graph may run in a parent session at a time. Include validation as a
 dependent worker task. After reviewing the shared checkout with the remaining

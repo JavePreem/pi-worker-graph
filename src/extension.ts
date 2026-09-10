@@ -1,8 +1,10 @@
 import {
   type ExtensionAPI,
+  type ExtensionCommandContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { loadWorkerGraphConfiguration } from "./config.js";
 import {
   registerWorkerCoordinationTools,
   workerCoordinationContext,
@@ -18,6 +20,8 @@ import {
   NODE_OUTPUT_SCHEMA_VERSION,
   parseNodeOutput,
 } from "./output.js";
+import type { RetainedRun } from "./store.js";
+import { deleteRun, listRetainedRuns } from "./store.js";
 
 const WORKER_ROLE_VARIABLE = "PI_WORKER_GRAPH_ROLE";
 const WORKER_ROLE = "worker";
@@ -31,6 +35,8 @@ const MODE_STATE_FIELDS = new Set([
   "enabled",
   "toolsBeforeMode",
 ]);
+const SWARM_USAGE = "Usage: /swarm on|status|off|runs|delete <run-id>";
+const SWARM_DELETE_USAGE = "Usage: /swarm delete <run-id>";
 const UNRESTORABLE_TOOLS_MESSAGE =
   "Worker-graph mode not enabled: the active tool set cannot be restored later";
 export const WORKER_REPORT_TOOL_NAME = "worker_graph_report";
@@ -209,6 +215,26 @@ function registerWorkerReportTool(pi: ExtensionAPI): void {
   });
 }
 
+/**
+ * One line per unit of retained capacity. A run with no slot, and a slot with
+ * no readable run, are both shown rather than omitted: they are the states an
+ * operator is reading this to find.
+ */
+function retainedRunsText(runs: readonly RetainedRun[]): string {
+  if (runs.length === 0) return "The run store retains no runs";
+  return [
+    `The run store retains ${runs.length} run(s), oldest first:`,
+    ...runs.map((run) =>
+      [
+        run.runId ?? "(slot names no run)",
+        `slot ${run.slot ?? "none"}`,
+        run.createdAt ?? "unreadable",
+        run.owned ? "owned" : "free",
+      ].join("  "),
+    ),
+  ].join("\n");
+}
+
 function orchestratorDependencies(
   dependencies: Partial<WorkerGraphOrchestratorDependencies>,
 ): WorkerGraphOrchestratorDependencies {
@@ -248,10 +274,10 @@ export default function registerWorkerGraph(
     type: "boolean",
     default: false,
   });
-  registerWorkerGraphOrchestratorTool(
-    pi,
-    orchestratorDependencies(dependencies),
-  );
+  const resolved = orchestratorDependencies(dependencies);
+  const loadConfiguration =
+    resolved.loadConfiguration ?? loadWorkerGraphConfiguration;
+  registerWorkerGraphOrchestratorTool(pi, resolved);
 
   let enabled = false;
   let toolsBeforeMode: readonly string[] | undefined;
@@ -336,10 +362,76 @@ export default function registerWorkerGraph(
     deactivate();
   });
 
+  /**
+   * Resolved from the same agent directory and the same working directory a
+   * graph run resolves it from, so the command and the orchestration tool can
+   * never disagree about which store they are acting on.
+   */
+  const resolveStateRoot = async (
+    workingDirectory: string,
+  ): Promise<string> => {
+    const configuration = await loadConfiguration({
+      agentDirectory: resolved.getAgentDirectory(),
+      workingDirectory,
+    });
+    return configuration.stateRoot;
+  };
+
+  /**
+   * Retention cleanup is a command rather than a tool. Deleting a run destroys
+   * the diagnostic state it was kept for, so it is an operator's act: the
+   * parent model exposes one static orchestration tool and no way to reach
+   * this. Both subcommands work whether or not the mode is enabled, because
+   * the state they report outlives any one session, and a store that cannot
+   * be read or changed is reported rather than thrown at the session.
+   */
+  const runStore = async (
+    ctx: ExtensionCommandContext,
+    act: (stateRoot: string) => Promise<string>,
+  ): Promise<void> => {
+    try {
+      ctx.ui.notify(await act(await resolveStateRoot(ctx.cwd)), "info");
+    } catch (error) {
+      ctx.ui.notify(
+        error instanceof Error ? error.message : "The run store failed",
+        "error",
+      );
+    }
+  };
+
   pi.registerCommand(SWARM_COMMAND_NAME, {
-    description: "Enable, disable, or inspect worker-graph orchestration",
+    description:
+      "Enable, disable, or inspect worker-graph orchestration and its run store",
     async handler(args, ctx) {
-      const action = args.trim();
+      const [action = "", ...operands] = args
+        .trim()
+        .split(/\s+/)
+        .filter((word) => word.length > 0);
+      // Operands are checked before the store is touched, so a mistyped
+      // invocation answers with its usage and not with a store failure.
+      if (action === "runs") {
+        if (operands.length !== 0) {
+          ctx.ui.notify(SWARM_USAGE, "warning");
+          return;
+        }
+        await runStore(ctx, async (stateRoot) =>
+          retainedRunsText(await listRetainedRuns(stateRoot)),
+        );
+        return;
+      }
+      if (action === "delete") {
+        const [runId] = operands;
+        if (runId === undefined || operands.length !== 1) {
+          ctx.ui.notify(SWARM_DELETE_USAGE, "warning");
+          return;
+        }
+        await runStore(ctx, async (stateRoot) =>
+          (await deleteRun(stateRoot, runId))
+            ? `Deleted run ${runId} and released its capacity`
+            : `No run ${runId} is retained`,
+        );
+        return;
+      }
       if (action === "on") {
         if (!activate()) {
           ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
@@ -359,7 +451,7 @@ export default function registerWorkerGraph(
           "info",
         );
       } else {
-        ctx.ui.notify("Usage: /swarm on|status|off", "warning");
+        ctx.ui.notify(SWARM_USAGE, "warning");
       }
     },
   });
