@@ -21,6 +21,8 @@ import {
   parseNodeDiagnostics,
   parseNodeOutput,
 } from "./output.js";
+import type { TaskUsage } from "./usage.js";
+import { parseTaskUsage } from "./usage.js";
 
 export type { JsonValue } from "./json.js";
 
@@ -100,6 +102,7 @@ const NODE_OUTPUT_RECORD_FIELDS = new Set([
   "completedAt",
   "output",
   "artifact",
+  "usage",
   "diagnostics",
 ]);
 const NODE_ARTIFACT_RECORD_FIELDS = new Set([
@@ -362,6 +365,12 @@ interface NodeOutputRecordBase {
   readonly attempt: number;
   readonly completedAt: string;
   readonly artifact?: NodeArtifactReference;
+  /**
+   * What the attempt spent, when the executor accounted for it. Recorded for
+   * every terminal status, including aborted: an attempt the run stopped had
+   * still spent what it spent by then.
+   */
+  readonly usage?: TaskUsage;
   readonly diagnostics?: string;
 }
 
@@ -388,6 +397,7 @@ export type PublishNodeOutput =
       readonly output: NodeOutput;
       /** Retained verbatim beside the report; never propagated downstream. */
       readonly artifact?: string;
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     }
   | {
@@ -395,6 +405,7 @@ export type PublishNodeOutput =
       readonly status: "failed";
       readonly output?: NodeOutput;
       readonly artifact?: string;
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     }
   | {
@@ -402,6 +413,7 @@ export type PublishNodeOutput =
       readonly status: "aborted";
       readonly output?: never;
       readonly artifact?: never;
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     };
 
@@ -1303,6 +1315,12 @@ function validateNodeOutputRecord(
   if ("artifact" in value && !validArtifactReference(value.artifact)) {
     return invalidRecord(path, "node output has an invalid artifact reference");
   }
+  let usage: TaskUsage | undefined;
+  try {
+    usage = parseTaskUsage(value.usage);
+  } catch {
+    return invalidRecord(path, "node output has invalid usage");
+  }
 
   let diagnostics: string | undefined;
   try {
@@ -1323,6 +1341,7 @@ function validateNodeOutputRecord(
       : {
           artifact: { bytes: (value.artifact as NodeArtifactReference).bytes },
         }),
+    ...(usage === undefined ? {} : { usage }),
     ...(diagnostics === undefined ? {} : { diagnostics }),
   };
 
@@ -2062,6 +2081,15 @@ async function publishNodeOutputUnlocked(
       );
     }
   }
+  let usage: TaskUsage | undefined;
+  try {
+    usage = parseTaskUsage(input.usage);
+  } catch {
+    throw new RunStoreError(
+      "invalid_argument",
+      `Usage for task ${JSON.stringify(input.taskId)} is invalid or out of range`,
+    );
+  }
   let diagnostics: string | undefined;
   try {
     diagnostics = parseNodeDiagnostics(input.diagnostics);
@@ -2118,6 +2146,7 @@ async function publishNodeOutputUnlocked(
     ...(artifact === undefined
       ? {}
       : { artifact: { bytes: Buffer.byteLength(artifact, "utf8") } }),
+    ...(usage === undefined ? {} : { usage }),
     ...(diagnostics === undefined ? {} : { diagnostics }),
   };
   let record: NodeOutputRecord;
@@ -2776,17 +2805,129 @@ export async function readNodeArtifact(
   return record;
 }
 
-export async function readNodeOutput(
+/**
+ * How well one task's spend is known.
+ *
+ * `not_started` is not a gap in the accounting: a task that never ran spent
+ * nothing. `unreported` is a gap: the attempt happened and nothing recorded
+ * what it cost, which must never read as work that was free.
+ */
+export type RunTaskAccounting = "reported" | "unreported" | "not_started";
+
+export interface RunTaskUsage {
+  readonly taskId: string;
+  readonly status: NodeStatus;
+  readonly accounting: RunTaskAccounting;
+  readonly usage: TaskUsage | undefined;
+}
+
+export interface RunUsage {
+  readonly runId: string;
+  /**
+   * The sum across the run's attempts. `TASK_USAGE_LIMITS` bounds one
+   * attempt, not this: a 32-task run can legitimately total beyond them, so
+   * this is not a value `parseTaskUsage` would accept back.
+   */
+  readonly total: TaskUsage;
+  /** Tasks that ran and recorded no usage, in manifest order. */
+  readonly unaccounted: readonly string[];
+  readonly tasks: readonly RunTaskUsage[];
+}
+
+function addUsage(total: TaskUsage, usage: TaskUsage): TaskUsage {
+  return {
+    turns: total.turns + usage.turns,
+    input: total.input + usage.input,
+    output: total.output + usage.output,
+    cacheRead: total.cacheRead + usage.cacheRead,
+    cacheWrite: total.cacheWrite + usage.cacheWrite,
+    totalTokens: total.totalTokens + usage.totalTokens,
+    cost: {
+      input: total.cost.input + usage.cost.input,
+      output: total.cost.output + usage.cost.output,
+      cacheRead: total.cost.cacheRead + usage.cost.cacheRead,
+      cacheWrite: total.cost.cacheWrite + usage.cost.cacheWrite,
+      total: total.cost.total + usage.cost.total,
+    },
+  };
+}
+
+/**
+ * Sums what one retained run spent, from the outputs it published.
+ *
+ * Derived rather than stored, so it is correct for a run that was interrupted
+ * and needs no record kept in step with the outputs. A task with no readable
+ * output contributes nothing and is named in `unaccounted`: an unknown total
+ * must not read as a cheap one.
+ */
+export async function readRunUsage(
   stateRoot: string,
   runId: string,
-  taskId: string,
-): Promise<NodeOutputRecord> {
+): Promise<RunUsage> {
   const manifest = await readRun(stateRoot, runId);
-  const task = findTask(manifest, taskId);
-  const [record, state] = await Promise.all([
-    readNodeOutputRecord(stateRoot, manifest, task),
-    readNodeStateRecord(stateRoot, manifest, task),
-  ]);
+  const tasks: RunTaskUsage[] = [];
+  const unaccounted: string[] = [];
+  let total: TaskUsage = {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  for (const task of manifest.graph.tasks) {
+    const state = await readNodeStateRecord(stateRoot, manifest, task);
+    let usage: TaskUsage | undefined;
+    let published = true;
+    try {
+      const record = await readNodeOutputRecord(stateRoot, manifest, task);
+      // The same agreement every other reader requires. A malformed or
+      // inconsistent record is reported, not quietly counted as nothing:
+      // only a task that published no output at all is an expected absence.
+      assertOutputMatchesState(record, state);
+      usage = record.usage;
+    } catch (error) {
+      if (!(error instanceof RunStoreError) || error.code !== "not_found") {
+        throw error;
+      }
+      published = false;
+    }
+    const accounting: RunTaskAccounting =
+      usage !== undefined
+        ? "reported"
+        : !published &&
+            (state.status === "pending" || state.status === "blocked")
+          ? "not_started"
+          : "unreported";
+    if (accounting === "unreported") unaccounted.push(task.id);
+    if (usage !== undefined) total = addUsage(total, usage);
+    tasks.push(
+      Object.freeze({
+        taskId: task.id,
+        status: state.status,
+        accounting,
+        usage,
+      }),
+    );
+  }
+  return Object.freeze({
+    runId: manifest.runId,
+    total: Object.freeze({ ...total, cost: Object.freeze({ ...total.cost }) }),
+    unaccounted: Object.freeze(unaccounted),
+    tasks: Object.freeze(tasks),
+  });
+}
+
+/**
+ * Every reader of a published output applies this: an output for a different
+ * attempt, for a node settled as blocked, or disagreeing with a terminal node
+ * status describes state no reader may act on.
+ */
+function assertOutputMatchesState(
+  record: NodeOutputRecord,
+  state: NodeStateRecord,
+): void {
   if (
     record.attempt !== state.attempt ||
     state.status === "blocked" ||
@@ -2798,5 +2939,19 @@ export async function readNodeOutput(
       "Node output does not match current node state",
     );
   }
+}
+
+export async function readNodeOutput(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+): Promise<NodeOutputRecord> {
+  const manifest = await readRun(stateRoot, runId);
+  const task = findTask(manifest, taskId);
+  const [record, state] = await Promise.all([
+    readNodeOutputRecord(stateRoot, manifest, task),
+    readNodeStateRecord(stateRoot, manifest, task),
+  ]);
+  assertOutputMatchesState(record, state);
   return record;
 }

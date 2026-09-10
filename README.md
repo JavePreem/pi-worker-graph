@@ -337,6 +337,7 @@ Load the package and activate orchestration explicitly:
 /swarm status
 /swarm off
 /swarm runs
+/swarm usage <run-id>
 /swarm delete <run-id>
 ```
 
@@ -364,10 +365,48 @@ Only one graph may run in a parent session at a time. Include validation as a
 dependent worker task. After reviewing the shared checkout with the remaining
 read-only tools, invoke another narrow graph for any repairs.
 
+## Cost and token accounting
+
+Each worker's spend is recorded with the attempt that incurred it, in the node
+output envelope: turns, input, output, cache-read and cache-write tokens, and
+Pi's price for each. It is recorded for every terminal status,
+including a task the run aborted, because an attempt that was stopped had still
+spent what it spent by then. A failed worker reports its spend on
+`TaskExecutionFailure`, and a timeout or an abort — where the runner discards
+the executor's own outcome — still keeps the usage the executor reported.
+
+Because it is persisted rather than only reported to the session, spend
+survives the run. `/swarm usage <run-id>` sums a retained run and breaks it
+down by task, and `readRunUsage()` returns the same thing to a library caller.
+The total is derived from the outputs the run published, so it is correct for
+an interrupted run; a task with no readable output is named as unaccounted
+rather than counted as work that was free.
+
+The `worker_graph` tool result carries the same numbers per node, so an
+orchestrator can see which worker was expensive rather than only what the graph
+cost in total. Its aggregate comes from live progress instead of the store, so
+it still accounts for a task whose output could not be persisted.
+
+Token counts come from the provider's telemetry; cost is Pi's pricing of those
+tokens, so it is only as good as Pi's pricing table. Treat cost as an estimate
+and tokens as the sturdier number.
+
+Zero and unknown are kept apart. A worker whose provider reported no usage, or
+reported a field that was not a usable number, records no usage at all rather
+than a complete-looking set of zeros, and `/swarm usage` names it as
+unaccounted. A task that never ran is reported separately again: it is not a
+gap in the accounting. The live aggregate on the tool result is best-effort by
+contrast — it projects the running figures whether or not they turned out to be
+usable, which is what makes it a superset of what was persisted.
+
+The runtime bounds tasks, concurrency, payload, output, context, and runtime,
+but does not yet enforce a token or cost ceiling.
+
 ## Planned runtime
 
 The remaining runtime will add:
 
+- a configured token or cost budget, enforced against recorded usage;
 - persisted worker attempts and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not

@@ -27,8 +27,8 @@ import type {
   PiOrchestratorProfile,
   PiSessionThinkingLevel,
 } from "./pi-subprocess.js";
-import type { RetainedRun } from "./store.js";
-import { deleteRun, listRetainedRuns } from "./store.js";
+import type { RetainedRun, RunUsage } from "./store.js";
+import { deleteRun, listRetainedRuns, readRunUsage } from "./store.js";
 
 const WORKER_ROLE_VARIABLE = "PI_WORKER_GRAPH_ROLE";
 const WORKER_ROLE = "worker";
@@ -53,8 +53,10 @@ const SESSION_THINKING_LEVELS = new Set<PiSessionThinkingLevel>([
   "xhigh",
   "max",
 ]);
-const SWARM_USAGE = "Usage: /swarm on|status|off|runs|delete <run-id>";
+const SWARM_USAGE =
+  "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>";
 const SWARM_DELETE_USAGE = "Usage: /swarm delete <run-id>";
+const SWARM_RUN_USAGE_USAGE = "Usage: /swarm usage <run-id>";
 const UNRESTORABLE_TOOLS_MESSAGE =
   "Worker-graph mode not enabled: the active tool set cannot be restored later";
 const UNRESTORABLE_MODEL_MESSAGE =
@@ -354,6 +356,37 @@ function retainedRunsText(runs: readonly RetainedRun[]): string {
         run.owned ? "owned" : "free",
       ].join("  "),
     ),
+  ].join("\n");
+}
+
+/**
+ * Tokens come from the provider's telemetry and are the sturdy number; cost
+ * is Pi's pricing of those tokens and only as good as its pricing table, so it
+ * is labelled as an estimate. Tasks that ran and recorded nothing are named
+ * rather than folded into the total as zero.
+ */
+function runUsageText(usage: RunUsage): string {
+  const money = (value: number) => value.toFixed(4);
+  return [
+    `Run ${usage.runId} spent ${usage.total.totalTokens} token(s) over ${usage.total.turns} turn(s)`,
+    `  input ${usage.total.input}  output ${usage.total.output}  cache read ${usage.total.cacheRead}  cache write ${usage.total.cacheWrite}`,
+    `  estimated cost ${money(usage.total.cost.total)} (Pi's pricing of the reported tokens)`,
+    ...usage.tasks.map((task) =>
+      [
+        `  ${task.taskId}`,
+        task.status,
+        task.usage === undefined
+          ? task.accounting === "not_started"
+            ? "did not run"
+            : "no recorded usage"
+          : `${task.usage.totalTokens} token(s), ${money(task.usage.cost.total)}`,
+      ].join("  "),
+    ),
+    ...(usage.unaccounted.length === 0
+      ? []
+      : [
+          `The total excludes ${usage.unaccounted.length} task(s) that recorded no usage: ${usage.unaccounted.join(", ")}`,
+        ]),
   ].join("\n");
 }
 
@@ -719,6 +752,17 @@ export default function registerWorkerGraph(
         }
         await runStore(ctx, async (stateRoot) =>
           retainedRunsText(await listRetainedRuns(stateRoot)),
+        );
+        return;
+      }
+      if (action === "usage") {
+        const [runId] = operands;
+        if (runId === undefined || operands.length !== 1) {
+          ctx.ui.notify(SWARM_RUN_USAGE_USAGE, "warning");
+          return;
+        }
+        await runStore(ctx, async (stateRoot) =>
+          runUsageText(await readRunUsage(stateRoot, runId)),
         );
         return;
       }

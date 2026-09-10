@@ -16,6 +16,14 @@ adapter. Automated tests remain provider-free:
   parent-facing result, and removed with its run;
 - report and prerequisite-context overflow that stay fail-closed rather than
   truncating into an artifact;
+- per-attempt token and cost accounting persisted with the attempt, kept for a
+  failed, timed-out, or aborted attempt as well as a succeeded one, summed per
+  run through `/swarm usage` and `readRunUsage()`, and attributed per task in
+  the parent-facing result;
+- accounting that keeps zero and unknown apart: absent or unusable telemetry
+  leaves an attempt unaccounted rather than free, a run total is only summed
+  from outputs that agree with node state, and a task that never ran is
+  reported apart from one that ran and recorded nothing;
 - parent-owned node state and immutable terminal outputs;
 - restrictive permissions and atomic filesystem publication;
 - bounded UTF-8 JSON records with explicit read and identity errors;
@@ -52,7 +60,8 @@ adapter. Automated tests remain provider-free:
 - a default state root beneath Pi's agent directory, with checkout-local roots
   rejected by the extension;
 - one static, fully bounded `worker_graph` parent tool;
-- explicit `/swarm on`, `/swarm status`, `/swarm off`, and `--swarm` activation;
+- explicit `/swarm on`, `/swarm status`, `/swarm off`, `/swarm usage`, and
+  `--swarm` activation;
 - an optional configured orchestrator session model and thinking level, applied
   on activation and restored on exit, refused unless the mode knows the
   identifiers that restore it, the model is one Pi can find, and its provider
@@ -186,6 +195,20 @@ already has a structured channel while it runs — a `conflict` coordination
 event (`src/store.ts`), which the parent and other workers can read — and a
 retained artifact for the long form of what it saw. Neither is the terminal
 report, so the question stands; it is no longer a dead end.
+
+## Deferred budget work
+
+Usage is now recorded but nothing acts on it. The runtime bounds tasks,
+concurrency, payload, output, context, and per-task runtime; it has no token or
+cost ceiling, so a graph can spend without limit as long as each worker stays
+inside its timeout.
+
+The next slice is a configured budget in `worker-graph.json`, checked in the
+runner between frontiers and enforced through the existing abort path, which
+already settles remaining nodes and returns a result with usage intact. Two
+things to settle first: whether the budget counts tokens or cost — cost is the
+provider's estimate, tokens are the sturdy number — and whether crossing it
+aborts the graph or only refuses to open the next frontier.
 
 ## Constraints to preserve
 

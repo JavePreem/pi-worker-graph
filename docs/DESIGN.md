@@ -135,9 +135,35 @@ edge (D19).
 
 Persisted output records use their own envelope schema version, independently of
 the worker-report schema version. Current envelopes include run and task identity,
-attempt, completion time, status, bounded diagnostics, and, when one was
-retained, a reference to a text artifact. Usage metadata will be added with the
-transport layer that consumes it.
+attempt, completion time, status, bounded diagnostics, a reference to a
+retained text artifact when there is one, and what the attempt spent.
+
+Usage is recorded for every terminal status, aborted included: an attempt the
+run stopped had still spent what it spent by then. A timeout and an abort are
+decided by the runner, which discards whatever the executor eventually settles
+with, so usage the executor reported is carried onto the runner's own outcome
+rather than lost with it. Failures carry usage too, on
+`TaskExecutionFailure`. An executor that does not account for its own spend
+reports nothing rather than zeros, which would read as work that cost nothing.
+
+Zero spend and unknown spend are different answers. An executor whose
+telemetry was absent, or carried a field that was not a usable number, records
+no usage rather than zeros: a complete-looking zero would read as work that
+cost nothing. An absent optional field is still zero, because a provider that
+bills no cache write reports none.
+
+A run's total is derived from the outputs it published rather than stored
+alongside them: derived is correct for a run that was interrupted, and needs no
+summary kept in step. Reading it applies the same output-to-node-state
+agreement every other reader requires, so a total is never assembled from
+records the rest of the store refuses; only a task that published no output at
+all is an expected absence. Such a task is reported as unaccounted when it ran,
+and as not started when it did not — the first is a gap in the accounting, the
+second is not.
+
+Token counts come from the provider's telemetry and cost from the runtime's
+pricing of those tokens, so cost is an estimate and tokens are the sturdier
+number.
 
 A retained text artifact is bounded long-form text that does not belong in the
 structured report — a log, investigation notes, detailed review findings. A

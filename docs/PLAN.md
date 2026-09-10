@@ -54,6 +54,7 @@ Implement run-scoped persistence outside the target checkout:
 - [x] parent-owned node and attempt status;
 - [x] immutable node outputs;
 - [x] bounded text artifacts;
+- [x] per-attempt usage accounting, and a run total derived from it;
 - [x] immutable events and directed messages;
 - [x] restrictive permissions and atomic publication;
 - [x] exclusive run ownership for active graph lifecycles;
@@ -149,7 +150,7 @@ Acceptance tests:
 Implement:
 
 - [x] explicit on, status, and off commands;
-- [x] operator-only run-store listing and deletion subcommands;
+- [x] operator-only run-store listing, usage, and deletion subcommands;
 - [x] an opt-in startup flag;
 - [x] session setting snapshot and restoration, covering the active tools and an
       optionally configured parent model and thinking level;

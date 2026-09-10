@@ -1125,3 +1125,118 @@ test("revalidates a child's artifact rather than trusting the details", async ()
     );
   }
 });
+
+const REPORTED_USAGE = Object.freeze({
+  input: 700,
+  output: 300,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 1_000,
+  cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+});
+
+function assistantUsageEvent(usage: unknown): string {
+  return JSON.stringify({
+    type: "message_end",
+    message: { role: "assistant", usage, content: [] },
+  });
+}
+
+test("accounts for a worker whose events report usage", async () => {
+  const output = nodeOutput("Completed with telemetry");
+
+  assert.deepEqual(
+    await runFakeWorker([
+      assistantUsageEvent(REPORTED_USAGE),
+      assistantUsageEvent(REPORTED_USAGE),
+      reportEvent(output),
+    ]),
+    {
+      output,
+      usage: {
+        ...REPORTED_USAGE,
+        turns: 2,
+        input: 1_400,
+        output: 600,
+        totalTokens: 2_000,
+        cost: {
+          input: 0.02,
+          output: 0.04,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0.06,
+        },
+      },
+    },
+  );
+});
+
+test("leaves a worker with no usage telemetry unaccounted, not free", async () => {
+  const output = nodeOutput("Completed without telemetry");
+
+  // A provider that reported nothing has not proved the work was free, so the
+  // result carries no usage rather than a complete-looking set of zeros.
+  assert.deepEqual(
+    await runFakeWorker([assistantUsageEvent(undefined), reportEvent(output)]),
+    {
+      output,
+    },
+  );
+});
+
+test("treats unusable usage telemetry as unaccounted rather than cheap", async () => {
+  const output = nodeOutput("Completed with bad telemetry");
+
+  for (const usage of [
+    { ...REPORTED_USAGE, input: -1 },
+    { ...REPORTED_USAGE, output: "many" },
+    { ...REPORTED_USAGE, totalTokens: Number.NaN },
+    { ...REPORTED_USAGE, cost: "free" },
+    { ...REPORTED_USAGE, cost: { ...REPORTED_USAGE.cost, total: -1 } },
+  ]) {
+    assert.deepEqual(
+      await runFakeWorker([assistantUsageEvent(usage), reportEvent(output)]),
+      { output },
+    );
+  }
+
+  // An absent optional field is not a fault: a provider that bills no cache
+  // write reports none, and the attempt is still accounted for.
+  const { cacheWrite: _cacheWrite, ...withoutCacheWrite } = REPORTED_USAGE;
+  const partial = await runFakeWorker([
+    assistantUsageEvent(withoutCacheWrite),
+    reportEvent(output),
+  ]);
+  assert.equal(partial.usage?.cacheWrite, 0);
+  assert.equal(partial.usage?.totalTokens, 1_000);
+});
+
+test("reports the spend a failure accrued after the failure was latched", async () => {
+  const child = new FakeChild();
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      // A delta arrives, then the stream breaks. The usage is only committed
+      // when the child closes, after the failure code was latched.
+      child.stdout.write(
+        `${JSON.stringify({ type: "message_update", usage: REPORTED_USAGE })}\n`,
+      );
+      child.stdout.write("not json\n");
+      child.stdout.end();
+      child.close(0);
+    });
+  });
+
+  await assert.rejects(
+    runPiWorkerProcess(input(new AbortController().signal), options, {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof TaskExecutionFailure);
+      assert.equal(error.code, "protocol");
+      assert.equal(error.usage?.totalTokens, 1_000);
+      return true;
+    },
+  );
+});

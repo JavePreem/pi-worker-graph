@@ -23,6 +23,8 @@ import type {
   TaskExecutorTask,
 } from "./run.js";
 import { RUN_GRAPH_LIMITS } from "./run.js";
+import type { TaskUsage } from "./usage.js";
+import { TASK_USAGE_LIMITS } from "./usage.js";
 
 const REPORT_TOOL_NAME = "worker_graph_report";
 /**
@@ -63,8 +65,6 @@ const MAX_PROFILE_TEXT_BYTES = 256;
 const MAX_COMMAND_PATH_BYTES = 4 * 1024;
 const MAX_PAYLOAD_ITEMS = 32;
 const MAX_PROGRESS_EVENTS = 256;
-const MAX_USAGE_TOKENS = 1_000_000_000_000;
-const MAX_USAGE_COST = 1_000_000_000;
 const MAX_WORKER_PROMPT_BYTES =
   RUN_GRAPH_LIMITS.maxPayloadBytes +
   RUN_GRAPH_LIMITS.maxPrerequisiteBytes +
@@ -139,21 +139,11 @@ export interface PiWorkerProfile {
   readonly tools: readonly PiWorkerTool[];
 }
 
-export interface PiWorkerUsage {
-  readonly turns: number;
-  readonly input: number;
-  readonly output: number;
-  readonly cacheRead: number;
-  readonly cacheWrite: number;
-  readonly totalTokens: number;
-  readonly cost: {
-    readonly input: number;
-    readonly output: number;
-    readonly cacheRead: number;
-    readonly cacheWrite: number;
-    readonly total: number;
-  };
-}
+/**
+ * The adapter reports the runtime's own usage shape; the alias keeps the
+ * transport-facing name without a second definition of it.
+ */
+export type PiWorkerUsage = TaskUsage;
 
 export type PiWorkerProgressPhase =
   | "started"
@@ -591,11 +581,35 @@ function emptyUsage(): PiWorkerUsage {
   };
 }
 
+/**
+ * Accumulated spend, and how much of it is actually known.
+ *
+ * Zero and unknown are different answers. A worker whose provider reported no
+ * usage at all has not spent nothing, so the accumulator records whether any
+ * usage was reported and whether what was reported could be used. Only a
+ * complete, usable accounting is persisted; anything else leaves the attempt
+ * unaccounted rather than cheap.
+ */
+interface UsageAccumulator {
+  readonly usage: PiWorkerUsage;
+  /** At least one event carried a usage record. */
+  readonly reported: boolean;
+  /** A usage field was present and was not a usable number. */
+  readonly unusable: boolean;
+}
+
+/**
+ * An absent field is zero — a provider that bills no cache write reports
+ * none. A field that is present and unusable is a telemetry fault, latched on
+ * `flags` rather than silently read as zero.
+ */
 function boundedUsageNumber(
   value: unknown,
   maximum: number,
   integer: boolean,
+  flags: { unusable: boolean },
 ): number {
+  if (value === undefined) return 0;
   if (
     typeof value !== "number" ||
     !Number.isFinite(value) ||
@@ -603,6 +617,7 @@ function boundedUsageNumber(
     value > maximum ||
     (integer && !Number.isSafeInteger(value))
   ) {
+    flags.unusable = true;
     return 0;
   }
   return value;
@@ -613,66 +628,53 @@ function addBounded(left: number, right: number, maximum: number): number {
 }
 
 function addAssistantUsage(
-  aggregate: PiWorkerUsage,
+  accumulated: UsageAccumulator,
   value: unknown,
-): PiWorkerUsage {
-  const usage = isRecord(value) ? value : {};
+): UsageAccumulator {
+  const reported = isRecord(value);
+  const usage = reported ? value : {};
   const cost = isRecord(usage.cost) ? usage.cost : {};
-  return {
-    turns: Math.min(MAX_PROGRESS_EVENTS, aggregate.turns + 1),
-    input: addBounded(
-      aggregate.input,
-      boundedUsageNumber(usage.input, MAX_USAGE_TOKENS, true),
-      MAX_USAGE_TOKENS,
-    ),
-    output: addBounded(
-      aggregate.output,
-      boundedUsageNumber(usage.output, MAX_USAGE_TOKENS, true),
-      MAX_USAGE_TOKENS,
-    ),
-    cacheRead: addBounded(
-      aggregate.cacheRead,
-      boundedUsageNumber(usage.cacheRead, MAX_USAGE_TOKENS, true),
-      MAX_USAGE_TOKENS,
-    ),
-    cacheWrite: addBounded(
-      aggregate.cacheWrite,
-      boundedUsageNumber(usage.cacheWrite, MAX_USAGE_TOKENS, true),
-      MAX_USAGE_TOKENS,
-    ),
-    totalTokens: addBounded(
-      aggregate.totalTokens,
-      boundedUsageNumber(usage.totalTokens, MAX_USAGE_TOKENS, true),
-      MAX_USAGE_TOKENS,
-    ),
-    cost: {
-      input: addBounded(
-        aggregate.cost.input,
-        boundedUsageNumber(cost.input, MAX_USAGE_COST, false),
-        MAX_USAGE_COST,
-      ),
-      output: addBounded(
-        aggregate.cost.output,
-        boundedUsageNumber(cost.output, MAX_USAGE_COST, false),
-        MAX_USAGE_COST,
-      ),
-      cacheRead: addBounded(
-        aggregate.cost.cacheRead,
-        boundedUsageNumber(cost.cacheRead, MAX_USAGE_COST, false),
-        MAX_USAGE_COST,
-      ),
-      cacheWrite: addBounded(
-        aggregate.cost.cacheWrite,
-        boundedUsageNumber(cost.cacheWrite, MAX_USAGE_COST, false),
-        MAX_USAGE_COST,
-      ),
-      total: addBounded(
-        aggregate.cost.total,
-        boundedUsageNumber(cost.total, MAX_USAGE_COST, false),
-        MAX_USAGE_COST,
-      ),
-    },
+  const aggregate = accumulated.usage;
+  const flags = {
+    unusable:
+      accumulated.unusable ||
+      (usage.cost !== undefined && !isRecord(usage.cost)),
   };
+  const tokens = (field: unknown, previous: number) =>
+    addBounded(
+      previous,
+      boundedUsageNumber(field, TASK_USAGE_LIMITS.maxTokens, true, flags),
+      TASK_USAGE_LIMITS.maxTokens,
+    );
+  const money = (field: unknown, previous: number) =>
+    addBounded(
+      previous,
+      boundedUsageNumber(field, TASK_USAGE_LIMITS.maxCost, false, flags),
+      TASK_USAGE_LIMITS.maxCost,
+    );
+  return {
+    usage: {
+      turns: Math.min(TASK_USAGE_LIMITS.maxTurns, aggregate.turns + 1),
+      input: tokens(usage.input, aggregate.input),
+      output: tokens(usage.output, aggregate.output),
+      cacheRead: tokens(usage.cacheRead, aggregate.cacheRead),
+      cacheWrite: tokens(usage.cacheWrite, aggregate.cacheWrite),
+      totalTokens: tokens(usage.totalTokens, aggregate.totalTokens),
+      cost: {
+        input: money(cost.input, aggregate.cost.input),
+        output: money(cost.output, aggregate.cost.output),
+        cacheRead: money(cost.cacheRead, aggregate.cost.cacheRead),
+        cacheWrite: money(cost.cacheWrite, aggregate.cost.cacheWrite),
+        total: money(cost.total, aggregate.cost.total),
+      },
+    },
+    reported: accumulated.reported || reported,
+    unusable: flags.unusable,
+  };
+}
+
+function emptyAccumulator(): UsageAccumulator {
+  return { usage: emptyUsage(), reported: false, unusable: false };
 }
 
 function immutableUsage(usage: PiWorkerUsage): PiWorkerUsage {
@@ -680,6 +682,19 @@ function immutableUsage(usage: PiWorkerUsage): PiWorkerUsage {
     ...usage,
     cost: Object.freeze({ ...usage.cost }),
   });
+}
+
+/**
+ * The spend to persist, or nothing when it is not actually known. Progress
+ * still projects the running figures: those are live observability, while
+ * this is the number a run's accounting is built from.
+ */
+function accountedUsage(
+  accumulated: UsageAccumulator,
+): PiWorkerUsage | undefined {
+  return accumulated.reported && !accumulated.unusable
+    ? immutableUsage(accumulated.usage)
+    : undefined;
 }
 
 /**
@@ -811,7 +826,9 @@ async function runNormalizedPiWorkerProcess(
     let textBuffer = "";
     let output: ReturnType<typeof parseNodeOutput> | undefined;
     let artifact: string | undefined;
-    let failure: TaskExecutionFailure | undefined;
+    // Only the code is latched. The spend keeps accruing until `close`, so
+    // the failure is built there, from the accounting as it finally stands.
+    let failureCode: TaskExecutionFailureCode | undefined;
     let providerFailed = false;
     let reportToolFailed = false;
     let reportNotFinal = false;
@@ -821,8 +838,8 @@ async function runNormalizedPiWorkerProcess(
     let terminationStarted = false;
     let forceSent = false;
     let forceTimer: NodeJS.Timeout | undefined;
-    let usage = emptyUsage();
-    let pendingUsage: PiWorkerUsage | undefined;
+    let accumulated = emptyAccumulator();
+    let pendingUsage: { readonly value: unknown } | undefined;
     let progressEvents = 0;
     let terminalProgressEmitted = false;
 
@@ -845,7 +862,7 @@ async function runNormalizedPiWorkerProcess(
         taskId: input.taskId,
         phase,
         ...fields,
-        usage: immutableUsage(usage),
+        usage: immutableUsage(accumulated.usage),
       });
       try {
         options.onProgress(progress);
@@ -857,7 +874,10 @@ async function runNormalizedPiWorkerProcess(
     emitProgress("started");
 
     const commitAssistantUsage = (value?: unknown) => {
-      usage = addAssistantUsage(usage, value ?? pendingUsage);
+      accumulated = addAssistantUsage(
+        accumulated,
+        value ?? pendingUsage?.value,
+      );
       pendingUsage = undefined;
       emitProgress("turn_completed");
     };
@@ -878,8 +898,8 @@ async function runNormalizedPiWorkerProcess(
       }, terminationGraceMs);
     };
     const fail = (code: TaskExecutionFailureCode) => {
-      if (failure || settled) return;
-      failure = new TaskExecutionFailure(code);
+      if (failureCode || settled) return;
+      failureCode = code;
       terminate();
     };
     const processLine = (line: string) => {
@@ -897,7 +917,9 @@ async function runNormalizedPiWorkerProcess(
       }
 
       if (event.type === "message_update") {
-        pendingUsage = addAssistantUsage(emptyUsage(), event.usage);
+        // Boxed, so a pending update with no usage of its own is still a
+        // pending update rather than an absent one.
+        pendingUsage = { value: event.usage };
         return;
       }
 
@@ -991,7 +1013,7 @@ async function runNormalizedPiWorkerProcess(
 
     input.signal.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk: Buffer | string) => {
-      if (failure) return;
+      if (failureCode) return;
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       stdoutBytes += bytes.length;
       if (stdoutBytes > MAX_EVENT_STREAM_BYTES) {
@@ -1027,7 +1049,7 @@ async function runNormalizedPiWorkerProcess(
         }
         if (pendingUsage !== undefined) commitAssistantUsage();
       } catch {
-        failure ??= new TaskExecutionFailure("protocol");
+        failureCode ??= "protocol";
       }
       // The child has exited, but tools it started may still hold the process
       // group. Collect them before reporting the task as finished, unless the
@@ -1039,35 +1061,46 @@ async function runNormalizedPiWorkerProcess(
       // validated report is the task contract: a provider error or a nonzero
       // exit after the terminating report call describes a child that is
       // already done, and must not discard work the worker completed.
+      // Every rejection below carries the spend the attempt incurred, so a
+      // cancelled or failed worker is still accounted for. It is read here,
+      // after the last pending usage was committed, so a failure latched
+      // mid-stream still reports the final figures.
+      const spent = () => accountedUsage(accumulated);
       if (input.signal.aborted) {
         emitProgress("finished", { status: "aborted" });
-        reject(new TaskExecutionFailure("process"));
-      } else if (failure) {
+        reject(new TaskExecutionFailure("process", undefined, spent()));
+      } else if (failureCode) {
         emitProgress("finished", { status: "failed" });
-        reject(failure);
+        reject(new TaskExecutionFailure(failureCode, undefined, spent()));
       } else if (output && reportNotFinal) {
         emitProgress("finished", { status: "failed" });
-        reject(new TaskExecutionFailure("report_not_final"));
+        reject(
+          new TaskExecutionFailure("report_not_final", undefined, spent()),
+        );
       } else if (output) {
         emitProgress("finished", {
           status: output.blockers.length > 0 ? "failed" : "succeeded",
         });
+        const accounted = spent();
         resolve({
           output,
           ...(artifact === undefined ? {} : { artifact }),
+          // Absent when the worker's telemetry was missing or unusable: a
+          // task with no recorded spend must not read as a free one.
+          ...(accounted === undefined ? {} : { usage: accounted }),
         });
       } else if (reportToolFailed) {
         emitProgress("finished", { status: "failed" });
-        reject(new TaskExecutionFailure("report_tool"));
+        reject(new TaskExecutionFailure("report_tool", undefined, spent()));
       } else if (providerFailed) {
         emitProgress("finished", { status: "failed" });
-        reject(new TaskExecutionFailure("provider"));
+        reject(new TaskExecutionFailure("provider", undefined, spent()));
       } else if (stdinFailed || code !== 0) {
         emitProgress("finished", { status: "failed" });
-        reject(new TaskExecutionFailure("process"));
+        reject(new TaskExecutionFailure("process", undefined, spent()));
       } else {
         emitProgress("finished", { status: "failed" });
-        reject(new TaskExecutionFailure("missing_report"));
+        reject(new TaskExecutionFailure("missing_report", undefined, spent()));
       }
     });
     child.stdin.once("error", () => {

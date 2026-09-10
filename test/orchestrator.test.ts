@@ -38,6 +38,7 @@ interface RegisteredTool {
           readonly omittedItems?: Readonly<Record<string, number>>;
         };
         readonly artifactBytes?: number;
+        readonly usage?: { readonly totalTokens: number };
         readonly diagnostics?: string;
         readonly reportOmitted?: string;
       }[];
@@ -495,5 +496,44 @@ test("names a retained artifact in the review without projecting its text", asyn
   assert.equal(
     (result.content[0]?.text ?? "").includes("Investigation"),
     false,
+  );
+});
+
+test("attributes spend to the task that incurred it", async (t) => {
+  const paths = await fixture(t);
+  const spend = (totalTokens: number) => ({
+    turns: 1,
+    input: totalTokens,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  });
+  const tool = captureTool(paths.agentDirectory, () => async (input) => ({
+    output: nodeOutput("Done"),
+    usage: spend(input.taskId === "costly" ? 9_000 : 100),
+  }));
+
+  const result = await tool.execute(
+    "call-id",
+    {
+      tasks: [
+        { id: "cheap", profile: "writer", assignment: "Cheap work" },
+        { id: "costly", profile: "writer", assignment: "Costly work" },
+      ],
+    },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  // A graph total alone cannot say which worker was expensive.
+  assert.deepEqual(
+    result.details.nodes.map((node) => [node.taskId, node.usage?.totalTokens]),
+    [
+      ["cheap", 100],
+      ["costly", 9_000],
+    ],
   );
 });

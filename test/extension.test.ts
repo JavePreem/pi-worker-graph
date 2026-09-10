@@ -10,6 +10,7 @@ import {
   createRun,
   NODE_OUTPUT_LIMITS,
   normalizeGraph,
+  publishNodeOutput,
   RUN_COORDINATION_MAX_TEXT_BYTES,
   releaseRunOwnership,
 } from "../src/index.js";
@@ -774,7 +775,7 @@ test("refuses swarm deletion of an owned run and reports misuse", async (t) => {
   assert.equal(session.notifications.at(-1)?.type, "error");
   await session.swarm("nonsense");
   assert.deepEqual(session.notifications.at(-1), {
-    message: "Usage: /swarm on|status|off|runs|delete <run-id>",
+    message: "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>",
     type: "warning",
   });
 });
@@ -799,12 +800,17 @@ test("answers a misused run-store subcommand before touching the store", async (
 
   await session.swarm("runs extra");
   assert.deepEqual(session.notifications.at(-1), {
-    message: "Usage: /swarm on|status|off|runs|delete <run-id>",
+    message: "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>",
     type: "warning",
   });
   await session.swarm("delete one two");
   assert.deepEqual(session.notifications.at(-1), {
     message: "Usage: /swarm delete <run-id>",
+    type: "warning",
+  });
+  await session.swarm("usage");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm usage <run-id>",
     type: "warning",
   });
   assert.deepEqual(session.configurationLoads, []);
@@ -1147,4 +1153,62 @@ test("never reads a submitted report through an accessor or an exotic prototype"
   const result = await definition.execute("third", nodeOutput("Corrected"));
   assert.equal(result.terminate, true);
   assert.equal(result.details?.artifact, undefined);
+});
+
+test("reports what a retained run spent, and what it cannot account for", async (t) => {
+  const session = await storeSession(t);
+  const stateRoot = session.stateRoot;
+  const manifest = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "worker" }, { id: "silent" }] }),
+  );
+  const ownership = await acquireRunOwnership(stateRoot, manifest.runId);
+  await publishNodeOutput(
+    stateRoot,
+    manifest.runId,
+    {
+      taskId: "worker",
+      status: "failed",
+      usage: {
+        turns: 2,
+        input: 900,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 1_000,
+        cost: {
+          input: 0.01,
+          output: 0.02,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0.03,
+        },
+      },
+    },
+    ownership,
+  );
+  // "silent" ran and recorded nothing, which is a gap in the accounting.
+  await publishNodeOutput(
+    stateRoot,
+    manifest.runId,
+    { taskId: "silent", status: "failed" },
+    ownership,
+  );
+  await releaseRunOwnership(stateRoot, ownership);
+
+  await session.swarm(`usage ${manifest.runId}`);
+  const reported = session.notifications.at(-1);
+
+  assert.equal(reported?.type, "info");
+  assert.ok(reported?.message.includes("1000 token(s) over 2 turn(s)"));
+  assert.ok(reported?.message.includes("estimated cost 0.0300"));
+  assert.ok(reported?.message.includes("worker"));
+  // A task that published nothing is named, never folded in as free work.
+  assert.ok(
+    reported?.message.includes("recorded no usage: silent"),
+    reported?.message,
+  );
+
+  await session.swarm("usage 00000000-0000-4000-8000-000000000000");
+  assert.equal(session.notifications.at(-1)?.type, "error");
 });

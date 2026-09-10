@@ -1,3 +1,6 @@
+import type { TaskUsage } from "./usage.js";
+import { parseTaskUsage } from "./usage.js";
+
 export type TaskExecutionFailureCode =
   | "invalid_assignment"
   | "invalid_profile"
@@ -33,19 +36,29 @@ const FAILURE_DIAGNOSTICS: Readonly<Record<TaskExecutionFailureCode, string>> =
  *
  * `taskId` is only set by whole-graph validation, where the failing task is
  * known before any worker starts.
+ *
+ * `usage` is what the attempt had already spent when it failed. A failed
+ * worker is still a worker that consumed tokens, so an executor that accounts
+ * for its own spend reports it here rather than losing it with the failure.
  */
 export class TaskExecutionFailure extends Error {
   readonly code: TaskExecutionFailureCode;
   readonly diagnostics: string;
   readonly taskId: string | undefined;
+  readonly usage: TaskUsage | undefined;
 
-  constructor(code: TaskExecutionFailureCode, taskId?: string) {
+  constructor(
+    code: TaskExecutionFailureCode,
+    taskId?: string,
+    usage?: TaskUsage,
+  ) {
     const diagnostics = FAILURE_DIAGNOSTICS[code];
     super(diagnostics);
     this.name = "TaskExecutionFailure";
     this.code = code;
     this.diagnostics = diagnostics;
     this.taskId = taskId;
+    this.usage = usage;
   }
 }
 
@@ -67,6 +80,24 @@ export function taskExecutionDiagnostics(error: unknown): string | undefined {
   return typeof code === "string" && Object.hasOwn(FAILURE_DIAGNOSTICS, code)
     ? FAILURE_DIAGNOSTICS[code as TaskExecutionFailureCode]
     : undefined;
+}
+
+/**
+ * Reads the usage an executor attributed to a failed attempt, if any.
+ *
+ * Validated rather than trusted, and read defensively for the same reason
+ * `taskExecutionDiagnostics` is: the rejection may come from a separate copy
+ * of this module. Unusable numbers are dropped rather than persisted.
+ */
+export function taskExecutionUsage(error: unknown): TaskUsage | undefined {
+  if (!(error instanceof Error) || error.name !== "TaskExecutionFailure") {
+    return undefined;
+  }
+  try {
+    return parseTaskUsage((error as { readonly usage?: unknown }).usage);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Reads the task attributed to a whole-graph validation failure, if any. */

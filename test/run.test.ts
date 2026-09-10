@@ -1016,3 +1016,99 @@ test("an artifact does not consume the propagated report budget", async (t) => {
     { bytes: RUN_GRAPH_LIMITS.maxOutputBytes },
   );
 });
+
+const SPENT = Object.freeze({
+  turns: 2,
+  input: 900,
+  output: 100,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 1_000,
+  cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+});
+
+test("records what a succeeded and a failed attempt each spent", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const executor: TaskExecutor = async (input) => {
+    if (input.taskId === "worker") {
+      return { output: nodeOutput("Completed"), usage: SPENT };
+    }
+    // A failed worker is still a worker that consumed tokens.
+    throw new TaskExecutionFailure("provider", undefined, SPENT);
+  };
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "worker" }, { id: "broken" }], concurrency: 2 },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(
+    (await readNodeOutput(stateRoot, result.runId, "worker")).usage,
+    SPENT,
+  );
+  const broken = await readNodeOutput(stateRoot, result.runId, "broken");
+  assert.equal(broken.status, "failed");
+  assert.deepEqual(broken.usage, SPENT);
+  assert.equal(broken.diagnostics, "Pi worker provider request failed");
+});
+
+test("keeps the spend of an attempt the run aborted", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const controller = new AbortController();
+  const executor: TaskExecutor = (input) => {
+    queueMicrotask(() => controller.abort());
+    return new Promise((_resolveExecution, rejectExecution) => {
+      input.signal.addEventListener(
+        "abort",
+        // The runner decides this task is aborted and discards the executor's
+        // own outcome; the tokens it had already spent must survive that.
+        () =>
+          rejectExecution(
+            new TaskExecutionFailure("process", undefined, SPENT),
+          ),
+        { once: true },
+      );
+    });
+  };
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+    signal: controller.signal,
+  });
+
+  assert.equal(result.status, "aborted");
+  const output = await readNodeOutput(stateRoot, result.runId, "task");
+  assert.equal(output.status, "aborted");
+  assert.equal(output.diagnostics, "Graph run was aborted");
+  assert.deepEqual(output.usage, SPENT);
+});
+
+test("fails a task whose executor reports unusable usage", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  const executor: TaskExecutor = async () =>
+    ({
+      output: nodeOutput(),
+      usage: { ...SPENT, input: -1 },
+    }) as unknown as TaskExecutionResult;
+
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+  });
+
+  assert.equal(result.status, "failed");
+  const output = await readNodeOutput(stateRoot, result.runId, "task");
+  assert.equal(
+    output.diagnostics,
+    "Task executor returned an invalid or oversized result",
+  );
+  assert.equal(output.usage, undefined);
+});

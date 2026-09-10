@@ -7,6 +7,7 @@ import {
 import {
   taskExecutionDiagnostics,
   taskExecutionFailureTaskId,
+  taskExecutionUsage,
 } from "./execution-failure.js";
 import type { GraphRequest, GraphState, NormalizedGraph } from "./graph.js";
 import {
@@ -40,6 +41,8 @@ import {
   releaseRunOwnership,
   writeNodeState,
 } from "./store.js";
+import type { TaskUsage } from "./usage.js";
+import { parseTaskUsage } from "./usage.js";
 
 /**
  * Attempts the parent makes at one store mutation when the run mutation lock
@@ -106,6 +109,12 @@ export interface TaskExecutionInput {
 export interface TaskExecutionResult {
   readonly output: NodeOutput;
   /**
+   * What this attempt spent. Reported here and on `TaskExecutionFailure`, so
+   * an executor accounts for its own spend whichever way the attempt ended.
+   * Executors that do not account for usage report nothing.
+   */
+  readonly usage?: TaskUsage;
+  /**
    * Long-form text retained beside the report, under the run, for later
    * review. It is never parsed and never reaches a dependent task.
    */
@@ -157,6 +166,7 @@ type SettledTask =
       readonly status: "succeeded";
       readonly output: NodeOutput;
       readonly artifact?: string;
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     }
   | {
@@ -164,11 +174,13 @@ type SettledTask =
       readonly status: "failed";
       readonly output?: NodeOutput;
       readonly artifact?: string;
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     }
   | {
       readonly taskId: string;
       readonly status: "aborted";
+      readonly usage?: TaskUsage;
       readonly diagnostics?: string;
     };
 
@@ -308,12 +320,15 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
     const keys = Reflect.ownKeys(value);
     if (
       keys.length === 0 ||
-      keys.length > 3 ||
+      keys.length > 4 ||
       !keys.includes("output") ||
       !keys.every(
         (key) =>
           typeof key === "string" &&
-          (key === "output" || key === "artifact" || key === "diagnostics"),
+          (key === "output" ||
+            key === "artifact" ||
+            key === "usage" ||
+            key === "diagnostics"),
       )
     ) {
       return invalidExecutorResult(taskId);
@@ -323,6 +338,7 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
       value,
       "artifact",
     );
+    const usageDescriptor = Object.getOwnPropertyDescriptor(value, "usage");
     const diagnosticsDescriptor = Object.getOwnPropertyDescriptor(
       value,
       "diagnostics",
@@ -333,6 +349,8 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
       !("value" in outputDescriptor) ||
       (artifactDescriptor !== undefined &&
         (!artifactDescriptor.enumerable || !("value" in artifactDescriptor))) ||
+      (usageDescriptor !== undefined &&
+        (!usageDescriptor.enumerable || !("value" in usageDescriptor))) ||
       (diagnosticsDescriptor !== undefined &&
         (!diagnosticsDescriptor.enumerable ||
           !("value" in diagnosticsDescriptor)))
@@ -342,6 +360,7 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
 
     const output = parseNodeOutput(outputDescriptor.value);
     const artifact = parseNodeArtifact(artifactDescriptor?.value);
+    const usage = parseTaskUsage(usageDescriptor?.value);
     const diagnostics = parseNodeDiagnostics(diagnosticsDescriptor?.value);
     // Only what a dependent task and the parent are handed is weighed against
     // this limit. `parseNodeArtifact` bounds the artifact separately, because
@@ -359,6 +378,7 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
     const boundedValue = {
       ...reported,
       ...(artifact === undefined ? {} : { artifact }),
+      ...(usage === undefined ? {} : { usage }),
     };
     return output.blockers.length > 0
       ? {
@@ -374,6 +394,18 @@ function validateExecutorResult(taskId: string, value: unknown): SettledTask {
   } catch {
     return invalidExecutorResult(taskId);
   }
+}
+
+/**
+ * A timeout and an abort are decided by the runner, which discards whatever
+ * the executor eventually settles with. The spend is still real, so usage the
+ * executor did report is carried onto the runner's own outcome.
+ */
+function withUsage(
+  result: SettledTask,
+  usage: TaskUsage | undefined,
+): SettledTask {
+  return usage === undefined ? result : { ...result, usage };
 }
 
 function executeTask(
@@ -435,16 +467,25 @@ function executeTask(
     Promise.resolve()
       .then(() => executor(executionInput))
       .then(
-        (result) =>
-          settle(abortResult ?? validateExecutorResult(input.taskId, result)),
+        (result) => {
+          const completed = validateExecutorResult(input.taskId, result);
+          settle(
+            abortResult === undefined
+              ? completed
+              : withUsage(abortResult, completed.usage),
+          );
+        },
         (error: unknown) => {
           settle(
-            abortResult ?? {
-              taskId: input.taskId,
-              status: "failed",
-              diagnostics:
-                taskExecutionDiagnostics(error) ?? "Task executor failed",
-            },
+            withUsage(
+              abortResult ?? {
+                taskId: input.taskId,
+                status: "failed",
+                diagnostics:
+                  taskExecutionDiagnostics(error) ?? "Task executor failed",
+              },
+              taskExecutionUsage(error),
+            ),
           );
         },
       );
@@ -556,6 +597,9 @@ async function persistCompletion(
           ...(completion.artifact === undefined
             ? {}
             : { artifact: completion.artifact }),
+          ...(completion.usage === undefined
+            ? {}
+            : { usage: completion.usage }),
           ...(completion.diagnostics === undefined
             ? {}
             : { diagnostics: completion.diagnostics }),
@@ -570,6 +614,9 @@ async function persistCompletion(
             ...(completion.artifact === undefined
               ? {}
               : { artifact: completion.artifact }),
+            ...(completion.usage === undefined
+              ? {}
+              : { usage: completion.usage }),
             ...(completion.diagnostics === undefined
               ? {}
               : { diagnostics: completion.diagnostics }),
@@ -577,6 +624,9 @@ async function persistCompletion(
         : {
             taskId: completion.taskId,
             status: completion.status,
+            ...(completion.usage === undefined
+              ? {}
+              : { usage: completion.usage }),
             ...(completion.diagnostics === undefined
               ? {}
               : { diagnostics: completion.diagnostics }),

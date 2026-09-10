@@ -1,6 +1,9 @@
 export type { PrerequisiteOutput } from "./context.js";
 export type { TaskExecutionFailureCode } from "./execution-failure.js";
-export { TaskExecutionFailure } from "./execution-failure.js";
+export {
+  TaskExecutionFailure,
+  taskExecutionUsage,
+} from "./execution-failure.js";
 export type {
   GraphIssue,
   GraphIssueCode,
@@ -78,6 +81,9 @@ export type {
   RunMessageRecord,
   RunOwnership,
   RunStoreErrorCode,
+  RunTaskAccounting,
+  RunTaskUsage,
+  RunUsage,
 } from "./store.js";
 export {
   acquireRunOwnership,
@@ -103,7 +109,10 @@ export {
   readRun,
   readRunEvents,
   readRunMessages,
+  readRunUsage,
   releaseRunOwnership,
   sendRunMessage,
   writeNodeState,
 } from "./store.js";
+export type { TaskUsage } from "./usage.js";
+export { parseTaskUsage, TASK_USAGE_LIMITS } from "./usage.js";

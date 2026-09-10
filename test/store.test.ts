@@ -36,8 +36,10 @@ import {
   readRun,
   readRunEvents,
   readRunMessages,
+  readRunUsage,
   releaseRunOwnership,
   sendRunMessage,
+  TASK_USAGE_LIMITS,
   writeNodeState,
 } from "../src/index.js";
 import { nodeOutput } from "./fixtures.js";
@@ -1939,5 +1941,192 @@ test("stores an artifact at the bound that JSON escaping expands most", async (t
   assert.equal(
     (await readNodeArtifact(root, manifest.runId, "task")).text,
     artifact,
+  );
+});
+
+const USAGE = Object.freeze({
+  turns: 3,
+  input: 1_000,
+  output: 200,
+  cacheRead: 50,
+  cacheWrite: 25,
+  totalTokens: 1_275,
+  cost: {
+    input: 0.01,
+    output: 0.02,
+    cacheRead: 0.001,
+    cacheWrite: 0.002,
+    total: 0.033,
+  },
+});
+
+test("records what an attempt spent, for every terminal status", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "done" }, { id: "failed" }, { id: "stopped" }],
+  });
+  await writeNodeState(root, manifest.runId, "done", "running", ownership);
+
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "done",
+      status: "succeeded",
+      output: nodeOutput(),
+      usage: USAGE,
+    },
+    ownership,
+  );
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "failed", status: "failed", usage: USAGE },
+    ownership,
+  );
+  // An attempt the run stopped still spent what it spent by then.
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "stopped", status: "aborted", usage: USAGE },
+    ownership,
+  );
+
+  for (const taskId of ["done", "failed", "stopped"]) {
+    assert.deepEqual(
+      (await readNodeOutput(root, manifest.runId, taskId)).usage,
+      USAGE,
+    );
+  }
+});
+
+test("rejects usage that is malformed, negative, or out of range", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+
+  for (const usage of [
+    { ...USAGE, input: -1 },
+    { ...USAGE, input: 1.5 },
+    { ...USAGE, turns: TASK_USAGE_LIMITS.maxTurns + 1 },
+    { ...USAGE, totalTokens: TASK_USAGE_LIMITS.maxTokens + 1 },
+    { ...USAGE, cost: { ...USAGE.cost, total: TASK_USAGE_LIMITS.maxCost + 1 } },
+    { ...USAGE, cost: { ...USAGE.cost, total: Number.NaN } },
+    { ...USAGE, unexpected: 1 },
+    { ...USAGE, cost: undefined },
+    (() => {
+      const { turns: _turns, ...missing } = USAGE;
+      return missing;
+    })(),
+    "usage",
+    [],
+  ]) {
+    await rejectsWithCode(
+      () =>
+        publishNodeOutput(
+          root,
+          manifest.runId,
+          {
+            taskId: "task",
+            status: "failed",
+            usage,
+          } as unknown as Parameters<typeof publishNodeOutput>[2],
+          ownership,
+        ),
+      "invalid_argument",
+    );
+  }
+  assert.equal(
+    await readNodeOutput(root, manifest.runId, "task").catch(() => undefined),
+    undefined,
+  );
+});
+
+test("sums a run's spend and names the tasks it cannot account for", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [
+      { id: "cheap" },
+      { id: "costly" },
+      { id: "silent" },
+      { id: "never-ran" },
+    ],
+  });
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "cheap", status: "failed", usage: USAGE },
+    ownership,
+  );
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "costly",
+      status: "failed",
+      usage: {
+        ...USAGE,
+        totalTokens: 4_000,
+        cost: { ...USAGE.cost, total: 1 },
+      },
+    },
+    ownership,
+  );
+  // "silent" ran and recorded nothing, which must not read as free work.
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "silent", status: "failed" },
+    ownership,
+  );
+  // "never-ran" is still pending, which is not a gap in the accounting.
+  const usage = await readRunUsage(root, manifest.runId);
+
+  assert.equal(usage.runId, manifest.runId);
+  assert.equal(usage.total.totalTokens, 1_275 + 4_000);
+  assert.equal(usage.total.cost.total, 0.033 + 1);
+  assert.equal(usage.total.turns, 6);
+  assert.deepEqual(usage.unaccounted, ["silent"]);
+  assert.deepEqual(
+    usage.tasks.map((task) => [
+      task.taskId,
+      task.accounting,
+      task.usage?.totalTokens,
+    ]),
+    [
+      ["cheap", "reported", 1_275],
+      ["costly", "reported", 4_000],
+      ["silent", "unreported", undefined],
+      ["never-ran", "not_started", undefined],
+    ],
+  );
+});
+
+test("reports rather than absorbs a run whose output state disagrees", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "task" }],
+  });
+  const task = manifest.graph.tasks[0];
+  assert.ok(task);
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    { taskId: "task", status: "failed", usage: USAGE },
+    ownership,
+  );
+  const state = await readNodeState(root, manifest.runId, "task");
+  await writeFile(
+    join(root, "runs", manifest.runId, "nodes", `${task.key}.json`),
+    `${JSON.stringify({ ...state, status: "blocked" })}\n`,
+    { mode: 0o600 },
+  );
+
+  // Counting an output the rest of the store API refuses would produce a
+  // plausible total for state no reader may act on.
+  await rejectsWithCode(
+    () => readRunUsage(root, manifest.runId),
+    "invalid_record",
   );
 });

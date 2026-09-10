@@ -162,6 +162,12 @@ interface WorkerGraphNodeReview {
    * result and was published precisely because it does not belong in a report.
    */
   readonly artifactBytes?: number;
+  /**
+   * What this task's attempt spent, as the store recorded it. The aggregate
+   * below is taken from live progress instead, so it still accounts for a
+   * task whose output could not be persisted.
+   */
+  readonly usage?: PiWorkerUsage;
   readonly diagnostics?: string;
   readonly reportOmitted?: "result_limit" | "unavailable";
 }
@@ -451,14 +457,23 @@ function reviewBytes(nodes: readonly WorkerGraphNodeReview[]): number {
   return Buffer.byteLength(serializeReviews(nodes));
 }
 
+/**
+ * The smallest form of a node review. It still names what the run spent and
+ * what it retained: those are fixed-size fields, so reserving a node at this
+ * form stays exact, and dropping a report for size must never also drop the
+ * accounting.
+ */
 function omittedReview(
   node: NodeStateRecord,
-  artifactBytes?: number,
+  record?: NodeOutputRecord,
 ): WorkerGraphNodeReview {
   return {
     taskId: node.taskId,
     status: node.status,
-    ...(artifactBytes === undefined ? {} : { artifactBytes }),
+    ...(record?.artifact === undefined
+      ? {}
+      : { artifactBytes: record.artifact.bytes }),
+    ...(record?.usage === undefined ? {} : { usage: record.usage }),
     reportOmitted: "result_limit",
   };
 }
@@ -488,11 +503,9 @@ async function collectNodeReviews(
   );
   const reviews: WorkerGraphNodeReview[] = [];
   for (const [index, { node, record, unavailable }] of collected.entries()) {
-    // Reserved at each node's smallest form, which still names a retained
-    // artifact: a fixed-size field, so the reservation stays exact.
     const remaining = collected
       .slice(index + 1)
-      .map((entry) => omittedReview(entry.node, entry.record?.artifact?.bytes));
+      .map((entry) => omittedReview(entry.node, entry.record));
     const fits = (candidate: WorkerGraphNodeReview) =>
       reviewBytes([...reviews, candidate, ...remaining]) <=
       MAX_RESULT_REPORT_BYTES;
@@ -502,6 +515,7 @@ async function collectNodeReviews(
       ...(record?.artifact === undefined
         ? {}
         : { artifactBytes: record.artifact.bytes }),
+      ...(record?.usage === undefined ? {} : { usage: record.usage }),
       ...(unavailable ? { reportOmitted: "unavailable" as const } : {}),
       ...(record?.diagnostics
         ? {
@@ -519,9 +533,7 @@ async function collectNodeReviews(
       continue;
     }
     const summary = { ...base, report: compactReport(record.output, false) };
-    reviews.push(
-      fits(summary) ? summary : omittedReview(node, record.artifact?.bytes),
-    );
+    reviews.push(fits(summary) ? summary : omittedReview(node, record));
   }
   return Object.freeze(reviews);
 }
@@ -570,6 +582,7 @@ export function registerWorkerGraphOrchestratorTool(
       "Include dependent validation tasks for relevant checks, then inspect the shared checkout with read-only parent tools.",
       "A worker report is evidence, not acceptance: read the changes yourself before accepting them, and weigh a reported validation result rather than trusting the claim.",
       "artifactBytes on a node review means that worker retained supplemental long-form text under the run; the report itself must still stand alone, so treat a report that defers its facts to an artifact as incomplete and delegate a repair task that reports them.",
+      "Each node review carries the usage that task spent; weigh it when deciding how much to delegate next, and prefer a smaller graph or a cheaper profile when a task cost far more than the work it returned.",
       "If review finds a defect, call worker_graph again with narrow repair tasks and fresh acceptance criteria.",
     ],
     parameters: workerGraphSchema,
