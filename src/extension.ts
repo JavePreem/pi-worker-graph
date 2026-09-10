@@ -1,6 +1,7 @@
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -20,6 +21,10 @@ import {
   NODE_OUTPUT_SCHEMA_VERSION,
   parseNodeOutput,
 } from "./output.js";
+import type {
+  PiOrchestratorProfile,
+  PiSessionThinkingLevel,
+} from "./pi-subprocess.js";
 import type { RetainedRun } from "./store.js";
 import { deleteRun, listRetainedRuns } from "./store.js";
 
@@ -28,25 +33,57 @@ const WORKER_ROLE = "worker";
 const MODE_ENTRY_TYPE = "worker-graph-mode";
 const MODE_STATE_SCHEMA_VERSION = 1;
 const MAX_MODE_TOOL_COUNT = 256;
-const MAX_MODE_TOOL_NAME_BYTES = 256;
+const MAX_MODE_NAME_BYTES = 256;
 const DISABLED_PARENT_TOOLS = new Set(["bash", "edit", "write"]);
 const MODE_STATE_FIELDS = new Set([
   "schemaVersion",
   "enabled",
   "toolsBeforeMode",
+  "modelBeforeMode",
+  "thinkingLevelBeforeMode",
+]);
+const MODE_MODEL_FIELDS = new Set(["provider", "modelId"]);
+const SESSION_THINKING_LEVELS = new Set<PiSessionThinkingLevel>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
 ]);
 const SWARM_USAGE = "Usage: /swarm on|status|off|runs|delete <run-id>";
 const SWARM_DELETE_USAGE = "Usage: /swarm delete <run-id>";
 const UNRESTORABLE_TOOLS_MESSAGE =
   "Worker-graph mode not enabled: the active tool set cannot be restored later";
+const UNRESTORABLE_MODEL_MESSAGE =
+  "Worker-graph mode not enabled: the session's current model cannot be restored later";
+const UNKNOWN_MODEL_MESSAGE =
+  "Worker-graph mode not enabled: the configured orchestrator model is not available";
+const UNAUTHENTICATED_MODEL_MESSAGE =
+  "Worker-graph mode not enabled: the configured orchestrator model has no configured authentication";
+const UNREADABLE_CONFIGURATION_MESSAGE =
+  "Worker-graph mode not enabled: the worker-graph configuration could not be read";
+const MODEL_NOT_RESTORED_MESSAGE =
+  "Worker-graph mode left the session on the orchestrator model: the model it started from is no longer available";
 export const WORKER_REPORT_TOOL_NAME = "worker_graph_report";
 export const SWARM_COMMAND_NAME = "swarm";
 export const SWARM_FLAG_NAME = "swarm";
+
+interface ModeModelSnapshot {
+  readonly provider: string;
+  readonly modelId: string;
+}
 
 interface WorkerGraphModeState {
   readonly schemaVersion: 1;
   readonly enabled: boolean;
   readonly toolsBeforeMode?: readonly string[];
+  /**
+   * Absent whenever the mode changed no model: either the configuration names
+   * no orchestrator profile, or the record predates that field.
+   */
+  readonly modelBeforeMode?: ModeModelSnapshot;
+  readonly thinkingLevelBeforeMode?: PiSessionThinkingLevel;
 }
 
 function modeToolSnapshot(value: unknown): readonly string[] | undefined {
@@ -63,7 +100,7 @@ function modeToolSnapshot(value: unknown): readonly string[] | undefined {
       typeof tool !== "string" ||
       tool.trim().length === 0 ||
       tool !== tool.trim() ||
-      Buffer.byteLength(tool) > MAX_MODE_TOOL_NAME_BYTES ||
+      Buffer.byteLength(tool) > MAX_MODE_NAME_BYTES ||
       tool === WORKER_GRAPH_TOOL_NAME ||
       tools.includes(tool)
     ) {
@@ -72,6 +109,32 @@ function modeToolSnapshot(value: unknown): readonly string[] | undefined {
     tools.push(tool);
   }
   return Object.freeze(tools);
+}
+
+function boundedName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value === value.trim() &&
+    Buffer.byteLength(value) <= MAX_MODE_NAME_BYTES
+  );
+}
+
+/**
+ * The parent's model is recorded as the two identifiers that find it again,
+ * not as Pi's model object: only a provider and an id can be read back through
+ * the same bounds after a reload.
+ */
+function modeModelSnapshot(value: unknown): ModeModelSnapshot | undefined {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((field) => !MODE_MODEL_FIELDS.has(field)) ||
+    !boundedName(value.provider) ||
+    !boundedName(value.modelId)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ provider: value.provider, modelId: value.modelId });
 }
 
 function parseModeState(value: unknown): WorkerGraphModeState | undefined {
@@ -90,10 +153,35 @@ function parseModeState(value: unknown): WorkerGraphModeState | undefined {
   }
   const toolsBeforeMode = modeToolSnapshot(value.toolsBeforeMode);
   if (toolsBeforeMode === undefined) return undefined;
+  // The model and its thinking level were captured together and are restored
+  // together, so a record carrying one without the other is not restorable.
+  const hasModel = value.modelBeforeMode !== undefined;
+  const hasLevel = value.thinkingLevelBeforeMode !== undefined;
+  if (hasModel !== hasLevel) return undefined;
+  if (!hasModel) {
+    return Object.freeze({
+      schemaVersion: MODE_STATE_SCHEMA_VERSION,
+      enabled: true,
+      toolsBeforeMode,
+    });
+  }
+  const modelBeforeMode = modeModelSnapshot(value.modelBeforeMode);
+  if (
+    modelBeforeMode === undefined ||
+    typeof value.thinkingLevelBeforeMode !== "string" ||
+    !SESSION_THINKING_LEVELS.has(
+      value.thinkingLevelBeforeMode as PiSessionThinkingLevel,
+    )
+  ) {
+    return undefined;
+  }
   return Object.freeze({
     schemaVersion: MODE_STATE_SCHEMA_VERSION,
     enabled: true,
     toolsBeforeMode,
+    modelBeforeMode,
+    thinkingLevelBeforeMode:
+      value.thinkingLevelBeforeMode as PiSessionThinkingLevel,
   });
 }
 
@@ -281,32 +369,167 @@ export default function registerWorkerGraph(
 
   let enabled = false;
   let toolsBeforeMode: readonly string[] | undefined;
+  let modelBeforeMode: ModeModelSnapshot | undefined;
+  let thinkingLevelBeforeMode: PiSessionThinkingLevel | undefined;
+  /** The profile the mode applied, for `/swarm status`. */
+  let appliedOrchestrator: PiOrchestratorProfile | undefined;
+
+  const refuse = (message: string) => ({ ok: false as const, message });
+
+  /**
+   * Puts the session back on a recorded model. A model Pi can no longer find,
+   * or one whose provider lost its authentication, leaves the session where it
+   * is rather than throwing at whoever was leaving the mode.
+   */
+  const applyModel = async (
+    ctx: ExtensionContext,
+    snapshot: ModeModelSnapshot,
+    level: PiSessionThinkingLevel,
+  ): Promise<boolean> => {
+    const model = ctx.modelRegistry.find(snapshot.provider, snapshot.modelId);
+    if (model === undefined || !(await pi.setModel(model))) return false;
+    pi.setThinkingLevel(level);
+    return true;
+  };
 
   /**
    * The snapshot is captured through the same bounds that restore it. A tool set
    * this extension could not read back must never enable the mode, because the
-   * suppressed parent tools would then be unrecoverable after a reload.
+   * suppressed parent tools would then be unrecoverable after a reload. The
+   * parent's model is held to the same rule: the mode only moves a session onto
+   * a configured model once it knows the identifiers that move it back.
    */
-  const activate = (restoredTools?: readonly string[]): boolean => {
+  const activate = async (
+    ctx: ExtensionContext,
+    restored?: WorkerGraphModeState,
+  ): Promise<
+    | { readonly ok: true; readonly warning?: string }
+    | { readonly ok: false; readonly message: string }
+  > => {
     const snapshot =
-      restoredTools ??
+      restored?.toolsBeforeMode ??
       toolsBeforeMode ??
       modeToolSnapshot(
         pi.getActiveTools().filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
       );
-    if (snapshot === undefined) return false;
+    if (snapshot === undefined) return refuse(UNRESTORABLE_TOOLS_MESSAGE);
+
+    let restoredModelFailed = false;
+    let orchestrator: PiOrchestratorProfile | undefined;
+    try {
+      orchestrator = (
+        await loadConfiguration({
+          agentDirectory: resolved.getAgentDirectory(),
+          workingDirectory: ctx.cwd,
+        })
+      ).orchestrator;
+    } catch (error) {
+      return refuse(
+        error instanceof Error
+          ? `Worker-graph mode not enabled: ${error.message}`
+          : UNREADABLE_CONFIGURATION_MESSAGE,
+      );
+    }
+
+    const applyTools = () => {
+      pi.setActiveTools([
+        ...snapshot.filter((name) => !DISABLED_PARENT_TOOLS.has(name)),
+        WORKER_GRAPH_TOOL_NAME,
+      ]);
+    };
+
+    if (orchestrator === undefined) {
+      /**
+       * The configuration named an orchestrator when this branch was recorded
+       * and no longer does. The recorded model is the only way back, so it is
+       * restored here rather than discarded: dropping it would strand the
+       * session on a model the operator has since removed from the file.
+       */
+      const stranded = restored?.modelBeforeMode ?? modelBeforeMode;
+      const strandedLevel =
+        restored?.thinkingLevelBeforeMode ?? thinkingLevelBeforeMode;
+      if (stranded !== undefined && strandedLevel !== undefined) {
+        restoredModelFailed = !(await applyModel(ctx, stranded, strandedLevel));
+      }
+      toolsBeforeMode = snapshot;
+      modelBeforeMode = undefined;
+      thinkingLevelBeforeMode = undefined;
+      appliedOrchestrator = undefined;
+      applyTools();
+      return {
+        ok: true,
+        ...(restoredModelFailed ? { warning: MODEL_NOT_RESTORED_MESSAGE } : {}),
+      };
+    }
+
+    /**
+     * A restored branch already recorded the model the operator started from.
+     * The live session may by then be running the orchestrator model, so the
+     * record is what gets carried forward rather than the current model.
+     */
+    let previousModel = restored?.modelBeforeMode ?? modelBeforeMode;
+    let previousLevel =
+      restored?.thinkingLevelBeforeMode ?? thinkingLevelBeforeMode;
+    if (previousModel === undefined || previousLevel === undefined) {
+      const current = ctx.model;
+      const level = pi.getThinkingLevel();
+      if (
+        current === undefined ||
+        !boundedName(current.provider) ||
+        !boundedName(current.id) ||
+        ctx.modelRegistry.find(current.provider, current.id) === undefined ||
+        !SESSION_THINKING_LEVELS.has(level as PiSessionThinkingLevel)
+      ) {
+        return refuse(UNRESTORABLE_MODEL_MESSAGE);
+      }
+      previousModel = Object.freeze({
+        provider: current.provider,
+        modelId: current.id,
+      });
+      previousLevel = level as PiSessionThinkingLevel;
+    }
+
+    const target = ctx.modelRegistry.find(
+      orchestrator.provider,
+      orchestrator.model,
+    );
+    if (target === undefined) return refuse(UNKNOWN_MODEL_MESSAGE);
+
+    applyTools();
+    if (!(await pi.setModel(target))) {
+      // Nothing is left half-applied: the tool set goes back before the
+      // refusal, because the mode is not being entered.
+      pi.setActiveTools([...snapshot]);
+      return refuse(UNAUTHENTICATED_MODEL_MESSAGE);
+    }
+    pi.setThinkingLevel(orchestrator.thinkingLevel);
     toolsBeforeMode = snapshot;
-    pi.setActiveTools([
-      ...snapshot.filter((name) => !DISABLED_PARENT_TOOLS.has(name)),
-      WORKER_GRAPH_TOOL_NAME,
-    ]);
-    return true;
+    modelBeforeMode = previousModel;
+    thinkingLevelBeforeMode = previousLevel;
+    appliedOrchestrator = orchestrator;
+    return { ok: true };
   };
-  const deactivate = () => {
+
+  /** True when a recorded model could not be put back. */
+  const deactivate = async (ctx: ExtensionContext): Promise<boolean> => {
+    let failed = false;
+    if (
+      modelBeforeMode !== undefined &&
+      thinkingLevelBeforeMode !== undefined
+    ) {
+      failed = !(await applyModel(
+        ctx,
+        modelBeforeMode,
+        thinkingLevelBeforeMode,
+      ));
+      modelBeforeMode = undefined;
+      thinkingLevelBeforeMode = undefined;
+    }
+    appliedOrchestrator = undefined;
     if (toolsBeforeMode !== undefined) {
       pi.setActiveTools([...toolsBeforeMode]);
       toolsBeforeMode = undefined;
-      return;
+      return failed;
     }
     const active = pi.getActiveTools();
     if (active.includes(WORKER_GRAPH_TOOL_NAME)) {
@@ -314,6 +537,7 @@ export default function registerWorkerGraph(
         active.filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
       );
     }
+    return failed;
   };
 
   const persistModeState = () => {
@@ -323,6 +547,14 @@ export default function registerWorkerGraph(
       ...(enabled && toolsBeforeMode !== undefined
         ? { toolsBeforeMode: [...toolsBeforeMode] }
         : {}),
+      ...(enabled &&
+      modelBeforeMode !== undefined &&
+      thinkingLevelBeforeMode !== undefined
+        ? {
+            modelBeforeMode: { ...modelBeforeMode },
+            thinkingLevelBeforeMode,
+          }
+        : {}),
     });
   };
 
@@ -331,35 +563,64 @@ export default function registerWorkerGraph(
    * session tree restores what the branch recorded, so `/swarm off` is never
    * undone by the flag that started the session.
    */
-  const restoreModeState = (
-    entries: readonly unknown[],
+  const restoreModeState = async (
+    ctx: ExtensionContext,
     applyStartupFlag: boolean,
-  ): { readonly persist: boolean; readonly refused: boolean } => {
-    deactivate();
-    const state = latestModeState(entries);
+  ): Promise<{
+    readonly persist: boolean;
+    readonly refused?: string;
+    readonly warning?: string;
+  }> => {
+    const restoreFailed = await deactivate(ctx);
+    const state = latestModeState(ctx.sessionManager.getBranch());
     const enabledByFlag =
       applyStartupFlag && pi.getFlag(SWARM_FLAG_NAME) === true;
     const requested = enabledByFlag || state?.enabled === true;
-    enabled =
-      requested && activate(state?.enabled ? state.toolsBeforeMode : undefined);
+    if (!requested) {
+      enabled = false;
+      return {
+        persist: false,
+        ...(restoreFailed ? { warning: MODEL_NOT_RESTORED_MESSAGE } : {}),
+      };
+    }
+    const result = await activate(
+      ctx,
+      state?.enabled === true ? state : undefined,
+    );
+    enabled = result.ok;
+    const warning = restoreFailed
+      ? MODEL_NOT_RESTORED_MESSAGE
+      : result.ok
+        ? result.warning
+        : undefined;
     return {
       persist: enabled && enabledByFlag && state?.enabled !== true,
-      refused: requested && !enabled,
+      ...(result.ok ? {} : { refused: result.message }),
+      ...(warning === undefined ? {} : { warning }),
     };
   };
 
-  pi.on("session_start", (_event, ctx) => {
-    const restored = restoreModeState(ctx.sessionManager.getBranch(), true);
+  pi.on("session_start", async (_event, ctx) => {
+    const restored = await restoreModeState(ctx, true);
     if (restored.persist) persistModeState();
-    if (restored.refused) ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
-  });
-  pi.on("session_tree", (_event, ctx) => {
-    if (restoreModeState(ctx.sessionManager.getBranch(), false).refused) {
-      ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
+    if (restored.warning !== undefined) {
+      ctx.ui.notify(restored.warning, "warning");
+    }
+    if (restored.refused !== undefined) {
+      ctx.ui.notify(restored.refused, "error");
     }
   });
-  pi.on("session_shutdown", () => {
-    deactivate();
+  pi.on("session_tree", async (_event, ctx) => {
+    const restored = await restoreModeState(ctx, false);
+    if (restored.warning !== undefined) {
+      ctx.ui.notify(restored.warning, "warning");
+    }
+    if (restored.refused !== undefined) {
+      ctx.ui.notify(restored.refused, "error");
+    }
+  });
+  pi.on("session_shutdown", async (_event, ctx) => {
+    await deactivate(ctx);
   });
 
   /**
@@ -433,21 +694,41 @@ export default function registerWorkerGraph(
         return;
       }
       if (action === "on") {
-        if (!activate()) {
-          ctx.ui.notify(UNRESTORABLE_TOOLS_MESSAGE, "error");
+        // Re-entering would reload the configuration and could report "not
+        // enabled" for a mode that is enabled and applied. The mode is
+        // already what was asked for, so say that instead.
+        if (enabled) {
+          ctx.ui.notify("Worker-graph mode is already enabled", "info");
+          return;
+        }
+        const activated = await activate(ctx);
+        if (!activated.ok) {
+          ctx.ui.notify(activated.message, "error");
           return;
         }
         enabled = true;
         persistModeState();
+        if (activated.warning !== undefined) {
+          ctx.ui.notify(activated.warning, "warning");
+        }
         ctx.ui.notify("Worker-graph mode enabled", "info");
       } else if (action === "off") {
         enabled = false;
-        deactivate();
+        const restoreFailed = await deactivate(ctx);
         persistModeState();
+        // Reported before the confirmation: leaving the mode on a model the
+        // operator did not choose is the more important half of the outcome.
+        if (restoreFailed) {
+          ctx.ui.notify(MODEL_NOT_RESTORED_MESSAGE, "warning");
+        }
         ctx.ui.notify("Worker-graph mode disabled", "info");
       } else if (action === "status") {
         ctx.ui.notify(
-          `Worker-graph mode is ${enabled ? "enabled" : "disabled"}`,
+          `Worker-graph mode is ${enabled ? "enabled" : "disabled"}${
+            appliedOrchestrator === undefined
+              ? ""
+              : `; the parent is on ${appliedOrchestrator.provider}/${appliedOrchestrator.model} at ${appliedOrchestrator.thinkingLevel} thinking`
+          }`,
           "info",
         );
       } else {

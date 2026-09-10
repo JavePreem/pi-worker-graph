@@ -149,7 +149,8 @@ Implement:
 - [x] explicit on, status, and off commands;
 - [x] operator-only run-store listing and deletion subcommands;
 - [x] an opt-in startup flag;
-- [x] session setting snapshot and restoration;
+- [x] session setting snapshot and restoration, covering the active tools and an
+      optionally configured parent model and thinking level;
 - [x] orchestrator guidance for decomposition, bounded overlap, review, validation,
   and repair delegation;
 - [x] bounded graph progress through tool updates.

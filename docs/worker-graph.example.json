@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "maxRetainedRuns": 64,
+  "profiles": {
+    "worker": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "thinkingLevel": "medium",
+      "tools": ["read", "grep", "find", "ls", "bash", "edit", "write"]
+    }
+  }
+}

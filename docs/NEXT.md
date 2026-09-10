@@ -46,6 +46,11 @@ adapter. Automated tests remain provider-free:
   rejected by the extension;
 - one static, fully bounded `worker_graph` parent tool;
 - explicit `/swarm on`, `/swarm status`, `/swarm off`, and `--swarm` activation;
+- an optional configured orchestrator session model and thinking level, applied
+  on activation and restored on exit, refused unless the mode knows the
+  identifiers that restore it, the model is one Pi can find, and its provider
+  is authenticated, with a model the configuration stopped naming still put
+  back and a restore that cannot be performed reported rather than swallowed;
 - session-persisted swarm mode with exact active-tool restoration and built-in
   parent mutation tools suppressed while active, with branch-recorded state
   governing session-tree navigation and activation refused for any tool set the
@@ -85,15 +90,20 @@ externally addressable runs are not implemented yet.
 npm install
 npm run check
 npm run build
+cp docs/worker-graph.example.json ~/.pi/agent/worker-graph.json
 pi -e .
 ```
 
 `npm run check` currently runs the adapter, configuration, context, extension,
 graph, orchestrator, report, store, and runner suites. `npm run build` must run
 before `pi -e .`, because `extensions/index.ts` re-exports the compiled entry
-point from `dist/`. Loading the package in Pi adds the `/swarm` control
-command, whose `runs` and `delete` subcommands work whether or not the mode is
-enabled, but leaves the parent tool set unchanged. The entry point registers
+point from `dist/`. The configuration copy is required rather than optional:
+the extension has no provider or model defaults, and `/swarm runs` and
+`/swarm delete` resolve the state root through the same file, so a missing
+`worker-graph.json` answers both subcommands with a configuration error.
+Loading the package in Pi adds the `/swarm` control command, whose `runs` and
+`delete` subcommands work whether or not the mode is enabled, but leaves the
+parent tool set unchanged. The entry point registers
 the worker report tool only when `PI_WORKER_GRAPH_ROLE=worker`, which the
 parent sets on worker subprocesses and never on its own session. Active graph
 lifecycles claim an exclusive owner record before mutating run state; resumable
@@ -108,11 +118,22 @@ Prepare the vertical slice for a prerelease:
    intentionally skipped for the current local pass.
 2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
    and registry workflow.
-3. Exercise `/swarm runs` and `/swarm delete` against a real agent directory
-   once, since their state-root resolution is only covered by an injected
-   configuration in tests.
+3. Type `/swarm runs` and `/swarm delete <run-id>` once in a live Pi session.
+   Their state-root resolution has now been exercised against a real agent
+   directory: a real `worker-graph.json` resolved the default
+   `~/.pi/agent/worker-graph` root, and a created run was listed with its slot
+   and then deleted, leaving `runs/slots` empty at mode `0700`. What remains
+   unverified is the command surface itself — argument parsing, the notified
+   text, and `ctx.cwd` as the working directory — because those need the
+   interactive session rather than a direct store call.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
+5. Exercise the configured orchestrator model once in a live session. Its
+   activation, refusal, and restore paths are covered by fakes; what no test
+   can cover is Pi's own `setModel` against a real provider catalogue and real
+   authentication. Confirm specifically whether the shutdown restore lands:
+   `session_shutdown` awaits an asynchronous model change, and whether Pi waits
+   for that handler before exiting is unverified.
 
 ## Deferred run-store work
 
@@ -121,6 +142,25 @@ fail-closed ownership contract so two orchestrators cannot advance one run, and
 the rule that a mutation lock is recovered only by a holder that can be shown
 to have finished. Bounded text artifacts can be added with structured-output
 overflow handling, and their retained files must be removed with the run.
+
+## Deferred worker instruction work
+
+The worker concurrency contract is now sent in the worker prompt
+(`src/pi-subprocess.ts`) and asserted by the adapter suite: stay inside the
+assignment, prefer small exact edits, reconcile rather than restore a file to
+the version first read, never run git restore/reset/checkout/stash/clean and
+never commit, push, or branch, no repository-wide formatters or generators or
+dependency updates without explicit ownership, re-read changed files before
+reporting, and report an unclear semantic conflict as a blocker instead of
+guessing. The orchestrator guidance in `src/orchestrator.ts` carries the
+matching parent-side decomposition, overlap, serialization, and acceptance
+rules.
+
+What remains undecided is one report field. Observed concurrent changes have
+nowhere structured to go: `NodeOutput` carries `summary`, `changedFiles`,
+`interfaces`, `decisions`, `validation`, and `blockers` (`src/output.ts`), so
+an observation about another worker's edits can only arrive as prose in
+`summary` or as a blocker. Adding a field is a schema version change.
 
 ## Constraints to preserve
 

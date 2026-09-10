@@ -20,7 +20,9 @@ The parent Pi session:
 - defines nodes and dependency edges;
 - decides which ready nodes may safely overlap;
 - receives graph progress and structured results;
-- reviews the integrated checkout and runs final validation;
+- reviews the integrated checkout with read-only tools;
+- commissions final validation as dependent tasks and weighs what they report,
+  because the mode suppresses the parent's own command execution;
 - delegates repairs rather than editing while worker-graph mode is active.
 
 ### Worker

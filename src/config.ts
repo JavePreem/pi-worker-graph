@@ -10,8 +10,14 @@ import {
   sep,
 } from "node:path";
 import { isRecord } from "./json.js";
-import type { PiWorkerProfile } from "./pi-subprocess.js";
-import { parsePiWorkerProfiles } from "./pi-subprocess.js";
+import type {
+  PiOrchestratorProfile,
+  PiWorkerProfile,
+} from "./pi-subprocess.js";
+import {
+  parsePiOrchestratorProfile,
+  parsePiWorkerProfiles,
+} from "./pi-subprocess.js";
 import { RUN_STORE_DEFAULT_MAX_RUNS, RUN_STORE_MAX_RUNS } from "./store.js";
 
 export const WORKER_GRAPH_CONFIG_FILENAME = "worker-graph.json";
@@ -22,6 +28,7 @@ const CONFIG_FIELDS = new Set([
   "schemaVersion",
   "stateRoot",
   "maxRetainedRuns",
+  "orchestrator",
   "profiles",
 ]);
 const MAX_PATH_BYTES = 4 * 1024;
@@ -56,6 +63,11 @@ export class WorkerGraphConfigurationError extends Error {
 export interface WorkerGraphConfiguration {
   readonly stateRoot: string;
   readonly maxRetainedRuns: number;
+  /**
+   * The parent session's own model while the mode is active. Absent leaves the
+   * session exactly as the operator started it.
+   */
+  readonly orchestrator?: PiOrchestratorProfile;
   readonly profiles: Readonly<Record<string, PiWorkerProfile>>;
 }
 
@@ -170,6 +182,15 @@ function parseConfiguration(
     throw new WorkerGraphConfigurationError("invalid");
   }
 
+  let orchestrator: PiOrchestratorProfile | undefined;
+  if (value.orchestrator !== undefined) {
+    try {
+      orchestrator = parsePiOrchestratorProfile(value.orchestrator);
+    } catch {
+      throw new WorkerGraphConfigurationError("invalid");
+    }
+  }
+
   if (
     value.stateRoot !== undefined &&
     (typeof value.stateRoot !== "string" ||
@@ -201,6 +222,7 @@ function parseConfiguration(
   return Object.freeze({
     stateRoot,
     maxRetainedRuns,
+    ...(orchestrator === undefined ? {} : { orchestrator }),
     profiles,
   });
 }

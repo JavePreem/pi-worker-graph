@@ -207,6 +207,20 @@ test("spawns an isolated Pi worker and sends task content only through stdin", a
     "edit,read,write,worker_graph_report",
   ]);
   assert.equal(prompt.includes("worker_graph_event"), false);
+  // The concurrency contract is instruction the worker only ever receives
+  // here: the runtime performs no Git operations itself, so nothing else
+  // stops a worker that holds `bash` from resetting the shared checkout.
+  for (const contract of [
+    "Preserve concurrent changes and re-read files before editing",
+    "Never run git restore, reset, checkout, stash, or clean",
+    "never commit, push, or create a branch",
+    "Do not run repository-wide formatters, code generators, or dependency updates",
+    "Prefer small exact edits",
+    "Re-read every file you changed before reporting",
+    "report the conflict as a blocker",
+  ]) {
+    assert.equal(prompt.includes(contract), true, contract);
+  }
   const argumentsText = invocation.args.join(" ");
   for (const sensitive of [
     "Implement the requested change",

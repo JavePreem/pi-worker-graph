@@ -46,8 +46,15 @@ Both the retained record count per run and one returned page are bounded.
 ### D7 — The orchestrator owns acceptance
 
 A worker success report is evidence, not acceptance. The orchestrator reads the
-actual changes, runs checks, and either accepts the result or delegates a focused
-repair.
+actual changes and either accepts the result or delegates a focused repair.
+
+Acceptance is a judgment, not a command. Running the checks is delegated,
+because D8 suppresses the parent's `bash` while the mode is active: a
+validation task executes the suite and reports `{command, result}` pairs, and
+the orchestrator weighs those results against the diff it read. That division
+is deliberate. Executing a test suite needs a shell; deciding whether its
+output means the work is acceptable needs the model that planned the work, and
+that judgment is never delegated to a worker.
 
 ### D8 — Runtime activation is explicit
 
@@ -139,6 +146,36 @@ store already reports as reclaimable rather than leaving the run/slot
 disagreement that stops the store admitting any work. A run an orchestrator
 holds is refused, under the run mutation lock so ownership cannot be acquired
 between the check and the removal.
+
+### D18 — The orchestrator session is configuration too
+
+`worker-graph.json` gains an optional `orchestrator` block naming the parent
+session's provider, model, and thinking level, applied when the mode is
+enabled and reverted when it is left. This extends D9 from workers to the
+parent: still no default, because an absent block leaves the session exactly as
+the operator started it, and the package never selects a model on its own. The
+motive is that the split the runtime depends on — a capable parent that
+decomposes and accepts, cheaper workers that execute one scoped assignment —
+was previously only expressible in Pi's own settings, so the package could
+describe the arrangement but not carry it.
+
+The block has no tool list. Parent tools are governed by the mode's snapshot and
+the tools it suppresses, and a second source for them would let a configuration
+file contradict D8.
+
+Applying the parent's model is held to the same fail-closed rule as the tool
+snapshot: the mode refuses to enable unless it first knows the provider and
+model id that put the session back, the configured model is one Pi can find,
+and its provider has configured authentication. A refusal applies nothing —
+the tool set is restored before the mode reports why it did not enter. The
+recorded pre-mode model is carried forward when a branch is resumed, because
+the live session is by then running the orchestrator model and re-capturing it
+would lose the way back. `off` is not accepted for the parent: Pi's session
+thinking level cannot express it, so it stays a worker-only level.
+
+Enabling the mode therefore requires a loadable configuration, where it
+previously required none. A graph cannot run without profiles anyway, so the
+error now surfaces at activation rather than mid-orchestration.
 
 ## Open decisions
 

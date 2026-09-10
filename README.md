@@ -18,6 +18,66 @@ inboxes, and an explicitly activated parent orchestration tool. The parent tool
 is inactive by default; worker children receive only the final-report and
 coordination tools.
 
+## Setup
+
+The extension has no provider or model defaults, so it does not run until a
+configuration exists. Copy the example and edit its profiles:
+
+```bash
+mkdir -p ~/.pi/agent
+cp docs/worker-graph.example.json ~/.pi/agent/worker-graph.json
+```
+
+The npm artifact ships `docs/` too, so the same file is present in an installed
+copy of the package.
+
+Every profile must name its `provider`, `model`, `thinkingLevel`, and `tools`
+explicitly; unknown fields are rejected. Valid thinking levels are `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Valid worker tools are
+`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. A graph
+task selects a profile by name, so the name in the example is illustrative
+rather than required.
+
+Profiles configure workers. The capable model belongs on the parent, which
+decomposes the work, reads the integrated checkout, and decides acceptance; a
+worker executes one narrow assignment the parent already scoped, so the example
+configures a cheaper model here. Add further profiles when tasks genuinely need
+different capability or a narrower tool set.
+
+The parent session can be configured in the same file, through an optional
+`orchestrator` block:
+
+```json
+{
+  "orchestrator": {
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "thinkingLevel": "high"
+  }
+}
+```
+
+Enabling the mode then moves the session onto that model and restores the
+previous one on `/swarm off` and on leaving the branch. Shutdown attempts the
+same restore, but it is a best effort: the model is put back through an
+asynchronous Pi call, and a session ending need not wait for it. A restore that
+cannot be performed at all — the earlier model has left Pi's catalogue, or its
+provider lost authentication — is reported rather than passed over in silence.
+The block has no `tools` field: the parent's tools stay governed by the mode's
+own snapshot.
+`thinkingLevel` accepts every level a worker profile accepts except `off`,
+which Pi's session thinking level cannot express.
+
+The block is deliberately absent from the example, because a model your Pi
+install cannot find would refuse to enable the mode. Leave it out and the
+parent stays exactly as you started it, with its model coming from Pi's own
+settings or preset.
+
+A valid configuration is required to enable the mode at all, and by `/swarm
+runs` and `/swarm delete`, which resolve the run-store state root through it.
+See [Orchestrator tool](#orchestrator-tool) for `stateRoot`,
+`maxRetainedRuns`, and the activation commands.
+
 ## Graph semantics
 
 - The complete graph is validated before execution.
@@ -92,10 +152,10 @@ import { createPiSubprocessExecutor, runGraph } from "pi-worker-graph";
 
 const executor = createPiSubprocessExecutor({
   profiles: {
-    writer: {
+    worker: {
       provider: "anthropic",
-      model: "claude-sonnet-4-5",
-      thinkingLevel: "high",
+      model: "claude-haiku-4-5",
+      thinkingLevel: "medium",
       tools: ["read", "bash", "edit", "write"],
     },
   },
@@ -110,7 +170,7 @@ await runGraph({
       {
         id: "implementation",
         payload: {
-          profile: "writer",
+          profile: "worker",
           assignment: "Implement the requested change",
           acceptanceCriteria: ["Tests pass"],
           expectedPaths: ["src/"],
@@ -204,19 +264,20 @@ capacity means deleting the run directory and its slot together.
 ## Orchestrator tool
 
 The extension reads `worker-graph.json` from Pi's agent directory (normally
-`~/.pi/agent`). The configuration is byte-bounded, rejects unknown fields, and
-requires every worker profile to select its provider, model, thinking level, and
-tool allowlist explicitly:
+`~/.pi/agent`); [`docs/worker-graph.example.json`](docs/worker-graph.example.json) is
+a copyable starting point. The configuration is byte-bounded, rejects unknown
+fields, and requires every worker profile to select its provider, model,
+thinking level, and tool allowlist explicitly:
 
 ```json
 {
   "schemaVersion": 1,
   "maxRetainedRuns": 64,
   "profiles": {
-    "writer": {
+    "worker": {
       "provider": "anthropic",
-      "model": "claude-sonnet-4-5",
-      "thinkingLevel": "high",
+      "model": "claude-haiku-4-5",
+      "thinkingLevel": "medium",
       "tools": ["read", "bash", "edit", "write"]
     }
   }
@@ -267,7 +328,12 @@ The `--swarm` extension flag enables the mode at startup. While the mode is
 off, the `worker_graph` tool is excluded from the active tool set. Enabling the
 mode snapshots the active tools, disables the built-in `bash`, `edit`, and
 `write` tools in the parent, and persists the mode state in the Pi session.
-Turning it off restores the exact snapshot. Navigating the session tree
+Turning it off restores the exact snapshot. When the configuration names an
+`orchestrator` block, the same snapshot covers the parent's model and thinking
+level, and enabling the mode is refused outright unless the mode first knows
+the identifiers that put the session back, the configured model is one Pi can
+find, and its provider has configured authentication; a refusal applies
+nothing. Navigating the session tree
 restores whatever the target branch recorded, so `/swarm off` is never undone
 by the flag that started the session. A tool set the extension could not read
 back — more than 256 tools, or a tool name longer than 256 bytes — refuses to
@@ -287,7 +353,6 @@ read-only tools, invoke another narrow graph for any repairs.
 The remaining runtime will add:
 
 - retained report artifacts if explicit truncation is added;
-- optional cleanup tooling for retained run state;
 - persisted worker attempts and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not

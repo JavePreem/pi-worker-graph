@@ -28,13 +28,25 @@ interface RegisteredTool {
   }>;
 }
 
+interface FakeModel {
+  readonly provider: string;
+  readonly id: string;
+}
+
 interface SessionContext {
   readonly cwd: string;
   readonly sessionManager: { getBranch(): readonly unknown[] };
   readonly ui: { notify(message: string, type?: string): void };
+  readonly model: FakeModel | undefined;
+  readonly modelRegistry: {
+    find(provider: string, modelId: string): FakeModel | undefined;
+  };
 }
 
-type SessionHandler = (event: unknown, context: SessionContext) => void;
+type SessionHandler = (
+  event: unknown,
+  context: SessionContext,
+) => void | Promise<void>;
 
 interface CustomEntry {
   readonly type: "custom";
@@ -59,10 +71,15 @@ interface ModeSession {
   readonly flags: string[];
   readonly entries: CustomEntry[];
   readonly notifications: Notification[];
-  start(entries?: readonly unknown[]): void;
-  tree(entries?: readonly unknown[]): void;
-  shutdown(): void;
+  start(entries?: readonly unknown[]): Promise<void>;
+  tree(entries?: readonly unknown[]): Promise<void>;
+  shutdown(): Promise<void>;
   swarm(action: string): Promise<void>;
+  /** The session's current model, as the extension left it. */
+  model: FakeModel | undefined;
+  thinkingLevel: string;
+  /** Models the registry can find; assignable so a test can remove one. */
+  catalogue: readonly FakeModel[] | undefined;
   readonly stateRoot: string;
   /** Every configuration load the extension performed, in order. */
   readonly configurationLoads: {
@@ -77,6 +94,20 @@ function modeSession(
     readonly flag?: boolean;
     readonly stateRoot?: string;
     readonly cwd?: string;
+    /** The `orchestrator` block the configuration reports, when any. */
+    readonly orchestrator?: {
+      readonly provider: string;
+      readonly model: string;
+      readonly thinkingLevel: string;
+    };
+    /** Models the registry can find. Defaults to the current model alone. */
+    readonly catalogue?: readonly FakeModel[];
+    readonly model?: FakeModel | undefined;
+    readonly thinkingLevel?: string;
+    /** Whether `setModel` reports configured authentication. */
+    readonly authenticated?: boolean;
+    /** Fails every configuration load with this message. */
+    readonly configurationError?: string;
   } = {},
 ): ModeSession {
   const stateRoot = options.stateRoot;
@@ -91,19 +122,35 @@ function modeSession(
       ...(type === undefined ? {} : { type }),
     });
   };
+  const catalogue = () =>
+    session.catalogue ?? (session.model === undefined ? [] : [session.model]);
   const context = (entries?: readonly unknown[]): SessionContext => ({
     cwd,
     sessionManager: { getBranch: () => entries ?? session.entries },
     ui: { notify },
+    model: session.model,
+    modelRegistry: {
+      find: (provider, modelId) =>
+        catalogue().find(
+          (candidate) =>
+            candidate.provider === provider && candidate.id === modelId,
+        ),
+    },
   });
-  const fire = (event: string, entries?: readonly unknown[]) => {
+  const fire = async (event: string, entries?: readonly unknown[]) => {
     const handler = handlers.get(event);
     if (!handler) throw new Error(`${event} was not registered`);
-    handler({}, context(entries));
+    await handler({}, context(entries));
   };
   const session: ModeSession = {
     stateRoot: stateRoot ?? "",
     configurationLoads: [],
+    model:
+      options.model === undefined && !("model" in options)
+        ? { provider: "test-provider", id: "test-model" }
+        : options.model,
+    thinkingLevel: options.thinkingLevel ?? "medium",
+    catalogue: options.catalogue,
     active: [...(options.active ?? ["read", "bash", "edit", "write"])],
     tools: [],
     commands: [],
@@ -148,22 +195,41 @@ function modeSession(
       appendEntry(customType: string, data: unknown) {
         session.entries.push({ type: "custom", customType, data });
       },
+      getThinkingLevel() {
+        return session.thinkingLevel;
+      },
+      setThinkingLevel(level: string) {
+        session.thinkingLevel = level;
+      },
+      async setModel(model: FakeModel) {
+        if (options.authenticated === false) return false;
+        session.model = model;
+        return true;
+      },
       on(event: string, handler: SessionHandler) {
         handlers.set(event, handler);
       },
     } as never,
-    stateRoot === undefined
-      ? {}
-      : {
-          getAgentDirectory: () => stateRoot,
-          loadConfiguration: async (loadOptions) => {
-            session.configurationLoads.push({
-              agentDirectory: loadOptions.agentDirectory,
-              workingDirectory: loadOptions.workingDirectory,
-            });
-            return { stateRoot, maxRetainedRuns: 64, profiles: {} };
-          },
-        },
+    {
+      getAgentDirectory: () => stateRoot ?? "/agent",
+      loadConfiguration: async (loadOptions) => {
+        session.configurationLoads.push({
+          agentDirectory: loadOptions.agentDirectory,
+          workingDirectory: loadOptions.workingDirectory,
+        });
+        if (options.configurationError !== undefined) {
+          throw new Error(options.configurationError);
+        }
+        return {
+          stateRoot: stateRoot ?? "/agent/worker-graph",
+          maxRetainedRuns: 64,
+          profiles: {},
+          ...(options.orchestrator === undefined
+            ? {}
+            : { orchestrator: options.orchestrator }),
+        } as never;
+      },
+    },
   );
   return session;
 }
@@ -171,6 +237,8 @@ function modeSession(
 function modeEntry(
   enabled: boolean,
   toolsBeforeMode?: readonly string[],
+  model?: { readonly provider: string; readonly modelId: string },
+  thinkingLevel?: string,
 ): CustomEntry {
   return {
     type: "custom",
@@ -179,6 +247,9 @@ function modeEntry(
       schemaVersion: 1,
       enabled,
       ...(toolsBeforeMode === undefined ? {} : { toolsBeforeMode }),
+      ...(model === undefined
+        ? {}
+        : { modelBeforeMode: model, thinkingLevelBeforeMode: thinkingLevel }),
     },
   };
 }
@@ -283,7 +354,7 @@ test("keeps the parent graph tool inactive until explicitly enabled", async (t) 
   const session = modeSession({ active: ["read", "edit", "write"] });
 
   assert.deepEqual(session.active, ["read", "edit", "write", "worker_graph"]);
-  session.start();
+  await session.start();
   assert.deepEqual(session.tools, ["worker_graph"]);
   assert.deepEqual(session.commands, ["swarm"]);
   assert.deepEqual(session.flags, ["swarm"]);
@@ -314,7 +385,7 @@ test("startup mode suppresses parent write tools and restores its snapshot", asy
   const session = modeSession({ flag: true });
   const suppressed = ["read", "bash", "edit", "write"];
 
-  session.start();
+  await session.start();
   assert.deepEqual(session.active, ["read", "worker_graph"]);
 
   session.active = ["read", "custom", "worker_graph"];
@@ -335,7 +406,7 @@ test("startup mode suppresses parent write tools and restores its snapshot", asy
     { message: "Worker-graph mode is enabled", type: "info" },
   ]);
 
-  session.shutdown();
+  await session.shutdown();
   assert.deepEqual(session.active, suppressed);
 });
 
@@ -344,10 +415,10 @@ test("restores branch-scoped mode state on resume and tree navigation", async (t
   const session = modeSession();
   const enabled = modeEntry(true, ["read", "bash", "edit", "write", "custom"]);
 
-  session.start([enabled]);
+  await session.start([enabled]);
   assert.deepEqual(session.active, ["read", "custom", "worker_graph"]);
 
-  session.tree([enabled, modeEntry(false)]);
+  await session.tree([enabled, modeEntry(false)]);
   assert.deepEqual(session.active, ["read", "bash", "edit", "write", "custom"]);
 });
 
@@ -356,16 +427,16 @@ test("the startup flag does not undo an explicit off across the session tree", a
   const session = modeSession({ flag: true });
   const suppressed = ["read", "bash", "edit", "write"];
 
-  session.start();
+  await session.start();
   assert.deepEqual(session.active, ["read", "worker_graph"]);
 
   await session.swarm("off");
   assert.deepEqual(session.active, suppressed);
 
-  session.tree();
+  await session.tree();
   assert.deepEqual(session.active, suppressed);
 
-  session.start();
+  await session.start();
   assert.deepEqual(session.active, ["read", "worker_graph"]);
 });
 
@@ -379,7 +450,7 @@ test("refuses to enable a mode whose tool snapshot could not be restored", async
     type: "error",
   };
 
-  session.start();
+  await session.start();
   assert.deepEqual(session.active, unrestorable);
 
   await session.swarm("on");
@@ -733,4 +804,261 @@ test("answers a misused run-store subcommand before touching the store", async (
     type: "warning",
   });
   assert.deepEqual(session.configurationLoads, []);
+});
+
+const ORCHESTRATOR = {
+  provider: "smart-provider",
+  model: "smart-model",
+  thinkingLevel: "high",
+};
+const STARTING_MODEL = { provider: "test-provider", id: "test-model" };
+const ORCHESTRATOR_MODEL = { provider: "smart-provider", id: "smart-model" };
+
+test("moves the parent onto the configured orchestrator model and back", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+
+  await session.start();
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.equal(session.thinkingLevel, "medium");
+
+  await session.swarm("on");
+  assert.deepEqual(session.model, ORCHESTRATOR_MODEL);
+  assert.equal(session.thinkingLevel, "high");
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
+
+  await session.swarm("off");
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.equal(session.thinkingLevel, "medium");
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+});
+
+test("records the pre-mode model so a resumed branch restores it", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+
+  await session.swarm("on");
+  assert.deepEqual(session.entries, [
+    modeEntry(
+      true,
+      ["read", "bash", "edit", "write"],
+      { provider: "test-provider", modelId: "test-model" },
+      "medium",
+    ),
+  ]);
+
+  // Resuming the enabled branch must carry the recorded pre-mode model
+  // forward: the live session is already on the orchestrator model, so
+  // re-capturing the current model would lose the way back.
+  await session.start(session.entries);
+  assert.deepEqual(session.model, ORCHESTRATOR_MODEL);
+  await session.swarm("off");
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.equal(session.thinkingLevel, "medium");
+});
+
+test("leaves the session alone when no orchestrator profile is configured", async (t) => {
+  parentSession(t);
+  const session = modeSession({ catalogue: [STARTING_MODEL] });
+
+  await session.swarm("on");
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.equal(session.thinkingLevel, "medium");
+  assert.deepEqual(session.entries, [
+    modeEntry(true, ["read", "bash", "edit", "write"]),
+  ]);
+});
+
+test("refuses the mode when the configured model is unavailable", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL],
+  });
+
+  await session.start();
+  await session.swarm("on");
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.deepEqual(session.entries, []);
+  assert.deepEqual(session.notifications, [
+    {
+      message:
+        "Worker-graph mode not enabled: the configured orchestrator model is not available",
+      type: "error",
+    },
+  ]);
+});
+
+test("refuses the mode when the configured model has no authentication", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+    authenticated: false,
+  });
+
+  await session.swarm("on");
+  // The tool set is put back, so a refused activation leaves nothing applied.
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.deepEqual(session.entries, []);
+  assert.deepEqual(session.notifications, [
+    {
+      message:
+        "Worker-graph mode not enabled: the configured orchestrator model has no configured authentication",
+      type: "error",
+    },
+  ]);
+});
+
+test("refuses the mode when the current model could not be restored later", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [ORCHESTRATOR_MODEL],
+  });
+
+  await session.start();
+  await session.swarm("on");
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.deepEqual(session.notifications, [
+    {
+      message:
+        "Worker-graph mode not enabled: the session's current model cannot be restored later",
+      type: "error",
+    },
+  ]);
+});
+
+test("refuses the mode when the configuration cannot be read", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    configurationError: "Worker graph configuration file was not found",
+  });
+
+  await session.start();
+  await session.swarm("on");
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+  assert.deepEqual(session.entries, []);
+  assert.deepEqual(session.notifications, [
+    {
+      message:
+        "Worker-graph mode not enabled: Worker graph configuration file was not found",
+      type: "error",
+    },
+  ]);
+});
+
+test("puts back a model the configuration no longer names", async (t) => {
+  parentSession(t);
+  // The branch was recorded while an orchestrator block existed; the block is
+  // gone by the time the branch is resumed.
+  const session = modeSession({
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+  session.model = ORCHESTRATOR_MODEL;
+  session.thinkingLevel = "high";
+  const recorded = modeEntry(
+    true,
+    ["read", "bash", "edit", "write"],
+    { provider: "test-provider", modelId: "test-model" },
+    "medium",
+  );
+
+  await session.start([recorded]);
+  assert.deepEqual(session.model, STARTING_MODEL);
+  assert.equal(session.thinkingLevel, "medium");
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
+  assert.deepEqual(session.notifications, []);
+});
+
+test("reports a model it could not put back instead of claiming success", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+
+  await session.start();
+  await session.swarm("on");
+  assert.deepEqual(session.model, ORCHESTRATOR_MODEL);
+
+  // The model the session started from leaves the catalogue while the mode is
+  // active, so leaving cannot put it back.
+  session.catalogue = [ORCHESTRATOR_MODEL];
+  await session.swarm("off");
+
+  assert.deepEqual(session.model, ORCHESTRATOR_MODEL);
+  assert.deepEqual(session.notifications, [
+    { message: "Worker-graph mode enabled", type: "info" },
+    {
+      message:
+        "Worker-graph mode left the session on the orchestrator model: the model it started from is no longer available",
+      type: "warning",
+    },
+    { message: "Worker-graph mode disabled", type: "info" },
+  ]);
+  // The tool set is still restored: only the model could not be put back.
+  assert.deepEqual(session.active, ["read", "bash", "edit", "write"]);
+});
+
+test("status names the model the mode applied", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+
+  await session.start();
+  await session.swarm("status");
+  await session.swarm("on");
+  await session.swarm("status");
+  await session.swarm("off");
+  await session.swarm("status");
+
+  assert.deepEqual(
+    session.notifications.map((notification) => notification.message),
+    [
+      "Worker-graph mode is disabled",
+      "Worker-graph mode enabled",
+      "Worker-graph mode is enabled; the parent is on smart-provider/smart-model at high thinking",
+      "Worker-graph mode disabled",
+      "Worker-graph mode is disabled",
+    ],
+  );
+});
+
+test("enabling an enabled mode reports that rather than re-entering", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    orchestrator: ORCHESTRATOR,
+    catalogue: [STARTING_MODEL, ORCHESTRATOR_MODEL],
+  });
+
+  await session.start();
+  await session.swarm("on");
+  const loadsAfterFirst = session.configurationLoads.length;
+
+  await session.swarm("on");
+  assert.equal(session.configurationLoads.length, loadsAfterFirst);
+  assert.deepEqual(session.entries, [
+    modeEntry(
+      true,
+      ["read", "bash", "edit", "write"],
+      { provider: "test-provider", modelId: "test-model" },
+      "medium",
+    ),
+  ]);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Worker-graph mode is already enabled",
+    type: "info",
+  });
 });

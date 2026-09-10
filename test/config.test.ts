@@ -222,3 +222,68 @@ test("rejects unknown profile fields", async (t) => {
       error.code === "invalid",
   );
 });
+
+test("accepts an explicit orchestrator profile", async (t) => {
+  const { agentDirectory, workingDirectory } = await directories(t);
+  await writeConfiguration(agentDirectory, {
+    ...(validConfiguration() as Record<string, unknown>),
+    orchestrator: {
+      provider: "smart-provider",
+      model: "smart-model",
+      thinkingLevel: "high",
+    },
+  });
+
+  const configuration = await loadWorkerGraphConfiguration({
+    agentDirectory,
+    workingDirectory,
+  });
+  assert.deepEqual(configuration.orchestrator, {
+    provider: "smart-provider",
+    model: "smart-model",
+    thinkingLevel: "high",
+  });
+});
+
+test("omits the orchestrator profile when the configuration names none", async (t) => {
+  const { agentDirectory, workingDirectory } = await directories(t);
+  await writeConfiguration(agentDirectory, validConfiguration());
+
+  const configuration = await loadWorkerGraphConfiguration({
+    agentDirectory,
+    workingDirectory,
+  });
+  assert.equal(configuration.orchestrator, undefined);
+  assert.ok(!("orchestrator" in configuration));
+});
+
+test("rejects orchestrator profiles Pi could not apply to a session", async (t) => {
+  const { agentDirectory, workingDirectory } = await directories(t);
+  const base = validConfiguration() as Record<string, unknown>;
+  const rejected: readonly unknown[] = [
+    // `off` is a worker-only level: Pi's session thinking level cannot express it.
+    { provider: "p", model: "m", thinkingLevel: "off" },
+    { provider: "p", model: "m", thinkingLevel: "highest" },
+    { provider: "p", model: "m" },
+    { provider: "p", thinkingLevel: "high" },
+    { model: "m", thinkingLevel: "high" },
+    // A tool allowlist is the worker profile's field, not the parent's.
+    { provider: "p", model: "m", thinkingLevel: "high", tools: ["read"] },
+    { provider: "", model: "m", thinkingLevel: "high" },
+    { provider: "p", model: " m", thinkingLevel: "high" },
+    "smart-provider/smart-model",
+    [],
+    null,
+  ];
+
+  for (const orchestrator of rejected) {
+    await writeConfiguration(agentDirectory, { ...base, orchestrator });
+    await assert.rejects(
+      loadWorkerGraphConfiguration({ agentDirectory, workingDirectory }),
+      (error: unknown) =>
+        error instanceof WorkerGraphConfigurationError &&
+        error.code === "invalid",
+      `${JSON.stringify(orchestrator)} was accepted`,
+    );
+  }
+});
