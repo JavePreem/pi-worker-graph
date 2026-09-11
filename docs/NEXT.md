@@ -82,6 +82,12 @@ adapter. Automated tests remain provider-free:
   listing of everything holding capacity, and deletion of a named run with its
   slot, refused while an orchestrator holds the run and ordered so an
   interruption can only strand a slot;
+- an optional per-node work-review-repair cycle: a reviewer profile judges the
+  worker's result against the assignment, its blockers become the repair
+  worker's instructions, and the cycle repeats until a reviewer accepts or the
+  round limit is reached, with a still-rejected node failing rather than
+  publishing work review refused, every round's spend summed into the node's one
+  attempt, and the graph left frozen because rounds are not nodes;
 - immutable bounded run-scoped coordination events and directed inbox messages,
   in one run-global journal, with cursor-based queries and child-only Pi tools;
 - a run mutation lock that names its holder, so contention between the parent
@@ -127,14 +133,24 @@ or externally addressable runs are not implemented yet.
 
 ## Next implementation slice
 
-Prepare the vertical slice for a prerelease:
+Items 1, 3 and 5 below were verified live against Pi 0.85.1 driven headlessly in
+`--mode rpc`, with a throwaway agent directory supplied through
+`PI_CODING_AGENT_DIR`. What each run showed is recorded inline.
 
-1. Run an optional provider-backed smoke test with two independent workers and a
-   dependent validation node when provider-backed testing is desired; this is
-   intentionally skipped for the current local pass.
+1. A provider-backed smoke test ran: two independent workers and a dependent
+   validation node, real Pi subprocesses, succeeded in 22.7s. Each worker
+   changed only its own file, the validation node received both prerequisite
+   reports, run usage summed with nothing unaccounted, and the store kept mode
+   `0700`.
 2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
    and registry workflow.
-3. Type `/swarm runs` and `/swarm delete <run-id>` once in a live Pi session.
+3. Verified. The command surface was exercised live — usage text, `status`,
+   `on`/`off`/repeat-`on`, `runs`, `usage <id>`, `delete <id>`, and every
+   bad-argument path — and `ctx.cwd` was confirmed as the working directory by
+   pointing a state root inside the checkout and getting the checkout-local
+   refusal. Superseded detail follows.
+
+   Type `/swarm runs` and `/swarm delete <run-id>` once in a live Pi session.
    Their state-root resolution has now been exercised against a real agent
    directory: a real `worker-graph.json` resolved the default
    `~/.pi/agent/worker-graph` root, and a created run was listed with its slot
@@ -144,7 +160,16 @@ Prepare the vertical slice for a prerelease:
    interactive session rather than a direct store call.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
-5. Exercise the configured orchestrator model once in a live session. Its
+5. Verified. A configured orchestrator profile moved the parent from
+   `gpt-5-mini` to `gpt-5` on `/swarm on` and back on `/swarm off`, against a
+   real provider catalogue and real authentication. The shutdown restore lands:
+   in a persisted session the entries run model change to the orchestrator
+   model, the mode record carrying `modelBeforeMode`, then a model change back
+   at `session_shutdown` — Pi awaits the handler on the graceful path, and RPC
+   mode disposes the runtime host the same way interactive mode does. Original
+   item follows.
+
+   Exercise the configured orchestrator model once in a live session. Its
    activation, refusal, and restore paths are covered by fakes; what no test
    can cover is Pi's own `setModel` against a real provider catalogue and real
    authentication. Confirm specifically whether the shutdown restore lands:
@@ -223,7 +248,10 @@ aborts the graph or only refuses to open the next frontier.
 
 ## Decisions still needed
 
-Review barriers, retention cleanup, and worker-session resumption semantics
-remain deferred until their runtime layers are implemented. Broader Pi
+Retention cleanup and worker-session resumption semantics remain deferred until
+their runtime layers are implemented. Review is now partly settled: D20 gives a
+node its own work-review-repair cycle, and decides that a repair is a fresh
+attempt rather than a resumed child session. Whether execution also pauses at
+review barriers between frontiers is independent and still open. Broader Pi
 compatibility can be claimed only after testing versions beyond the current
 0.85.1 development pin.

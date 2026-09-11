@@ -10,7 +10,7 @@ import type {
   PiWorkerTaskPayload,
   PiWorkerUsage,
 } from "./pi-subprocess.js";
-import { createPiSubprocessExecutor } from "./pi-subprocess.js";
+import { createPiSubprocessExecutor, REVIEW_LIMITS } from "./pi-subprocess.js";
 import type { GraphRunResult, RunGraphOptions, TaskExecutor } from "./run.js";
 import { RUN_GRAPH_LIMITS, runGraph } from "./run.js";
 import type { NodeOutputRecord, NodeStateRecord } from "./store.js";
@@ -37,7 +37,9 @@ const TASK_FIELDS = new Set([
   "assignment",
   "acceptanceCriteria",
   "expectedPaths",
+  "review",
 ]);
+const REVIEW_FIELDS = new Set(["profile", "maxRounds", "criteria"]);
 
 // JSON Schema counts characters while the defensive parser counts UTF-8 bytes.
 // Keep the schema as a coarse bound and tell the model which limit is real.
@@ -78,6 +80,32 @@ const workerTaskSchema = Type.Object(
         { maxItems: 32 },
       ),
     ),
+    review: Type.Optional(
+      Type.Object(
+        {
+          profile: boundedString(
+            "Worker profile the reviewer runs on. Give it a read-only profile.",
+            MAX_PROFILE_BYTES,
+          ),
+          maxRounds: Type.Integer({
+            minimum: 1,
+            maximum: REVIEW_LIMITS.maxRounds,
+            description:
+              "How many times this task may be reviewed. Each rejected review that has a round left is followed by a repair, then another review.",
+          }),
+          criteria: Type.Optional(
+            Type.Array(
+              boundedString(
+                "One thing the reviewer must check.",
+                MAX_ITEM_BYTES,
+              ),
+              { maxItems: 32 },
+            ),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -108,6 +136,11 @@ interface WorkerGraphToolTask {
   readonly assignment: string;
   readonly acceptanceCriteria?: readonly string[];
   readonly expectedPaths?: readonly string[];
+  readonly review?: {
+    readonly profile: string;
+    readonly maxRounds: number;
+    readonly criteria?: readonly string[];
+  };
 }
 
 interface WorkerGraphToolRequest {
@@ -268,6 +301,21 @@ function positiveInteger(value: unknown, maximum: number): number | undefined {
   return value as number;
 }
 
+function parseReviewRequest(
+  value: unknown,
+): WorkerGraphToolTask["review"] | undefined {
+  if (value === undefined) return undefined;
+  const fields = exactFields(value, REVIEW_FIELDS);
+  const maxRounds = positiveInteger(fields.maxRounds, REVIEW_LIMITS.maxRounds);
+  if (maxRounds === undefined) return invalidRequest();
+  const criteria = stringList(fields.criteria, 32, MAX_ITEM_BYTES);
+  return Object.freeze({
+    profile: text(fields.profile, MAX_PROFILE_BYTES),
+    maxRounds,
+    ...(criteria === undefined ? {} : { criteria }),
+  });
+}
+
 function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
   const fields = exactFields(value, TOOL_FIELDS);
   const taskItems = arrayItems(fields.tasks, RUN_GRAPH_LIMITS.maxTasks);
@@ -290,6 +338,7 @@ function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
         32,
         MAX_EXPECTED_PATH_BYTES,
       );
+      const review = parseReviewRequest(task.review);
       return Object.freeze({
         id: text(task.id, MAX_ID_BYTES),
         profile: text(task.profile, MAX_PROFILE_BYTES),
@@ -297,6 +346,7 @@ function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
         ...(needs === undefined ? {} : { needs }),
         ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
         ...(expectedPaths === undefined ? {} : { expectedPaths }),
+        ...(review === undefined ? {} : { review }),
       });
     }),
   );
@@ -584,6 +634,10 @@ export function registerWorkerGraphOrchestratorTool(
       "artifactBytes on a node review means that worker retained supplemental long-form text under the run; the report itself must still stand alone, so treat a report that defers its facts to an artifact as incomplete and delegate a repair task that reports them.",
       "Each node review carries the usage that task spent; weigh it when deciding how much to delegate next, and prefer a smaller graph or a cheaper profile when a task cost far more than the work it returned.",
       "If review finds a defect, call worker_graph again with narrow repair tasks and fresh acceptance criteria.",
+      "Give a task a review policy whenever its correctness is worth a second pair of eyes: the runtime then runs a reviewer on that node, feeds any blockers it reports back to the worker as a repair, and reviews again, until the reviewer accepts or the rounds run out.",
+      "Point review.profile at a read-only profile, and set maxRounds to the number of review passes the task is worth — two is usually enough, and every extra round costs another worker.",
+      "A node whose reviewer still has findings when its rounds run out fails, and its dependents are blocked, so do not attach a review policy you are unwilling to have fail the graph.",
+      "Reviewed nodes need no separate validation task for the same work: the review is that check, and its cost is already counted in the node's usage.",
     ],
     parameters: workerGraphSchema,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -634,6 +688,7 @@ export function registerWorkerGraphOrchestratorTool(
               ...(task.expectedPaths === undefined
                 ? {}
                 : { expectedPaths: task.expectedPaths }),
+              ...(task.review === undefined ? {} : { review: task.review }),
             },
           })),
           ...(request.concurrency === undefined

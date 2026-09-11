@@ -18,7 +18,38 @@ inboxes, and an explicitly activated parent orchestration tool. The parent tool
 is inactive by default; worker children receive only the final-report and
 coordination tools.
 
-## Setup
+## Installation
+
+Version `0.1.0` has not been published yet. For the currently supported
+persistent install, use a local checkout, build its ignored `dist/` output, and
+register that checkout with Pi:
+
+```bash
+npm install
+npm run check
+npm run build
+pi install /absolute/path/to/pi-worker-graph
+```
+
+Run these commands from the checkout, replacing the path in the final command
+with its absolute path. Pi records the local path in its user settings, so the
+package remains installed across sessions. `npm run build` is required because
+`extensions/index.ts` loads the compiled entry point from `dist/`.
+
+To load the built local checkout only for one Pi run, use the temporary package
+option instead of `pi install`:
+
+```bash
+pi -e /absolute/path/to/pi-worker-graph
+```
+
+After publication, the exact npm installation command will be:
+
+```bash
+pi install npm:pi-worker-graph@0.1.0
+```
+
+## Configuration
 
 The extension has no provider or model defaults, so it does not run until a
 configuration exists. Copy the example and edit its profiles:
@@ -418,26 +449,6 @@ restores, cleans, or pushes.
 Requires Node.js 22.19 or newer. Pi integration is currently tested against
 `@earendil-works/pi-coding-agent` 0.85.1; the peer dependency follows Pi package
 conventions and compatibility outside the tested version is not yet guaranteed.
-
-For a local source checkout, install dependencies and build before loading the
-package:
-
-```bash
-npm install
-npm run check
-npm run build
-pi -e /absolute/path/to/pi-worker-graph
-```
-
-After version `0.1.0` is published, install that exact packaged build with:
-
-```bash
-pi install npm:pi-worker-graph@0.1.0
-```
-
-The npm artifact contains the compiled `dist/` tree. Do not install directly
-from Git until the repository has a production-safe build lifecycle for Pi's
-`--omit=dev` package installation path.
 
 See [`docs/NEXT.md`](docs/NEXT.md) for current development status,
 [`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence, and

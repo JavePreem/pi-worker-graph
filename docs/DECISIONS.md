@@ -213,9 +213,43 @@ orchestrator judgment rather than input to execution.
 If dependency context later proves too restrictive, the answer is a separate
 versioned edge-projection or handoff contract, not generic text truncation.
 
+## D20. A reviewed node runs its own work-review-repair cycle
+
+A task may carry a review policy naming a reviewer profile and a round limit.
+After its worker reports, a reviewer runs against the same checkout; blockers it
+reports become the repair worker's instructions, and the cycle repeats until a
+reviewer accepts or the rounds run out. A node still rejected on its last round
+fails, and its dependents are blocked: publishing work a reviewer rejected would
+let dependents build on it, which is the failure the cycle exists to prevent.
+
+The cycle lives in the Pi adapter, not the graph runner. A review is a worker
+with a profile and a prompt, and both are adapter concepts. Three consequences
+follow, and they are the reason for the placement: the graph stays frozen, since
+rounds are not nodes and no dynamic mutation is needed; the node keeps one
+immutable terminal output, so the store is untouched; and the node's existing
+timeout bounds the whole cycle rather than any single round.
+
+Every round is a separate child process but the node has one attempt, so the
+rounds' usage is summed into it. A reviewed node that reported only its last
+round would look cheaper than it was.
+
+The verdict reuses the frozen worker-report contract rather than adding a second
+one: empty blockers accept, non-empty blockers reject and carry the findings. No
+new tool, no schema version change.
+
+Findings are bounded on count and size, and overflow fails the node rather than
+truncating. A repair worker given half its defects would report success against
+work a reviewer had already rejected.
+
+This settles the first open decision below: a repair is a fresh attempt carrying
+the reviewer's structured findings, not a resumed child session. Child isolation
+is a standing invariant, and resuming a session would propagate undeclared
+context between rounds.
+
+It does not settle the third. This cycle is intra-node; whether execution also
+pauses at review barriers between frontiers remains open and independent.
+
 ## Open decisions
 
-1. Whether review feedback resumes a persisted child session or starts a fresh
-   attempt with the prior structured output.
-2. Whether advisory path and symbol claims belong in the MVP or a follow-up.
-3. Whether graph execution pauses at explicit review barriers between frontiers.
+1. Whether advisory path and symbol claims belong in the MVP or a follow-up.
+2. Whether graph execution pauses at explicit review barriers between frontiers.

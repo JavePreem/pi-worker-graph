@@ -17,12 +17,20 @@ import type {
 import {
   createPiSubprocessExecutor,
   NODE_OUTPUT_LIMITS,
+  parseTaskUsage,
+  RUN_GRAPH_LIMITS,
+  TASK_USAGE_LIMITS,
 } from "../src/index.js";
 import type {
   PiSubprocessExecutorOptions,
   PiWorkerProfile,
+  PiWorkerProgress,
 } from "../src/pi-subprocess.js";
-import { runPiWorkerProcess } from "../src/pi-subprocess.js";
+import {
+  REVIEW_LIMITS,
+  runPiReviewedWorkerTask,
+  runPiWorkerProcess,
+} from "../src/pi-subprocess.js";
 import { nodeOutput } from "./fixtures.js";
 
 class FakeChild extends EventEmitter {
@@ -1238,5 +1246,630 @@ test("reports the spend a failure accrued after the failure was latched", async 
       assert.equal(error.usage?.totalTokens, 1_000);
       return true;
     },
+  );
+});
+
+// --- review cycle -----------------------------------------------------------
+
+const reviewedOptions: PiSubprocessExecutorOptions = {
+  ...options,
+  profiles: {
+    ...options.profiles,
+    reviewer: {
+      provider: "test-provider",
+      model: "test-model",
+      thinkingLevel: "low",
+      tools: ["read"],
+    },
+  },
+};
+
+function reviewedPayload(
+  maxRounds: number,
+  criteria?: readonly string[],
+): TaskExecutionInput["payload"] {
+  return {
+    assignment: "Implement the requested change",
+    profile: "writer",
+    acceptanceCriteria: ["Tests pass"],
+    expectedPaths: ["src/example.ts"],
+    review: {
+      profile: "reviewer",
+      maxRounds,
+      ...(criteria === undefined ? {} : { criteria }),
+    },
+  };
+}
+
+type RoundUsage =
+  | Record<string, unknown>
+  | { readonly usage: Record<string, unknown>; readonly repeat: number };
+
+function rejection(...blockers: readonly string[]): NodeOutput {
+  return { ...nodeOutput("Review findings"), blockers: [...blockers] };
+}
+
+/**
+ * Runs a review cycle against a scripted sequence of child reports: one entry
+ * per round, in the order the cycle spawns them.
+ */
+async function runFakeCycle(
+  reports: readonly NodeOutput[],
+  payload: TaskExecutionInput["payload"],
+  usagePerRound?: RoundUsage | readonly (RoundUsage | undefined)[],
+  onProgress?: (progress: PiWorkerProgress) => void,
+  controller: AbortController = new AbortController(),
+  abortAfterRound?: number,
+): Promise<{
+  readonly result: Promise<TaskExecutionResult>;
+  readonly prompts: string[];
+}> {
+  const prompts: string[] = [];
+  let round = 0;
+  const spawnProcess = (() => {
+    const index = round++;
+    if (abortAfterRound !== undefined && index === abortAfterRound) {
+      controller.abort();
+    }
+    const report = reports[index];
+    if (report === undefined) {
+      throw new Error(
+        `the cycle spawned round ${index + 1}, beyond the ${reports.length} scripted`,
+      );
+    }
+    const child = new FakeChild();
+    let prompt = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      prompt += chunk.toString("utf8");
+    });
+    child.stdin.on("finish", () => {
+      prompts.push(prompt);
+      queueMicrotask(() => {
+        const scripted = (
+          Array.isArray(usagePerRound) ? usagePerRound[index] : usagePerRound
+        ) as RoundUsage | undefined;
+        const roundUsage =
+          scripted === undefined
+            ? undefined
+            : "usage" in scripted
+              ? scripted.usage
+              : scripted;
+        const repeat =
+          scripted !== undefined && "repeat" in scripted
+            ? (scripted.repeat as number)
+            : 1;
+        const lines = [
+          ...(roundUsage === undefined
+            ? []
+            : Array.from({ length: repeat }, () =>
+                JSON.stringify({
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    stopReason: "toolUse",
+                    usage: roundUsage,
+                  },
+                }),
+              )),
+          reportEvent(report),
+        ];
+        child.stdout.end(lines.map((line) => `${line}\n`).join(""));
+        child.close(0);
+      });
+    });
+    return child as unknown as ChildProcessWithoutNullStreams;
+  }) as never;
+  return {
+    result: runPiReviewedWorkerTask(
+      input(controller.signal, payload),
+      onProgress === undefined
+        ? reviewedOptions
+        : { ...reviewedOptions, onProgress },
+      { spawnProcess, terminateProcessTree: () => {} },
+    ),
+    prompts,
+  };
+}
+
+test("a task without a review policy runs exactly one worker", async () => {
+  const { result, prompts } = await runFakeCycle([nodeOutput("Done")], {
+    assignment: "Implement the requested change",
+    profile: "writer",
+  });
+  const settled = await result;
+  assert.equal(settled.output.summary, "Done");
+  assert.equal(prompts.length, 1);
+});
+
+test("an accepted first review publishes the worker report, not the reviewer's", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [nodeOutput("Implemented the change"), nodeOutput("Review findings")],
+    reviewedPayload(2),
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Implemented the change");
+  assert.equal(prompts.length, 2, "one work round and one review round");
+  assert.match(
+    prompts[1] as string,
+    /reviewing another worker's completed work/u,
+  );
+  assert.match(prompts[1] as string, /Do not change any file/u);
+});
+
+test("a worker is never told that a reviewer will check its work", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [nodeOutput("Implemented the change"), nodeOutput("Clean")],
+    reviewedPayload(2),
+  );
+  await result;
+  assert.doesNotMatch(prompts[0] as string, /review/iu);
+});
+
+test("a rejected review sends its blockers to a repair round and re-reviews", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Missing null check in parse()", "No test for the empty case"),
+      nodeOutput("Repaired attempt"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Repaired attempt");
+  assert.equal(prompts.length, 4, "work, review, repair, review");
+  const repair = prompts[2] as string;
+  assert.match(repair, /A reviewer rejected the previous attempt/u);
+  assert.match(repair, /Missing null check in parse\(\)/u);
+  assert.match(repair, /No test for the empty case/u);
+  assert.match(
+    repair,
+    /Implement the requested change/u,
+    "keeps the original assignment",
+  );
+});
+
+test("a node whose reviewer still rejects on the last round fails", async () => {
+  const { result } = await runFakeCycle(
+    [nodeOutput("First attempt"), rejection("Still wrong")],
+    reviewedPayload(1),
+  );
+  // Failure reaches the runner as an output carrying blockers, which `run.ts`
+  // records as a failed node while retaining the report.
+  const settled = await result;
+  assert.deepEqual(settled.output.blockers, ["Still wrong"]);
+});
+
+test("review criteria reach the reviewer and not the worker", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [nodeOutput("Done"), nodeOutput("Clean")],
+    reviewedPayload(1, ["Check error handling on every branch"]),
+  );
+  await result;
+  assert.doesNotMatch(prompts[0] as string, /Check error handling/u);
+  assert.match(prompts[1] as string, /Check error handling on every branch/u);
+});
+
+test("a reviewed node reports what every round spent, not just the last", async () => {
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Fix it"),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+  );
+  const settled = await result;
+  assert.equal(
+    settled.usage?.totalTokens,
+    60,
+    "four rounds of 15 tokens each are summed into the node's one attempt",
+  );
+  assert.equal(settled.usage?.input, 40);
+});
+
+test("a thorough review is repaired rather than failed for its length", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection(...Array.from({ length: 40 }, (_, index) => `Defect ${index}`)),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Repaired");
+  assert.match(prompts[2] as string, /Defect 39/u, "carries every finding");
+});
+
+test("findings too large for a repair payload fail the node with those findings", async () => {
+  const finding = "x".repeat(8 * 1024);
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection(...Array.from({ length: 10 }, () => finding)),
+    ],
+    reviewedPayload(3),
+  );
+  const settled = await result;
+  assert.equal(settled.output.blockers.length, 10);
+});
+
+test("an unknown reviewer profile is rejected before any worker starts", () => {
+  const executor = createPiSubprocessExecutor(reviewedOptions);
+  assert.throws(
+    () =>
+      executor.validateTasks?.([
+        {
+          id: "task",
+          payload: {
+            assignment: "Do the thing",
+            profile: "writer",
+            review: { profile: "missing-reviewer", maxRounds: 1 },
+          },
+        },
+      ]),
+    (error: unknown) => {
+      assert.ok(error instanceof TaskExecutionFailure);
+      assert.equal(error.code, "invalid_profile");
+      return true;
+    },
+  );
+});
+
+test("a review policy outside its bounds is rejected", () => {
+  const executor = createPiSubprocessExecutor(reviewedOptions);
+  for (const review of [
+    { profile: "reviewer", maxRounds: 0 },
+    { profile: "reviewer", maxRounds: REVIEW_LIMITS.maxRounds + 1 },
+    { profile: "reviewer" },
+    { profile: "reviewer", maxRounds: 1, unknown: true },
+  ]) {
+    assert.throws(
+      () =>
+        executor.validateTasks?.([
+          {
+            id: "task",
+            payload: { assignment: "Do it", profile: "writer", review },
+          },
+        ]),
+      (error: unknown) => {
+        assert.ok(error instanceof TaskExecutionFailure);
+        return true;
+      },
+      `expected ${JSON.stringify(review)} to be rejected`,
+    );
+  }
+});
+
+test("progress from a later round carries what the earlier rounds already spent", async () => {
+  // A progress consumer keeps the latest event per task, so the last event a
+  // reviewed node emits has to describe the whole node. Reporting each round's
+  // own usage would tell the orchestrator a four-round node cost one round.
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Fix it"),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+    (progress) => seen.push(progress),
+  );
+  const settled = await result;
+  const last = seen.at(-1);
+  assert.equal(
+    last?.usage.totalTokens,
+    settled.usage?.totalTokens,
+    "the final progress event must agree with the node's reported usage",
+  );
+  assert.equal(last?.usage.totalTokens, 60);
+  assert.ok(
+    seen.every(
+      (progress, index) =>
+        index === 0 ||
+        progress.usage.totalTokens >=
+          (seen[index - 1] as PiWorkerProgress).usage.totalTokens,
+    ),
+    "usage across a cycle's progress must never go backwards",
+  );
+});
+
+test("a cycle whose rounds report no telemetry stays unaccounted, not free", async () => {
+  // Zero and unknown are different facts. A reviewed node whose children
+  // reported nothing must not settle as having cost nothing.
+  const { result } = await runFakeCycle(
+    [nodeOutput("Done"), nodeOutput("Clean")],
+    reviewedPayload(1),
+  );
+  const settled = await result;
+  assert.equal(settled.usage, undefined);
+});
+
+test("one unaccounted round makes the whole cycle unaccounted", async () => {
+  // A total is only as complete as its least-accounted round. Reporting the
+  // rounds that did account, as if they were the whole node, would read as a
+  // node that cost less than it did.
+  const spent = {
+    input: 10,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+  };
+  for (const perRound of [
+    [undefined, spent], // work silent, review accounted
+    [spent, undefined], // work accounted, review silent
+  ] as const) {
+    const { result } = await runFakeCycle(
+      [nodeOutput("Done"), nodeOutput("Clean")],
+      reviewedPayload(1),
+      perRound,
+    );
+    const settled = await result;
+    assert.equal(
+      settled.usage,
+      undefined,
+      `expected no usage when a round reported none: ${JSON.stringify(perRound)}`,
+    );
+  }
+});
+
+test("a cycle's summed usage saturates at the bounds one attempt may report", async () => {
+  // Each child is bounded on its own, but a cycle runs several, so their sum
+  // can pass a limit that bounds one. Every round here reports the maximum, so
+  // an unsaturated sum would be several times the limit and `parseTaskUsage`
+  // would reject the result — turning a node that succeeded into an invalid
+  // one. The assertions are equalities with the maximum, not inequalities, so
+  // the test cannot pass against an implementation that simply adds.
+  const atLimit = {
+    input: TASK_USAGE_LIMITS.maxTokens,
+    output: TASK_USAGE_LIMITS.maxTokens,
+    cacheRead: TASK_USAGE_LIMITS.maxTokens,
+    cacheWrite: TASK_USAGE_LIMITS.maxTokens,
+    totalTokens: TASK_USAGE_LIMITS.maxTokens,
+    cost: {
+      input: TASK_USAGE_LIMITS.maxCost,
+      output: TASK_USAGE_LIMITS.maxCost,
+      cacheRead: TASK_USAGE_LIMITS.maxCost,
+      cacheWrite: TASK_USAGE_LIMITS.maxCost,
+      total: TASK_USAGE_LIMITS.maxCost,
+    },
+  };
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First"),
+      rejection("again"),
+      nodeOutput("Second"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    Array.from({ length: 4 }, () => atLimit),
+  );
+  const settled = await result;
+  assert.ok(settled.usage !== undefined);
+  assert.equal(settled.usage.totalTokens, TASK_USAGE_LIMITS.maxTokens);
+  assert.equal(settled.usage.input, TASK_USAGE_LIMITS.maxTokens);
+  assert.equal(settled.usage.cost.total, TASK_USAGE_LIMITS.maxCost);
+  assert.equal(settled.usage.cost.input, TASK_USAGE_LIMITS.maxCost);
+  // The result has to survive the validation the runner puts it through.
+  assert.doesNotThrow(() => parseTaskUsage(settled.usage));
+});
+
+test("turns saturate across rounds rather than overflowing the attempt bound", async () => {
+  // Turns are the limit a real cycle reaches first: the adapter counts one per
+  // assistant message, so rounds of a long-running node add up quickly.
+  const perRound = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+    repeat: TASK_USAGE_LIMITS.maxTurns,
+  };
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First"),
+      rejection("again"),
+      nodeOutput("Second"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    Array.from({ length: 4 }, () => perRound),
+  );
+  const settled = await result;
+  assert.equal(settled.usage?.turns, TASK_USAGE_LIMITS.maxTurns);
+  assert.doesNotThrow(() => parseTaskUsage(settled.usage));
+});
+
+test("a rejection on the last round returns the reviewer's findings, not a bare code", async () => {
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection(
+        "parse() still has no null check",
+        "the empty case is untested",
+      ),
+    ],
+    reviewedPayload(1),
+  );
+  const settled = await result;
+  assert.deepEqual(settled.output.blockers, [
+    "parse() still has no null check",
+    "the empty case is untested",
+  ]);
+  // run.ts turns any output carrying blockers into a retained failure, so the
+  // parent is handed the reason rather than an opaque diagnostics string.
+  assert.ok(settled.output.blockers.length > 0);
+});
+
+test("a review payload too large to generate is rejected before any worker runs", () => {
+  const executor = createPiSubprocessExecutor(reviewedOptions);
+  // Sized into the window the finding describes: the submitted payload is
+  // inside the limit, and only the generated review payload passes it.
+  const near = "x".repeat(RUN_GRAPH_LIMITS.maxPayloadBytes - 400);
+  assert.throws(
+    () =>
+      executor.validateTasks?.([
+        {
+          id: "task",
+          payload: {
+            assignment: near,
+            profile: "writer",
+            review: { profile: "reviewer", maxRounds: 2 },
+          },
+        },
+      ]),
+    (error: unknown) => {
+      assert.ok(error instanceof TaskExecutionFailure);
+      assert.equal(error.code, "invalid_assignment");
+      return true;
+    },
+  );
+});
+
+test("a reviewed node starts once and finishes once, whatever its rounds do", async () => {
+  // A consumer counts finished events to show progress. Forwarding each
+  // child's lifecycle would report the node complete when its first worker
+  // reported, then un-complete it when review opened.
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Fix it"),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    undefined,
+    (progress) => seen.push(progress),
+  );
+  await result;
+  assert.equal(
+    seen.filter((progress) => progress.phase === "started").length,
+    1,
+    "four child processes, one node start",
+  );
+  assert.equal(
+    seen.filter((progress) => progress.phase === "finished").length,
+    1,
+    "four child processes, one node finish",
+  );
+  assert.equal(seen.at(-1)?.phase, "finished", "the node ends on its finish");
+  assert.equal(seen.at(-1)?.status, "succeeded");
+  assert.equal(seen.at(0)?.phase, "started", "and opens on its start");
+});
+
+test("a node rejected out of rounds finishes as failed", async () => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runFakeCycle(
+    [nodeOutput("First attempt"), rejection("Still wrong")],
+    reviewedPayload(1),
+    undefined,
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const finished = seen.filter((progress) => progress.phase === "finished");
+  assert.equal(finished.length, 1);
+  assert.equal(
+    finished[0]?.status,
+    "failed",
+    "a reviewer answering successfully does not make the node succeed",
+  );
+});
+
+test("a throwing progress observer cannot change a reviewed node's outcome", async () => {
+  // Observability must never alter worker execution. An uncaught throw here
+  // would fail a node its reviewer accepted.
+  const { result } = await runFakeCycle(
+    [nodeOutput("Implemented"), nodeOutput("Clean")],
+    reviewedPayload(1),
+    undefined,
+    () => {
+      throw new Error("observer exploded");
+    },
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Implemented");
+});
+
+test("a throwing observer cannot mask why a reviewed node failed", async () => {
+  const { result } = await runFakeCycle(
+    [nodeOutput("Implemented")],
+    reviewedPayload(1),
+    undefined,
+    () => {
+      throw new Error("observer exploded");
+    },
+  );
+  // The review round is unscripted, so the fake refuses to spawn it and the
+  // cycle fails. The cause must survive the observer.
+  await assert.rejects(result, (error: unknown) => {
+    assert.ok(error instanceof TaskExecutionFailure);
+    assert.notEqual(error.message, "observer exploded");
+    return true;
+  });
+});
+
+test("a progress observer cannot corrupt the usage a reviewed node reports", async () => {
+  const spentPerRound = {
+    input: 10,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+  };
+  const { result } = await runFakeCycle(
+    [nodeOutput("Implemented"), nodeOutput("Clean")],
+    reviewedPayload(1),
+    spentPerRound,
+    (progress) => {
+      // A hostile or careless observer writing through the object it is handed.
+      try {
+        (progress.usage as { totalTokens: number }).totalTokens = 999_999;
+        (progress.usage.cost as { total: number }).total = 999_999;
+      } catch {
+        // Frozen, which is the point.
+      }
+    },
+  );
+  const settled = await result;
+  assert.equal(settled.usage?.totalTokens, 30, "two rounds of 15, unaltered");
+  assert.notEqual(settled.usage?.cost.total, 999_999);
+});
+
+test("a reviewed node cancelled mid-cycle reports aborted, not failed", async () => {
+  // The runner records a parent cancellation as aborted, and an unreviewed
+  // worker reports it that way. A reviewed node saying "failed" here would
+  // disagree with both the persisted outcome and its unreviewed sibling.
+  const seen: PiWorkerProgress[] = [];
+  const controller = new AbortController();
+  const { result } = await runFakeCycle(
+    [nodeOutput("Implemented"), nodeOutput("Clean")],
+    reviewedPayload(2),
+    undefined,
+    (progress) => seen.push(progress),
+    controller,
+    1, // abort as the review round is about to spawn
+  );
+  await assert.rejects(result);
+  const finished = seen.filter((progress) => progress.phase === "finished");
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0]?.status, "aborted");
+});
+
+test("a reviewed node that fails without cancellation still reports failed", async () => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runFakeCycle(
+    [nodeOutput("Implemented")], // review round unscripted, so the fake refuses
+    reviewedPayload(2),
+    undefined,
+    (progress) => seen.push(progress),
+  );
+  await assert.rejects(result);
+  assert.equal(
+    seen.filter((progress) => progress.phase === "finished")[0]?.status,
+    "failed",
   );
 });

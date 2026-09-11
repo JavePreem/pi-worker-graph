@@ -11,6 +11,8 @@ import {
 import { fileURLToPath } from "node:url";
 import type { TaskExecutionFailureCode } from "./execution-failure.js";
 import { TaskExecutionFailure } from "./execution-failure.js";
+import type { JsonValue } from "./json.js";
+import type { NodeOutput } from "./output.js";
 import {
   NODE_OUTPUT_LIMITS,
   parseNodeArtifact,
@@ -167,11 +169,34 @@ export interface PiSubprocessExecutorOptions {
   readonly onProgress?: (progress: PiWorkerProgress) => void;
 }
 
+/**
+ * Bounds on one node's review cycle. `maxRounds` counts review passes, so a
+ * policy of 2 admits at most work, review, repair, review — the repair after
+ * the final review would have no review left to accept it, and an unreviewed
+ * repair is exactly what the cycle exists to prevent.
+ *
+ * Findings carry no bound of their own. The report contract already bounds a
+ * blocker, and the repair payload is already bounded by
+ * `RUN_GRAPH_LIMITS.maxPayloadBytes`, so a third limit here could only fail a
+ * node for a reviewer being thorough within the contract it was given.
+ */
+export const REVIEW_LIMITS = Object.freeze({
+  maxRounds: 4,
+});
+
+export interface PiReviewPolicy {
+  /** Reviewer worker profile. Explicit: there is no reviewer default. */
+  readonly profile: string;
+  readonly maxRounds: number;
+  readonly criteria?: readonly string[];
+}
+
 export interface PiWorkerTaskPayload {
   readonly assignment: string;
   readonly profile: string;
   readonly acceptanceCriteria?: readonly string[];
   readonly expectedPaths?: readonly string[];
+  readonly review?: PiReviewPolicy;
 }
 
 interface NormalizedExecutorOptions {
@@ -459,6 +484,7 @@ function parseWorkerTaskPayload(
     "profile",
     "acceptanceCriteria",
     "expectedPaths",
+    "review",
   ]);
   if (
     Object.keys(fields).some((field) => !allowed.has(field)) ||
@@ -470,11 +496,40 @@ function parseWorkerTaskPayload(
   }
   const acceptanceCriteria = stringList(fields.acceptanceCriteria, taskId);
   const expectedPaths = stringList(fields.expectedPaths, taskId);
+  const review = parseReviewPolicy(fields.review, taskId);
   return Object.freeze({
     assignment: fields.assignment,
     profile: fields.profile,
     ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
     ...(expectedPaths === undefined ? {} : { expectedPaths }),
+    ...(review === undefined ? {} : { review }),
+  });
+}
+
+function parseReviewPolicy(
+  value: unknown,
+  taskId: string | undefined,
+): PiReviewPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new TaskExecutionFailure("invalid_assignment", taskId);
+  }
+  const allowed = new Set(["profile", "maxRounds", "criteria"]);
+  if (
+    Object.keys(value).some((field) => !allowed.has(field)) ||
+    !boundedIdentifier(value.profile) ||
+    typeof value.maxRounds !== "number" ||
+    !Number.isInteger(value.maxRounds) ||
+    value.maxRounds < 1 ||
+    value.maxRounds > REVIEW_LIMITS.maxRounds
+  ) {
+    throw new TaskExecutionFailure("invalid_assignment", taskId);
+  }
+  const criteria = stringList(value.criteria, taskId);
+  return Object.freeze({
+    profile: value.profile,
+    maxRounds: value.maxRounds,
+    ...(criteria === undefined ? {} : { criteria }),
   });
 }
 
@@ -1134,6 +1189,18 @@ export async function runPiWorkerProcess(
 }
 
 /**
+ * Internal fakeable review-cycle boundary used by adapter tests. Mirrors
+ * `runPiWorkerProcess`, which reaches a single round.
+ */
+export async function runPiReviewedWorkerTask(
+  input: TaskExecutionInput,
+  options: PiSubprocessExecutorOptions,
+  dependencies: ProcessDependencies = {},
+): Promise<TaskExecutionResult> {
+  return runPiReviewCycle(input, normalizeOptions(options), dependencies);
+}
+
+/**
  * Builds a `TaskExecutor` that runs each task in its own Pi subprocess.
  *
  * Profile configuration is validated eagerly and throws, because it is a
@@ -1141,12 +1208,343 @@ export async function runPiWorkerProcess(
  * itself rejects — an invalid assignment, an unknown profile, a failed worker —
  * is reported by rejecting the returned promise.
  */
+const EMPTY_USAGE: TaskUsage = Object.freeze({
+  turns: 0,
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: Object.freeze({
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  }),
+});
+
+/**
+ * Adds one round's spend to the cycle's running total.
+ *
+ * Every round of a reviewed node is a separate child process, but the node has
+ * one attempt, so the node reports one usage. Rounds a caller never sees still
+ * cost tokens, and a cycle that hid them would make a reviewed node look
+ * cheaper than it was.
+ *
+ * Saturating, like the per-process accumulator it feeds from: each child is
+ * bounded on its own, but a cycle runs up to `2 * maxRounds + 1` of them, and
+ * their sum can pass a limit that bounds one — `maxTurns` well before the
+ * others. Overflowing it would make `parseTaskUsage` reject the result and turn
+ * a node that succeeded into an invalid one.
+ */
+function addUsage(total: TaskUsage, round: TaskUsage | undefined): TaskUsage {
+  if (round === undefined) return total;
+  const tokens = (left: number, right: number) =>
+    addBounded(left, right, TASK_USAGE_LIMITS.maxTokens);
+  const money = (left: number, right: number) =>
+    addBounded(left, right, TASK_USAGE_LIMITS.maxCost);
+  return {
+    turns: addBounded(total.turns, round.turns, TASK_USAGE_LIMITS.maxTurns),
+    input: tokens(total.input, round.input),
+    output: tokens(total.output, round.output),
+    cacheRead: tokens(total.cacheRead, round.cacheRead),
+    cacheWrite: tokens(total.cacheWrite, round.cacheWrite),
+    totalTokens: tokens(total.totalTokens, round.totalTokens),
+    cost: {
+      input: money(total.cost.input, round.cost.input),
+      output: money(total.cost.output, round.cost.output),
+      cacheRead: money(total.cost.cacheRead, round.cost.cacheRead),
+      cacheWrite: money(total.cost.cacheWrite, round.cost.cacheWrite),
+      total: money(total.cost.total, round.cost.total),
+    },
+  };
+}
+
+/**
+ * The findings a review round hands to the repair that follows it, or
+ * `undefined` when the reviewer raised nothing and the work is accepted.
+ *
+ * The blockers need no cleaning here. They reached this point through
+ * `parseNodeOutput`, which already rejects a blank or oversized one, so a
+ * reviewer that rejects the work has necessarily said something a repair can
+ * act on.
+ */
+function reviewFindings(report: NodeOutput): readonly string[] | undefined {
+  const blockers = report.blockers ?? [];
+  return blockers.length === 0 ? undefined : blockers;
+}
+
+function reviewPayload(
+  payload: PiWorkerTaskPayload,
+  policy: PiReviewPolicy,
+  round: number,
+): PiWorkerTaskPayload {
+  return Object.freeze({
+    profile: policy.profile,
+    assignment: [
+      `You are reviewing another worker's completed work, review round ${round}.`,
+      "",
+      "THE ASSIGNMENT THAT WORKER WAS GIVEN",
+      payload.assignment,
+      ...(payload.acceptanceCriteria === undefined
+        ? []
+        : ["", "ITS ACCEPTANCE CRITERIA", ...payload.acceptanceCriteria]),
+      ...(policy.criteria === undefined
+        ? []
+        : ["", "ADDITIONAL REVIEW CRITERIA", ...policy.criteria]),
+      "",
+      "Inspect the checkout yourself and judge whether the work actually meets that assignment.",
+      "Do not change any file: you are reviewing, not fixing.",
+      "Report every defect you find as a separate blocker, each one a specific, actionable instruction to whoever repairs it.",
+      "If the work meets the assignment, report no blockers at all. Do not invent defects to look thorough, and do not raise style preferences the assignment never asked for.",
+    ].join("\n"),
+    ...(payload.expectedPaths === undefined
+      ? {}
+      : { expectedPaths: payload.expectedPaths }),
+  });
+}
+
+function repairPayload(
+  payload: PiWorkerTaskPayload,
+  findings: readonly string[],
+  round: number,
+): PiWorkerTaskPayload {
+  return Object.freeze({
+    profile: payload.profile,
+    assignment: [
+      payload.assignment,
+      "",
+      `A reviewer rejected the previous attempt at this assignment, review round ${round}. Resolve every finding below, then report.`,
+      "",
+      "REVIEW FINDINGS",
+      ...findings.map((finding, index) => `${index + 1}. ${finding}`),
+      "",
+      "Re-read the files before editing: the work from the previous attempt is already in the checkout.",
+      "Fix the findings and nothing else.",
+    ].join("\n"),
+    ...(payload.acceptanceCriteria === undefined
+      ? {}
+      : { acceptanceCriteria: payload.acceptanceCriteria }),
+    ...(payload.expectedPaths === undefined
+      ? {}
+      : { expectedPaths: payload.expectedPaths }),
+  });
+}
+
+function withPayload(
+  input: TaskExecutionInput,
+  payload: PiWorkerTaskPayload,
+): TaskExecutionInput {
+  return { ...input, payload: payload as unknown as JsonValue };
+}
+
+/**
+ * Projects a round's progress as progress of the node that owns it.
+ *
+ * Two things are wrong with forwarding a child's events unchanged. Usage is
+ * cumulative within one child, and a consumer keeps the latest event per task,
+ * so raw round usage would describe the last round rather than the node —
+ * hence rebasing onto what the cycle already spent.
+ *
+ * Lifecycle is the other. Every round is a child that starts and finishes, but
+ * the *node* starts once and finishes once. Forwarding each child's `started`
+ * and `finished` makes a node read as complete the moment its first worker
+ * reports, and then start again when review opens. So a child's lifecycle
+ * events are intermediate here: the first `started` passes through, later ones
+ * and every `finished` become `turn_completed`, and the cycle emits the node's
+ * own `finished` when it settles.
+ */
+function roundProgress(
+  options: NormalizedExecutorOptions,
+  spent: TaskUsage,
+  isFirstRound: boolean,
+): NormalizedExecutorOptions {
+  const forward = options.onProgress;
+  if (forward === undefined) return options;
+  return {
+    ...options,
+    onProgress: (progress) => {
+      const usage = addUsage(spent, progress.usage);
+      const intermediate =
+        progress.phase === "finished" ||
+        (progress.phase === "started" && !isFirstRound);
+      if (!intermediate) {
+        forward({ ...progress, usage });
+        return;
+      }
+      const { status: _status, ...rest } = progress;
+      forward({ ...rest, phase: "turn_completed", usage });
+    },
+  };
+}
+
+/**
+ * Runs one node as work, then review, then repair, until a reviewer accepts it
+ * or the policy runs out of rounds.
+ *
+ * The cycle lives here rather than in the graph runner because a review is a
+ * worker with a profile and a prompt, and both are adapter concepts. The graph
+ * stays frozen, the node keeps one immutable terminal output, and the node's
+ * timeout bounds the whole cycle rather than any single round.
+ *
+ * A node whose reviewer still has findings when the rounds run out fails. The
+ * alternative — publishing work a reviewer rejected — would let dependents
+ * build on it, which is the failure the cycle exists to prevent.
+ */
+async function runPiReviewCycle(
+  input: TaskExecutionInput,
+  options: NormalizedExecutorOptions,
+  dependencies: ProcessDependencies = {},
+): Promise<TaskExecutionResult> {
+  const payload = parseWorkerTaskPayload(input.payload, input.taskId);
+  const policy = payload.review;
+  if (policy === undefined) {
+    return await runNormalizedPiWorkerProcess(input, options, dependencies);
+  }
+
+  // A cycle's total is only as complete as its least-accounted round. One
+  // round reporting nothing makes the whole node's spend unknown, not smaller:
+  // reporting the rounds that did account as if they were the total would read
+  // as a node that cost less than it did, so the total is withheld instead.
+  let running = EMPTY_USAGE;
+  let accounted = true;
+  const spend = (round: TaskUsage | undefined): void => {
+    if (round === undefined) accounted = false;
+    else running = addUsage(running, round);
+  };
+  /**
+   * The node's one terminal progress event, emitted when no further round will
+   * run.
+   *
+   * Guarded the way the per-process emitter is, and for the same reason: an
+   * observer is not allowed to decide what a task returns. An uncaught throw
+   * here would fail a node a reviewer had accepted, or replace the real cause
+   * of a failure with the observer's own. The usage is a frozen snapshot
+   * rather than the running accumulator, which is the object the result itself
+   * carries — handing it out would let an observer rewrite the node's spend.
+   */
+  let terminalEmitted = false;
+  const notify = (status: "succeeded" | "failed" | "aborted"): void => {
+    if (options.onProgress === undefined || terminalEmitted) return;
+    terminalEmitted = true;
+    const progress = Object.freeze({
+      taskId: input.taskId,
+      phase: "finished" as const,
+      status,
+      usage: immutableUsage(running),
+    });
+    try {
+      options.onProgress(progress);
+    } catch {
+      // Observability must never alter worker execution.
+    }
+  };
+
+  /**
+   * Settles the cycle on one round's report, carrying the cycle's own usage.
+   *
+   * The round's `usage` is dropped rather than spread through: it describes one
+   * child, and leaving it in place would report a single round's spend as the
+   * node's whole spend on exactly the path where the total is unknown.
+   */
+  const settle = (round: TaskExecutionResult): TaskExecutionResult => {
+    const usage = accounted ? running : undefined;
+    const { usage: _round, ...rest } = round;
+    // A rejection settles as a report carrying blockers, which the runner
+    // records as a failed node, so the phase reflects that rather than the fact
+    // that a reviewer answered successfully.
+    notify(round.output.blockers.length > 0 ? "failed" : "succeeded");
+    return {
+      ...rest,
+      ...(usage === undefined ? {} : { usage: immutableUsage(usage) }),
+    };
+  };
+  const total = (): TaskUsage | undefined => (accounted ? running : undefined);
+  const failed = (error: unknown): never => {
+    // Counted before the node's terminal event is emitted, so the event carries
+    // the failed round's spend rather than the total as it stood before it.
+    if (error instanceof TaskExecutionFailure) spend(error.usage);
+    // A round cut short by the parent's signal is a cancelled node, not a
+    // failed one. The runner records the cancellation as `aborted`, and an
+    // unreviewed worker reports it that way too, so a reviewed node that said
+    // `failed` here would disagree with both.
+    notify(input.signal.aborted ? "aborted" : "failed");
+    if (error instanceof TaskExecutionFailure) {
+      const usage = total();
+      throw new TaskExecutionFailure(
+        error.code,
+        error.taskId,
+        usage === undefined ? undefined : immutableUsage(usage),
+      );
+    }
+    throw error;
+  };
+
+  // The work round runs without its own review policy: a worker is told what to
+  // build, never that something will check it.
+  let work = await runNormalizedPiWorkerProcess(
+    withPayload(input, stripReview(payload)),
+    roundProgress(options, running, true),
+    dependencies,
+  ).catch(failed);
+  spend(work.usage);
+
+  // Unbounded on purpose: the body returns on the final round, and a policy is
+  // parsed with `maxRounds >= 1`, so the loop always ends through a return. A
+  // bounded loop would need an unreachable fallback after it.
+  for (let round = 1; ; round += 1) {
+    const review = await runNormalizedPiWorkerProcess(
+      withPayload(input, reviewPayload(payload, policy, round)),
+      roundProgress(options, running, false),
+      dependencies,
+    ).catch(failed);
+    spend(review.usage);
+
+    const findings = reviewFindings(review.output);
+    if (findings === undefined) {
+      // Accepted. The node publishes the work report, not the reviewer's.
+      return settle(work);
+    }
+    // Out of rounds with the work still refused. The node has to fail — letting
+    // dependents build on what a reviewer rejected is the whole point of the
+    // cycle — but it fails *with the reviewer's report*, whose blockers are the
+    // only account of what is wrong. A bare failure code would leave the parent
+    // unable to write the repair graph. The runner already turns an output
+    // carrying blockers into a retained failure, so this needs no new path.
+    if (round === policy.maxRounds) {
+      return settle(review);
+    }
+
+    // Findings too large to hand to a repair. The rejection stands and is
+    // reported the same way, so the parent still sees what the reviewer said.
+    const repair = repairPayload(payload, findings, round);
+    if (
+      Buffer.byteLength(JSON.stringify(repair)) >
+      RUN_GRAPH_LIMITS.maxPayloadBytes
+    ) {
+      return settle(review);
+    }
+    work = await runNormalizedPiWorkerProcess(
+      withPayload(input, repair),
+      roundProgress(options, running, false),
+      dependencies,
+    ).catch(failed);
+    spend(work.usage);
+  }
+}
+
+function stripReview(payload: PiWorkerTaskPayload): PiWorkerTaskPayload {
+  const { review: _review, ...rest } = payload;
+  return Object.freeze(rest);
+}
+
 export function createPiSubprocessExecutor(
   options: PiSubprocessExecutorOptions,
 ): TaskExecutor {
   const normalized = normalizeOptions(options);
   const executor = async (input: TaskExecutionInput) =>
-    runNormalizedPiWorkerProcess(input, normalized);
+    runPiReviewCycle(input, normalized);
   return Object.defineProperty(executor, "validateTasks", {
     value: (tasks: readonly TaskExecutorTask[]) => {
       for (const task of tasks) {
@@ -1162,6 +1560,26 @@ export function createPiSubprocessExecutor(
         }
         if (!normalized.profiles.has(payload.profile)) {
           throw new TaskExecutionFailure("invalid_profile", task.id);
+        }
+        if (payload.review === undefined) continue;
+        // Checked with the rest of the graph, before any worker starts: a
+        // reviewer resolved only after the work round would be discovered by
+        // spending a worker and then failing the node that worker completed.
+        if (!normalized.profiles.has(payload.review.profile)) {
+          throw new TaskExecutionFailure("invalid_profile", task.id);
+        }
+        // The review payload is generated, not submitted, and is larger than
+        // the payload it derives from — it restates the assignment under
+        // headings and copies the criteria in. A submitted payload just inside
+        // the limit can therefore generate a reviewer payload past it, and
+        // that is knowable now. Discovering it after the work round would mean
+        // failing a node whose worker had already changed the checkout.
+        if (
+          Buffer.byteLength(
+            JSON.stringify(reviewPayload(payload, payload.review, 1)),
+          ) > RUN_GRAPH_LIMITS.maxPayloadBytes
+        ) {
+          throw new TaskExecutionFailure("invalid_assignment", task.id);
         }
       }
     },
