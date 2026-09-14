@@ -1,4 +1,4 @@
-# Bench design: does a thinker with cheap doers cost less at the same quality?
+# Bench design: does orchestration with cheap workers cost less at the same quality?
 
 An earlier fixture suite lived here and was deleted rather than committed: it
 could not answer the question below, and the section on why is the part of it
@@ -42,20 +42,63 @@ parallelism at all. The treatment was never administered.
 
 ## Arms
 
-Three, not two. All three run the same harness, the same checkout, the same
-task text, and are graded identically.
+Four, not two. All four run the same harness, the same checkout, the same task
+text, and are graded identically. They vary two things independently — whether
+the orchestration machinery is in the loop, and what model does the work.
 
-| Arm | Parent | Workers | Review |
-| --- | --- | --- | --- |
-| `thinker` | `gpt-5.6-sol` | — | — |
-| `swarm` | `gpt-5.6-sol` | `gpt-5.6-luna` | yes |
-| `doer` | `gpt-5.6-luna` | — | — |
+| Arm | Machinery | Parent | Workers | Review |
+| --- | --- | --- | --- | --- |
+| `solo-sol` | no | `gpt-5.6-sol` | — | — |
+| `graph-sol` | yes | `gpt-5.6-sol` | `gpt-5.6-sol` | yes |
+| `graph-luna` | yes | `gpt-5.6-sol` | `gpt-5.6-luna` | yes |
+| `solo-luna` | no | `gpt-5.6-luna` | — | — |
 
-`doer` is the one that is easy to leave out and must not be. Without it,
-"`swarm` cost less than `thinker` at similar quality" is uninterpretable: if
-`luna` alone scores the same, the orchestrator bought nothing and the whole
-apparatus is overhead. `doer` establishes the floor. The result worth having is
-**`swarm` near `thinker` on quality and near `doer` on cost**.
+Two arms are easy to leave out, and each one leaves a different question
+unanswerable.
+
+**`solo-luna` is the floor.** Without it, "`graph-luna` cost less than
+`solo-sol` at similar quality" cannot be told apart from "`luna` alone would
+have done it and the whole apparatus is overhead".
+
+**`graph-sol` separates the machinery from the model.** This is the one an
+earlier draft of this design missed, and it is the more serious omission.
+`graph-luna` differs from `solo-sol` in two ways at once: work moves into
+subprocess workers under a report contract with bounded context on the
+dependency edges and a review cycle, *and* that work moves onto a cheaper
+model. If `graph-luna` comes out worse, nothing in a three-arm design says
+which change caused it. A defect in `pi-worker-graph` — context that does not
+reach a worker, a report contract that loses something the parent needed, a
+review cycle that burns its rounds — would present exactly as "cheap workers
+are worse", and the wrong conclusion would be drawn about models when the fault
+was in the package.
+
+`graph-sol` holds the model fixed and varies only the machinery. The three
+comparisons it unlocks:
+
+| Comparison | Answers |
+| --- | --- |
+| `solo-sol` vs `graph-sol` | what the machinery itself costs, in quality and in spend |
+| `graph-sol` vs `graph-luna` | what the cheap workers cost, machinery held constant |
+| `solo-sol` vs `graph-luna` | the product claim, both changes together |
+
+The result worth having is **`graph-luna` near `solo-sol` on quality and near
+`solo-luna` on cost**. The result worth having *first* is that `graph-sol` is
+not worse than `solo-sol`, because if the machinery is lossy the economics
+question is moot until the package is fixed.
+
+### Ordering: the package question before the economics question
+
+`solo-sol` against `graph-sol` is a question about this package, not about
+model pricing, and it is the one whose answer changes what gets built next. A
+machinery that loses ten points of resolve rate is a bug report; no amount of
+worker-price arbitrage compensates for it, and measuring the arbitrage first
+would be measuring on top of a fault.
+
+Scope the claim to match what a small run can carry. At twelve tasks this is a
+**screen for gross machinery loss**, not a measurement of it: a 40-point gap is
+caught about two thirds of the time, a 20-point gap about a quarter. That is
+the right scope for the stated worry — an inherent bug in the orchestration
+path — and it is not a licence to report "the machinery is free".
 
 Pricing, from Pi's catalogue, per million tokens:
 
@@ -69,7 +112,7 @@ Twenty times on input, seventeen on output.
 ### What the saving actually is
 
 **That gap is between token prices. It is not the gap between arms**, and
-conflating the two is the easiest mistake this document can invite. The `swarm`
+conflating the two is the easiest mistake this document can invite. A `graph`
 arm still runs an expensive parent that reads the repository to decompose the
 work, and — under open decision 1 — an expensive reviewer that reads the diffs.
 Only the middle is cheap.
@@ -78,15 +121,17 @@ Taking the per-run estimates from **Budget case**:
 
 | | low | high |
 | --- | --- | --- |
-| `thinker`, `sol` throughout | $1.50 | $6.00 |
-| `swarm` parent, `sol` | $0.75 | $3.00 |
-| `swarm` reviewer, `sol` | $0.45 | $1.80 |
-| `swarm` workers, `luna` | $0.08 | $0.31 |
-| **`swarm` total** | **$1.28** | **$5.11** |
+| `solo-sol`, `sol` throughout | $1.50 | $6.00 |
+| `graph-*` parent, `sol` | $0.75 | $3.00 |
+| `graph-*` reviewer, `sol` | $0.45 | $1.80 |
+| `graph-luna` workers, `luna` | $0.08 | $0.31 |
+| `graph-sol` workers, `sol` | $1.50 | $6.00 |
+| **`graph-luna` total** | **$1.28** | **$5.11** |
+| **`graph-sol` total** | **$2.70** | **$10.80** |
 
 **The expected saving is about 15%, not twenty times.** The saving is bounded by
 how much of the work leaves the expensive model, and under `sol`-reviews-`luna`
-most of it does not. A more favourable split — a parent at 30% of `thinker` and
+most of it does not. A more favourable split — a parent at 30% of `solo-sol` and
 a reviewer at 20% — still only reaches about 50%.
 
 Three consequences, and they shape the whole experiment:
@@ -98,11 +143,17 @@ tasks to establish than a large one, and the ratio here is small. See
 **The spend split is the first thing to measure**, because it caps the saving
 before any quality question is worth asking. See **Start with the spend split**.
 
-**Splitting `swarm` into with-review and without-review is no longer only an
-extension.** The reviewer is a large share of the remaining expensive spend, so
-the difference between those two configurations is most of the difference
-between a 15% saving and a 40% one. It stays out of the first pass on cost
-grounds, but it is the first thing to add when there is budget.
+**Splitting the `graph` arms into with-review and without-review is no longer
+only an extension.** The reviewer is a large share of the remaining expensive
+spend, so the difference between those two configurations is most of the
+difference between a 15% saving and a 40% one. It stays out of the first pass
+on cost grounds, but it is the first thing to add when there is budget.
+
+`graph-sol` is the dearest arm in the design — every token on `sol` plus the
+orchestration overhead on top, roughly 1.8x `solo-sol`. It is not there to be
+economical. It is the control that makes the other arms interpretable, and its
+own cost against `solo-sol` is itself the measurement of what the machinery
+adds.
 
 ### Sizing the cost claim
 
@@ -117,7 +168,7 @@ Typical 95% confidence interval on the cost ratio, paired across tasks, from
 | 5x | 2.18–11.21x | 3.25–7.76x | 3.76–6.62x | 4.11–6.07x |
 
 Read the first row carefully. **If the true saving is 15%, twenty-four tasks
-still cannot establish that `swarm` is cheaper at all** — the interval spans
+still cannot establish that `graph-luna` is cheaper at all** — the interval spans
 1.0. Only from about a 1.5x saving does a twelve-task run separate the arms,
 and only from about 2.3x does a three-task run say anything.
 
@@ -249,7 +300,7 @@ Secondary:
   identical-pair bias floor reported alongside.
 - **Wall clock**, prompt accepted to settled.
 - **Blast radius** — files changed outside the gold patch's file set.
-- **Spend split** — orchestrator tokens against worker tokens, for the `swarm`
+- **Spend split** — orchestrator tokens against worker tokens, for each `graph`
   arm. This is what says whether the saving came from cheap workers or was eaten
   by the parent reading their reports.
 
@@ -262,7 +313,7 @@ the parent, the difference being orchestration overhead.
 ## Preconditions on a valid trial
 
 A trial that did not administer the treatment must not be scored as evidence
-against it. Before a `swarm` trial counts:
+against it. Before a `graph` trial counts:
 
 - `worker_graph` was called at least once;
 - at least one graph had more than one task — `graphSizes` is a **precondition**,
@@ -293,21 +344,21 @@ threshold is not chosen after seeing the numbers.
 An absolute margin in points is the wrong shape for it. The FDA's guidance on
 choosing one puts the choice in two steps: **M1**, the whole effect the control
 is presumed to have, and **M2**, the largest part of M1 it would be acceptable
-to give up. The `doer` arm is already what supplies M1 here — it is the floor,
-and the orchestrator's entire value is `thinker` minus `doer`. If `thinker`
-resolves 41% and `doer` resolves 30%, M1 is 11 points, and the placeholder
-10-point margin would let `swarm` surrender 91% of everything the expensive
+to give up. The `solo-luna` arm is already what supplies M1 here — it is the floor,
+and the orchestrator's entire value is `solo-sol` minus `solo-luna`. If `solo-sol`
+resolves 41% and `solo-luna` resolves 30%, M1 is 11 points, and the placeholder
+10-point margin would let `graph-luna` surrender 91% of everything the expensive
 orchestrator buys and still be called non-inferior. Five points surrenders 45%
 of it. Neither number means what it looks like until it is read against M1.
 
-So the margin is a **retention fraction of M1**: `swarm` is non-inferior if it
-retains at least *f* of the `thinker`-over-`doer` effect. Pre-register *f*.
+So the margin is a **retention fraction of M1**: `graph-luna` is non-inferior if it
+retains at least *f* of the `solo-sol`-over-`solo-luna` effect. Pre-register *f*.
 
 M1 is unknown until the bench runs, which is the one place this departs from
 the drug-trial procedure — there, M1 comes from historical trials of the active
 control, and here there is no history. Two consequences, both of which have to
 be accepted openly rather than resolved: the acceptance threshold in points is
-only computable after the arms have run, and a bench where `thinker` and `doer`
+only computable after the arms have run, and a bench where `solo-sol` and `solo-luna`
 turn out to be close has no M1 worth retaining a fraction of, which is itself
 the finding that the orchestrator bought nothing. Pre-register a fallback
 absolute cap alongside *f* to cover the second case, so a vanishing M1 does not
@@ -368,10 +419,14 @@ single repetition as a smoke test rather than a measurement.
 
 ## Budget case: a resumable queue
 
-The full pilot — 28 tasks, three arms, three repetitions — is 252 agent runs at
-an estimated $300 to $1,200. That is more than this question is worth spending
+The full pilot — 28 tasks, four arms, three repetitions — is 336 agent runs at
+an estimated $470 to $1,870. That is more than this question is worth spending
 in one go, and the estimate itself rests on per-instance figures nobody has
 measured yet.
+
+Per task at one repetition, all four arms: $5.56 low, $22.22 high. `graph-sol`
+is roughly half of it on its own, which is the price of being able to attribute
+a result to the machinery rather than to the models.
 
 So there is no batch size. The bench is a **queue with a store**: every unit of
 work is enumerated up front in a fixed order, the store records which ones have
@@ -385,25 +440,27 @@ accumulated work can support, not a schedule to commit to.
 
 ### Start with the spend split
 
-The first cells off the queue should be **three tasks, all three arms**: nine
-runs, an estimated $10 to $35.
+The first cells off the queue should be **three tasks, all four arms**: twelve
+runs, an estimated $17 to $67.
 
 Not because three tasks measures anything about quality or cost — it does not,
 and the tables below say so. Because the **spend split** is a ratio taken
-*inside* one `swarm` run, between tokens spent on `sol` and tokens spent on
+*inside* one `graph-luna` run, between tokens spent on `sol` and tokens spent on
 `luna`, and a within-run ratio needs almost no sample to pin down. Three tasks
 settle it.
 
 It is worth doing first because it caps everything downstream. If 85% of
-`swarm`'s spend is parent and reviewer, the maximum achievable saving is 15%,
+`graph-luna`'s spend is parent and reviewer, the maximum achievable saving is 15%,
 **Sizing the cost claim** says two dozen tasks cannot establish a saving that
 small, and the honest move is to change the arm configuration rather than to
 keep buying tasks. If the split comes out at 50/50, the saving is worth
 measuring and the rest of the queue is worth working.
 
 Three tasks also exercise every precondition — did `worker_graph` get called,
-did a graph have more than one task, did review fire — which is the other
-thing that can invalidate the run outright and costs nothing extra to check.
+did a graph have more than one task, did review fire — which is the other thing
+that can invalidate the run outright and costs nothing extra to check. On two
+arms rather than one, so a precondition that fails only under cheap workers is
+distinguishable from one that fails under the machinery generally.
 
 ### The unit of work
 
@@ -427,12 +484,22 @@ surprise.
 
 ### Why all three arms, however small the run
 
-`doer` is the cheap model with no orchestration, so it costs roughly 3% of what
-a task costs across all three arms. Dropping it to save that is the worst trade
-in the design: without the floor, "`swarm` cost less than `thinker`" cannot be
-distinguished from "the cheap model alone would have done it and the
-orchestrator was pure overhead". Arms are never dropped to fit a budget; tasks
-are, and the queue does that on its own by stopping earlier.
+`solo-luna` is the cheap model with no orchestration, so it costs under 2% of
+what a task costs across all four arms. Dropping it to save that is the worst
+trade in the design: without the floor, "`graph-luna` cost less than
+`solo-sol`" cannot be distinguished from "the cheap model alone would have done
+it and the orchestrator was pure overhead".
+
+`graph-sol` is the opposite case and the harder call, because it is about half
+the budget. Dropping it buys twice the tasks and makes every quality result
+unattributable: a deficit could be the cheap workers or a defect in the
+package, and the two call for opposite responses. If the budget will not carry
+four arms across the task count you want, run `graph-sol` on a **prefix** of
+the tasks — six of twelve — and report the machinery screen at that smaller n.
+That is a weaker screen, not a missing one.
+
+Otherwise arms are never dropped to fit a budget; tasks are, and the queue does
+that on its own by stopping earlier.
 
 ### Why tasks before repetitions
 
@@ -448,10 +515,10 @@ tasks already done rather than spreading repetitions thinly from the start.
 
 ### What a given amount of accumulated work can say
 
-| | 12x3x1 | 24x3x1 | 28x3x3 |
+| | 12x4x1 | 24x4x1 | 28x4x3 |
 | --- | --- | --- | --- |
-| Runs | 36 | 72 | 252 |
-| Estimated cost | $35–140 | $70–275 | $300–1,200 |
+| Runs | 48 | 96 | 336 |
+| Estimated cost | $67–267 | $133–533 | $470–1,870 |
 | Cost ratio, if the true saving is 1.5x | 1.13–1.99x | 1.23–1.82x | 1.23–1.82x |
 | Cost ratio, if the true saving is 1.15x | inconclusive | inconclusive | inconclusive |
 | Preconditions fired | yes | yes | yes |
@@ -461,8 +528,9 @@ tasks already done rather than spreading repetitions thinly from the start.
 
 Reproduce with `python3 bench/power.py`.
 
-Twelve tasks proves the mechanism fires, screens for catastrophe, and — if the
-saving turns out to be large enough to see — bounds the cost ratio. It does not
+Twelve tasks proves the mechanism fires, screens for gross machinery loss and
+for catastrophe, and — if the saving turns out to be large enough to see —
+bounds the cost ratio. It does not
 establish non-inferiority at any margin worth the name, and a write-up that
 implies otherwise is the failure the **Statistical design** section exists to
 prevent.
@@ -519,7 +587,7 @@ purpose of a resumable queue. **Cost and preconditions may drive the decision
 to continue; the quality gap may not.** Neither of those is the outcome under
 test, so reading them between runs costs nothing. Stopping because the money
 ran out is unrelated to the result and therefore harmless. Stopping because
-`swarm` is currently ahead is not.
+`graph-luna` is currently ahead is not.
 
 Two mechanisms hold it up:
 
@@ -587,7 +655,7 @@ Has to be built:
   on demand. This is what makes three cells now and nine later add up rather
   than becoming disconnected results, and what lets execution stop anywhere.
   See **Budget case**.
-- **Spend-split reporting.** The share of a `swarm` run's tokens spent on the
+- **Spend-split reporting.** The share of a `graph` run's tokens spent on the
   parent, the reviewer, and the workers. It is the first measurement the queue
   produces and the one that caps every cost claim after it; `worker_graph`
   already reports worker usage separately, so this is arithmetic over records
@@ -620,7 +688,7 @@ request. The new harness must therefore **not** carry the patch forward. Doing
 so would name the profiles twice and measure the harness's prompt rather than
 the package's.
 
-Two consequences for the `swarm` arm. Its parent carries a block the other two
+Two consequences for the `graph` arms. Their parents carry a block the solo
 arms do not, so a few hundred tokens of the arm's cost are the mechanism's own
 and should not be mistaken for orchestration overhead. And the block marks a
 profile read-only when no tool it holds can change the checkout, which is a
@@ -640,7 +708,7 @@ is uninformative and must be reported as such rather than quietly used anyway.
    cheap. The cost is the known one: the thinker reads all the work anyway, so
    review spend may erase part of the saving. That is now a result to measure
    rather than a decision to make, and the **spend split** metric is what
-   reports it — if reviewer tokens dominate the `swarm` arm, the saving was
+   reports it — if reviewer tokens dominate the `graph` arms, the saving was
    eaten by the parent.
 
    The reviewer profile takes `sol` as its model and read-only tools: `read`,
@@ -649,13 +717,13 @@ is uninformative and must be reported as such rather than quietly used anyway.
 2. **Review rounds.** `maxRounds` of 2 is the cheap default. Whether 3 buys
    anything is measurable and unmeasured.
 3. ~~**Non-inferiority margin.**~~ **Settled: f = 0.5, absolute cap 10
-   points.** `swarm` must retain half the `thinker`-over-`doer` effect, and in
-   no case fall more than 10 points behind `thinker`. Neither is testable at 28
+   points.** `graph-luna` must retain half the `solo-sol`-over-`solo-luna` effect, and in
+   no case fall more than 10 points behind `solo-sol`. Neither is testable at 28
    instances — see **Statistical design** — which is why the first run is a
    pilot that measures M1 and discordance and sizes the confirmatory run from
    them. The numbers are pre-registered here so that sizing cannot quietly
    become a choice of margin.
-4. **Whether `swarm` gets the orchestrator prompt guidance on fan-out.** The
+4. **Whether the `graph` arms get extra orchestrator guidance on fan-out.** The
    first suite showed models collapsing independent work into one worker. The
    package ships its own fan-out guidance in the tool's prompt guidelines; any
    strengthening on top of that is arm configuration and must be disclosed,

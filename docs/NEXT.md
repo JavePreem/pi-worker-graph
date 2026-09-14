@@ -182,11 +182,13 @@ What remains, in order:
    `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
    fixed run, so it fits any budget: cells are enumerated in a fixed order, a
    run executes as many of the next pending ones as asked for, and the store
-   is the state. The first three tasks measure the spend split, which caps the
-   saving the whole experiment can report and is cheap because it is a ratio
-   taken inside one run; twelve tasks across all three arms at one repetition
-   is an estimated $35 to $140. What is unsettled there is two of its four open
-   decisions,
+   is the state. It runs four arms, two of them solo and two through the
+   orchestration machinery on different worker models, so a quality deficit can
+   be attributed to the package or to the models rather than to both at once.
+   The first three tasks measure the spend split, which caps the saving the
+   whole experiment can report and is cheap because it is a ratio taken inside
+   one run; twelve tasks across all four arms at one repetition is an estimated
+   $67 to $267. What is unsettled there is two of its four open decisions,
    its three unverified dataset facts, and the feasibility spike on one
    TypeScript instance that settles them. The harness is the bulk of the work,
    and the accumulating store is the part that makes batching add up.
