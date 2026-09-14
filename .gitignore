@@ -5,3 +5,4 @@ coverage/
 *.log
 .DS_Store
 .pi/
+__pycache__/

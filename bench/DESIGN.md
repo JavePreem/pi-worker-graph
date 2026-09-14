@@ -64,12 +64,68 @@ Pricing, from Pi's catalogue, per million tokens:
 | `gpt-5.6-sol` | $4.00 | $20.00 |
 | `gpt-5.6-luna` | $0.20 | $1.20 |
 
-Twenty times on input, seventeen on output. The gap is wide enough that if
-delegation ever pays, it pays here and is easy to detect.
+Twenty times on input, seventeen on output.
 
-Splitting `swarm` into with-review and without-review separates delegation from
-the review loop. That is the extension once the first pass says something, not
-part of it.
+### What the saving actually is
+
+**That gap is between token prices. It is not the gap between arms**, and
+conflating the two is the easiest mistake this document can invite. The `swarm`
+arm still runs an expensive parent that reads the repository to decompose the
+work, and — under open decision 1 — an expensive reviewer that reads the diffs.
+Only the middle is cheap.
+
+Taking the per-run estimates from **Budget case**:
+
+| | low | high |
+| --- | --- | --- |
+| `thinker`, `sol` throughout | $1.50 | $6.00 |
+| `swarm` parent, `sol` | $0.75 | $3.00 |
+| `swarm` reviewer, `sol` | $0.45 | $1.80 |
+| `swarm` workers, `luna` | $0.08 | $0.31 |
+| **`swarm` total** | **$1.28** | **$5.11** |
+
+**The expected saving is about 15%, not twenty times.** The saving is bounded by
+how much of the work leaves the expensive model, and under `sol`-reviews-`luna`
+most of it does not. A more favourable split — a parent at 30% of `thinker` and
+a reviewer at 20% — still only reaches about 50%.
+
+Three consequences, and they shape the whole experiment:
+
+**The cost claim is the hard one, not the easy one.** A small ratio needs more
+tasks to establish than a large one, and the ratio here is small. See
+**Sizing the cost claim**.
+
+**The spend split is the first thing to measure**, because it caps the saving
+before any quality question is worth asking. See **Start with the spend split**.
+
+**Splitting `swarm` into with-review and without-review is no longer only an
+extension.** The reviewer is a large share of the remaining expensive spend, so
+the difference between those two configurations is most of the difference
+between a 15% saving and a 40% one. It stays out of the first pass on cost
+grounds, but it is the first thing to add when there is budget.
+
+### Sizing the cost claim
+
+Typical 95% confidence interval on the cost ratio, paired across tasks, from
+`bench/power.py`:
+
+| true saving | 3 tasks | 6 tasks | 12 tasks | 24 tasks |
+| --- | --- | --- | --- | --- |
+| 1.15x | 0.50–2.58x | 0.75–1.79x | 0.87–1.52x | 0.94–1.40x |
+| 1.5x | 0.65–3.36x | 0.97–2.33x | 1.13–1.99x | 1.23–1.82x |
+| 2.3x | 1.00–5.16x | 1.49–3.57x | 1.73–3.05x | 1.89–2.79x |
+| 5x | 2.18–11.21x | 3.25–7.76x | 3.76–6.62x | 4.11–6.07x |
+
+Read the first row carefully. **If the true saving is 15%, twenty-four tasks
+still cannot establish that `swarm` is cheaper at all** — the interval spans
+1.0. Only from about a 1.5x saving does a twelve-task run separate the arms,
+and only from about 2.3x does a three-task run say anything.
+
+This inverts an assumption worth stating plainly, because an earlier draft of
+this design made it: cost was taken to be the cheap, robust half of the
+experiment and quality the expensive half. Under the settled arm configuration
+both are expensive, and the cost half may be the one that cannot be rescued by
+spending more, because the effect itself may be near zero.
 
 ## Task source
 
@@ -138,6 +194,14 @@ cheap worker.
 So Tier 2 runs only on instances where both compared arms passed Tier 1, and it
 compares them against the reference.
 
+**It does not run at small task counts at all.** Both arms passing is roughly
+41% of 41%, so twelve tasks yield something like four comparable pairs — fewer
+than the identical-pair controls need to establish the bias floor those pairs
+would have to clear. Running it anyway produces a number with no denominator
+behind it, which is worse than reporting nothing, because it looks like
+evidence. Tier 2 is gated on a count of comparable pairs fixed in advance, and
+until that count is reached the judged comparison is reported as not run.
+
 ## The judge
 
 Construction is dictated by known failure modes of LLM judges, not by taste.
@@ -164,7 +228,7 @@ before the judge sees them. Swarm output may carry systematic signatures —
 repair rounds leave different phrasing than a single pass — and a judge that
 learns to spot the treatment is measuring the treatment, not the code.
 
-**Calibrate the judge's own noise.** Include identical-pair controls: the same
+**Calibrate the judge’s own noise.** Include identical-pair controls: the same
 diff presented as both options. Every non-tie verdict on those is pure bias.
 Report that number beside the result; it is the floor below which no judged
 difference means anything. Consistency is not correctness — a bias repeated
@@ -272,12 +336,13 @@ means anything — a 20-point margin is one the arm cannot fail.
 
 Two things follow.
 
-**The 28-instance run is a pilot, not a confirmatory trial.** Its job is to
-measure M1 and the discordance rate, which is what sizes the real one. It
-reports the observed gap with an interval and states that non-inferiority was
-not tested. Calling an underpowered pass a demonstration of equal quality is
-the dishonesty this section exists to prevent, and it is available at n=28 in
-exactly this form.
+**Everything short of a confirmatory trial is a pilot.** That covers the whole
+batched run described under **Budget case** and the full 28 as well. A pilot's
+job is to measure M1 and the discordance rate, which is what sizes the real
+one. It reports the observed gap with an interval and states that
+non-inferiority was not tested. Calling an underpowered pass a demonstration of
+equal quality is the dishonesty this section exists to prevent, and it is
+available at every sample size the budget allows.
 
 **Score the graded outcome, not the binary.** Per-instance pass fraction over
 the three repetitions costs nothing extra — the repetitions are already
@@ -300,6 +365,182 @@ pools rather than narrowing the claim after the fact.
 Repetitions: Pi exposes no seed, and run-to-run variance was large on the first
 suite. Budget at least three repetitions per instance per arm, and treat a
 single repetition as a smoke test rather than a measurement.
+
+## Budget case: a resumable queue
+
+The full pilot — 28 tasks, three arms, three repetitions — is 252 agent runs at
+an estimated $300 to $1,200. That is more than this question is worth spending
+in one go, and the estimate itself rests on per-instance figures nobody has
+measured yet.
+
+So there is no batch size. The bench is a **queue with a store**: every unit of
+work is enumerated up front in a fixed order, the store records which ones have
+been done, and a run executes as many of the next pending ones as you ask for.
+Run three, read the costs, run nine more, run twelve. Stop for a week. The
+store is the state, so "what is next" is always derived from what is already
+recorded rather than tracked beside it.
+
+The numbers below are therefore reference points for what a given amount of
+accumulated work can support, not a schedule to commit to.
+
+### Start with the spend split
+
+The first cells off the queue should be **three tasks, all three arms**: nine
+runs, an estimated $10 to $35.
+
+Not because three tasks measures anything about quality or cost — it does not,
+and the tables below say so. Because the **spend split** is a ratio taken
+*inside* one `swarm` run, between tokens spent on `sol` and tokens spent on
+`luna`, and a within-run ratio needs almost no sample to pin down. Three tasks
+settle it.
+
+It is worth doing first because it caps everything downstream. If 85% of
+`swarm`'s spend is parent and reviewer, the maximum achievable saving is 15%,
+**Sizing the cost claim** says two dozen tasks cannot establish a saving that
+small, and the honest move is to change the arm configuration rather than to
+keep buying tasks. If the split comes out at 50/50, the saving is worth
+measuring and the rest of the queue is worth working.
+
+Three tasks also exercise every precondition — did `worker_graph` get called,
+did a graph have more than one task, did review fire — which is the other
+thing that can invalidate the run outright and costs nothing extra to check.
+
+### The unit of work
+
+A **cell** is one task, one arm, one repetition — one agent run. The queue is
+cells, so any count can be asked for.
+
+Cells are ordered so that a task's arms are adjacent: task 1 on all three arms,
+then task 2 on all three, and so on. Two consequences make arbitrary stopping
+safe.
+
+Analysis counts a task only when **every arm has completed it** at the same
+repetition. Pairing is the whole basis of the statistics here — between-task
+difficulty swamps everything else, and an unpaired task contributes noise
+rather than information. Stopping mid-task is allowed and costs nothing; that
+task simply is not counted yet.
+
+So a status report names both: complete tasks, which is the n every figure
+rests on, and pending cells, which is what remains to be paid for. Asking for
+three cells and getting one complete task is the expected shape, not a
+surprise.
+
+### Why all three arms, however small the run
+
+`doer` is the cheap model with no orchestration, so it costs roughly 3% of what
+a task costs across all three arms. Dropping it to save that is the worst trade
+in the design: without the floor, "`swarm` cost less than `thinker`" cannot be
+distinguished from "the cheap model alone would have done it and the
+orchestrator was pure overhead". Arms are never dropped to fit a budget; tasks
+are, and the queue does that on its own by stopping earlier.
+
+### Why tasks before repetitions
+
+Twelve tasks at two repetitions and twenty-four tasks at one repetition cost the
+same and have the same power — 0.45 against 0.46 for detecting a 20-point gap —
+but twenty-four tasks covers twice as much ground. The queue therefore
+enumerates every task at repetition 1 before any task at repetition 2.
+
+The exception is deliberate: repetitions are the only way to measure
+run-to-run variance, and that variance is what sizes a later funded run. Once
+the task count is somewhere useful, enqueue a second repetition across the
+tasks already done rather than spreading repetitions thinly from the start.
+
+### What a given amount of accumulated work can say
+
+| | 12x3x1 | 24x3x1 | 28x3x3 |
+| --- | --- | --- | --- |
+| Runs | 36 | 72 | 252 |
+| Estimated cost | $35–140 | $70–275 | $300–1,200 |
+| Cost ratio, if the true saving is 1.5x | 1.13–1.99x | 1.23–1.82x | 1.23–1.82x |
+| Cost ratio, if the true saving is 1.15x | inconclusive | inconclusive | inconclusive |
+| Preconditions fired | yes | yes | yes |
+| Detects a 40-point quality gap | 0.63 | 0.91 | 1.00 |
+| Detects a 20-point gap | 0.26 | 0.43 | 0.83 |
+| If arms are equal, concludes "no worse than" | 31.3 pts | 22.1 pts | 12.0 pts |
+
+Reproduce with `python3 bench/power.py`.
+
+Twelve tasks proves the mechanism fires, screens for catastrophe, and — if the
+saving turns out to be large enough to see — bounds the cost ratio. It does not
+establish non-inferiority at any margin worth the name, and a write-up that
+implies otherwise is the failure the **Statistical design** section exists to
+prevent.
+
+### Accumulation
+
+Stateful execution only works if the increments compose. Five requirements,
+none optional:
+
+**Fix the order before the first cell runs.** Draw a random permutation of the
+task pool, record it in the store, and take cells off the front. An order
+settled after seeing results is an order chosen for its answer.
+
+**One append-only record per cell**, keyed by task, arm and repetition, holding
+the Tier-1 outcome, the full usage and cost breakdown, the diff, the
+preconditions, and the harness and package versions. Analysis reads the whole
+store; it never reads "the last run".
+
+**A cell is done or it is not.** A crash, a timeout, or a killed container
+leaves no half-record: write the record once the run has settled and been
+graded, so resuming re-runs the cell rather than inheriting a partial one. This
+is what lets execution stop anywhere, including involuntarily.
+
+**A harness failure is not a task failure.** A container that will not start, a
+provider 500, a pull that times out, a cell stopped by its own spend cap — none
+of those is the agent failing the task, and scoring them as losses would charge
+an arm for the weather. Cells terminate into one of three classes: **resolved**,
+**not resolved**, and **not attempted**. Only the first two enter the resolve
+rate; the third is reported with its count and its reason and is eligible for
+re-running, which the other two are not. The distinction has to be drawn by the
+harness at the point of failure, because it cannot be recovered afterwards from
+a record that says only "failed".
+
+**Cap the spend of every cell.** The runtime bounds tasks, concurrency,
+payload, output, context and per-task runtime, but has no token or cost ceiling
+— `docs/NEXT.md` defers that deliberately — so one task that will not converge
+can consume a whole budget unnoticed. The harness sets its own per-cell ceiling
+from the measured median once there is one, stops the cell when it is crossed,
+and records it as **not attempted** with the reason. A budget spent by one
+runaway cell buys nothing at all.
+
+**Re-run nothing silently.** A task re-run under a changed harness or package
+version is a different measurement. Version-stamp every record, and either
+report a mixed store as mixed or discard and redo the earlier cells.
+
+**Keep the continuation decision blind to the outcome under test.** This is the
+one that bites, and the stop-and-look workflow is exactly what makes it live.
+Deciding whether to run more after seeing results is repeated testing of
+accumulating data; stopping as soon as the numbers look favourable inflates the
+false-positive rate well past the nominal 5%, and more looks makes it worse.
+
+The rule that follows is narrower than "do not look", which would defeat the
+purpose of a resumable queue. **Cost and preconditions may drive the decision
+to continue; the quality gap may not.** Neither of those is the outcome under
+test, so reading them between runs costs nothing. Stopping because the money
+ran out is unrelated to the result and therefore harmless. Stopping because
+`swarm` is currently ahead is not.
+
+Two mechanisms hold it up:
+
+- a status report shows spend, projected spend to finish, complete tasks, and
+  whether the preconditions fired — and does not show the quality gap;
+- the non-inferiority verdict is computed once, at a task count fixed in
+  advance from the measured variance, by a separate step that has to be asked
+  for.
+
+The separation is imperfect and the leak is worth naming rather than leaving
+implicit. Spend and quality are correlated: an arm that gives up early is both
+cheaper and worse, an arm that flails is both dearer and worse. So watching
+spend does carry some information about the outcome under test. Two things keep
+it small. Status reports raw spend rather than cost per resolved instance,
+which is the composite metric and would leak far more. And the leak runs
+through a weak, unsigned correlation, where the thing being guarded against —
+stopping the moment a verdict looks favourable — requires reading the verdict
+directly. It is a narrowed channel, not a closed one, and a result should not
+be defended as though it were closed.
+
+The queue accumulates evidence. It does not hand out a verdict per run.
 
 ## What carries over, and what has to be built
 
@@ -337,6 +578,20 @@ Has to be built:
   controls.
 - **Paired analysis**: McNemar over discordant pairs, and cost per resolved
   instance.
+- **The queue, the store, and the three commands over them.** A fixed cell
+  permutation recorded before the first run; `run <count>` executing the next
+  pending cells under a per-cell spend cap and writing one append-only
+  version-stamped record each, classed resolved, not resolved, or not
+  attempted; `status` reporting spend, projected spend, complete tasks and
+  preconditions but not the quality gap; and `analyse` reading the whole store
+  on demand. This is what makes three cells now and nine later add up rather
+  than becoming disconnected results, and what lets execution stop anywhere.
+  See **Budget case**.
+- **Spend-split reporting.** The share of a `swarm` run's tokens spent on the
+  parent, the reviewer, and the workers. It is the first measurement the queue
+  produces and the one that caps every cost claim after it; `worker_graph`
+  already reports worker usage separately, so this is arithmetic over records
+  the run already has rather than new instrumentation.
 
 ## Threats to validity
 

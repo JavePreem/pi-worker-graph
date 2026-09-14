@@ -178,10 +178,18 @@ What remains, in order:
 
 1. Review, tag, and publish the next npm prerelease through the
    maintainer-owned Git and registry workflow.
-2. Finish designing the Phase 8 bench, then run it. `bench/DESIGN.md` carries
-   the design; what is unsettled there is its four open decisions, its three
-   unverified dataset facts, and the feasibility spike on one TypeScript
-   instance that settles them. The harness itself is the bulk of the work.
+2. Finish designing the Phase 8 bench, then start working the queue.
+   `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
+   fixed run, so it fits any budget: cells are enumerated in a fixed order, a
+   run executes as many of the next pending ones as asked for, and the store
+   is the state. The first three tasks measure the spend split, which caps the
+   saving the whole experiment can report and is cheap because it is a ratio
+   taken inside one run; twelve tasks across all three arms at one repetition
+   is an estimated $35 to $140. What is unsettled there is two of its four open
+   decisions,
+   its three unverified dataset facts, and the feasibility spike on one
+   TypeScript instance that settles them. The harness is the bulk of the work,
+   and the accumulating store is the part that makes batching add up.
 3. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
