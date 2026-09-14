@@ -223,9 +223,71 @@ available in this experiment.
 
 Two levers against it:
 
-**Pre-register a non-inferiority margin** before any trial runs — "swarm is
-acceptable if its resolve rate is within 10 points of thinker" — so the
+**Pre-register a non-inferiority margin** before any trial runs, so the
 threshold is not chosen after seeing the numbers.
+
+An absolute margin in points is the wrong shape for it. The FDA's guidance on
+choosing one puts the choice in two steps: **M1**, the whole effect the control
+is presumed to have, and **M2**, the largest part of M1 it would be acceptable
+to give up. The `doer` arm is already what supplies M1 here — it is the floor,
+and the orchestrator's entire value is `thinker` minus `doer`. If `thinker`
+resolves 41% and `doer` resolves 30%, M1 is 11 points, and the placeholder
+10-point margin would let `swarm` surrender 91% of everything the expensive
+orchestrator buys and still be called non-inferior. Five points surrenders 45%
+of it. Neither number means what it looks like until it is read against M1.
+
+So the margin is a **retention fraction of M1**: `swarm` is non-inferior if it
+retains at least *f* of the `thinker`-over-`doer` effect. Pre-register *f*.
+
+M1 is unknown until the bench runs, which is the one place this departs from
+the drug-trial procedure — there, M1 comes from historical trials of the active
+control, and here there is no history. Two consequences, both of which have to
+be accepted openly rather than resolved: the acceptance threshold in points is
+only computable after the arms have run, and a bench where `thinker` and `doer`
+turn out to be close has no M1 worth retaining a fraction of, which is itself
+the finding that the orchestrator bought nothing. Pre-register a fallback
+absolute cap alongside *f* to cover the second case, so a vanishing M1 does not
+turn into an arbitrarily easy pass.
+
+**Power, and what it rules out.** `bench/power.py` simulates a bench where the
+two arms are truly equal and reports how often it would correctly conclude
+non-inferiority. At one-sided 95% and 20% discordance:
+
+| margin | n=28 binary | n=28, R=3 graded | n=56, R=3 | n=112, R=3 |
+| --- | --- | --- | --- | --- |
+| 5 points | 0.19 | 0.19 | 0.26 | 0.40 |
+| 10 points | 0.39 | 0.42 | 0.63 | 0.88 |
+| 15 points | 0.60 | 0.68 | 0.91 | 0.99 |
+| 20 points | 0.78 | 0.88 | 0.99 | 1.00 |
+
+The smallest margin reaching 80% power at n=28 is 21 points on binary McNemar
+and about 17 using per-instance pass fractions. Five points would need roughly
+450 instances.
+
+This is the decisive constraint on the whole design, and it is worse than it
+looks. M1 is plausibly 10 to 15 points. The margin 28 instances can afford is
+17 to 21. **The margin is wider than the effect it exists to protect**, so at
+this sample size the non-inferiority claim is not available at any value that
+means anything — a 20-point margin is one the arm cannot fail.
+
+Two things follow.
+
+**The 28-instance run is a pilot, not a confirmatory trial.** Its job is to
+measure M1 and the discordance rate, which is what sizes the real one. It
+reports the observed gap with an interval and states that non-inferiority was
+not tested. Calling an underpowered pass a demonstration of equal quality is
+the dishonesty this section exists to prevent, and it is available at n=28 in
+exactly this form.
+
+**Score the graded outcome, not the binary.** Per-instance pass fraction over
+the three repetitions costs nothing extra — the repetitions are already
+budgeted — and moves the achievable margin from 21 points to about 17. Keep
+McNemar on the binary as a secondary, since it is the comparable number.
+
+**The cost claim is not subject to any of this.** A 17-to-20x price gap is
+large and low-variance, and n=28 establishes it comfortably. Only the quality
+guarantee is underpowered. Report cost as a measurement and quality as a bound,
+rather than letting the weaker half set the tone for both.
 
 **Pair by instance and analyze discordant pairs.** Between-instance difficulty
 variance dominates everything else here. Comparing two independent rates throws
@@ -293,32 +355,57 @@ Both arms share base models, so contamination largely cancels — it threatens
 absolute resolve rates, not the A/B delta. Worth stating so the result is not
 dismissed for the wrong reason.
 
-**The profile-discovery gap.** The `worker_graph` schema requires a profile name
-"from the global worker-graph configuration" and nothing enumerates the
-available names, so an orchestrator guesses and every graph is rejected with
-`Worker profile is invalid`. The first suite compensated with a one-line
-`--append-system-prompt` naming the profile, and the new harness will need the
-same patch. It must stay documented as a confound until the package closes the
-gap, because it is scaffolding around a real defect rather than part of the
-experiment. The defect is recorded under "Known defects" in `docs/NEXT.md`.
+**Profile names are now part of the treatment, not scaffolding.** The first
+suite compensated for a real defect with a one-line `--append-system-prompt`
+naming the profile, because nothing enumerated the configured names and every
+guessed name rejected the whole graph. The package closes that gap (D21): while
+worker-graph mode is enabled it prepends the configured profiles — name,
+provider, model, thinking level, and a read-only marking — to the parent's
+request. The new harness must therefore **not** carry the patch forward. Doing
+so would name the profiles twice and measure the harness's prompt rather than
+the package's.
+
+Two consequences for the `swarm` arm. Its parent carries a block the other two
+arms do not, so a few hundred tokens of the arm's cost are the mechanism's own
+and should not be mistaken for orchestration overhead. And the block marks a
+profile read-only when no tool it holds can change the checkout, which is a
+nudge toward a particular `review.profile` choice. Open decision 1 settles that
+the reviewer runs `sol` on read-only tools, so the nudge and the arm agree; had
+the reviewer been given a writable profile, the block would not have endorsed
+it and the disagreement would have belonged in the disclosure.
 
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.
 
 ## Open decisions
 
-1. **Reviewer model.** `sol` reviewing `luna`'s work is faithful to thinker-plus-doer
-   but expensive — the thinker reads all the work anyway, which may erase the
-   saving. `luna` reviewing `luna` is cheap but may rubber-stamp. This needs a
-   small pilot before the main run, and it may well be the decisive variable.
+1. ~~**Reviewer model.**~~ **Settled: `sol` reviews `luna`.** Faithful to
+   thinker-plus-doer, and the alternative — `luna` reviewing `luna` — risks a
+   rubber stamp, which would make the review arm meaningless rather than merely
+   cheap. The cost is the known one: the thinker reads all the work anyway, so
+   review spend may erase part of the saving. That is now a result to measure
+   rather than a decision to make, and the **spend split** metric is what
+   reports it — if reviewer tokens dominate the `swarm` arm, the saving was
+   eaten by the parent.
+
+   The reviewer profile takes `sol` as its model and read-only tools: `read`,
+   `grep`, `find`, `ls`. Model and tools are independent, so this keeps the
+   package's read-only marking pointing at the reviewer the arm intends.
 2. **Review rounds.** `maxRounds` of 2 is the cheap default. Whether 3 buys
    anything is measurable and unmeasured.
-3. **Non-inferiority margin.** 10 points is a placeholder. It must be set,
-   deliberately, before the first trial.
+3. ~~**Non-inferiority margin.**~~ **Settled: f = 0.5, absolute cap 10
+   points.** `swarm` must retain half the `thinker`-over-`doer` effect, and in
+   no case fall more than 10 points behind `thinker`. Neither is testable at 28
+   instances — see **Statistical design** — which is why the first run is a
+   pilot that measures M1 and discordance and sizes the confirmatory run from
+   them. The numbers are pre-registered here so that sizing cannot quietly
+   become a choice of margin.
 4. **Whether `swarm` gets the orchestrator prompt guidance on fan-out.** The
-   first suite showed models collapsing independent work into one worker. If the
-   guidance is strengthened for the bench, that is arm configuration and must be
-   disclosed like the profile-name patch.
+   first suite showed models collapsing independent work into one worker. The
+   package ships its own fan-out guidance in the tool's prompt guidelines; any
+   strengthening on top of that is arm configuration and must be disclosed,
+   and it is the last remaining place where the harness could put words in the
+   orchestrator's mouth.
 
 ## Unverified
 
@@ -346,3 +433,9 @@ precede any harness work.
   <https://aclanthology.org/2025.ijcnlp-long.18.pdf>
 - Beyond the Surface: Measuring Self-Preference in LLM Judgments —
   <https://arxiv.org/pdf/2506.02592>
+- Non-Inferiority Clinical Trials to Establish Effectiveness (FDA guidance for
+  industry, 2016) — <https://www.fda.gov/media/78504/download>; the M1/M2
+  two-step for choosing a margin
+- Reporting of Noninferiority and Equivalence Randomized Trials: Extension of
+  the CONSORT 2010 Statement —
+  <https://jamanetwork.com/journals/jama/fullarticle/1487502>

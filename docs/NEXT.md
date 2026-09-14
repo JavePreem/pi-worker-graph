@@ -169,23 +169,20 @@ length:
 The profile-discovery gap that preceded the prerelease is closed (D21): the
 configured names now reach the parent in the request while the mode is enabled,
 so an orchestrated run no longer needs an out-of-band patch naming them. It is
-covered by the automated suites but has not yet been exercised against a live
-provider.
+covered by the automated suites. It is deliberately not being confirmed in a
+one-off live session: the bench exercises the same path under measurement, and
+a hand-run session would only tell us what the bench is built to tell us
+properly.
 
 What remains, in order:
 
-1. Confirm profile discovery live: a Pi 0.85.1 session in `--mode rpc`, a
-   configuration naming two profiles, and a graph the parent builds without
-   being told the names out of band.
-2. Review, tag, and publish the next npm prerelease through the
+1. Review, tag, and publish the next npm prerelease through the
    maintainer-owned Git and registry workflow.
-3. Design the Phase 8 bench before running it, then run it: a controlled
-   same-tree exercise with intentional minor overlap, routed across at least
-   two profiles, compared against a sequential run on duration, conflicts,
-   usage, and review findings. `bench/DESIGN.md` records the
-   `--append-system-prompt` patch as a confound; with the gap closed, the
-   design can drop it.
-4. Keep every automated path provider-free behind the existing fake subprocess
+2. Finish designing the Phase 8 bench, then run it. `bench/DESIGN.md` carries
+   the design; what is unsettled there is its four open decisions, its three
+   unverified dataset facts, and the feasibility spike on one TypeScript
+   instance that settles them. The harness itself is the bulk of the work.
+3. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
 ## Deferred run-store work
