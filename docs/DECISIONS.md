@@ -249,6 +249,68 @@ context between rounds.
 It does not settle the third. This cycle is intra-node; whether execution also
 pauses at review barriers between frontiers remains open and independent.
 
+## D21. Configured profile names reach the parent through the request context
+
+`worker_graph` requires every task to name a worker profile, and the reviewer
+policy to name another. Nothing enumerated them, so the parent guessed, and
+whole-graph validation rejected every task at once with a diagnostic that names
+neither the profile that failed nor the ones that exist.
+
+The names go into the request, prepended by a `context` handler while the mode
+is enabled, rather than into the tool's description. Pi fixes a tool's
+description and prompt guidelines when it is registered, before any session has
+named a working directory, while the configuration is loaded per session
+against that directory. Registering the tool per session would put the names in
+the schema, at the cost of a registration that depends on an asynchronous read;
+the handler keeps registration static and adds the names where the model reads
+them anyway.
+
+The block is prepended rather than appended. Appending risks landing between an
+assistant message and the tool results that answer it, and a stable prefix is
+the half of a request a provider can cache. Two consecutive user messages are a
+shape Pi's own provider adapters already emit, and none of them reads a
+message's `timestamp`, so the block's bytes do not change between requests.
+
+`before_agent_start` could carry the same text in the system prompt, where tool
+guidance otherwise lives, and it is the better home if the names ever need to
+sit beside the tool descriptions. It is not used here: it resolves once per
+turn rather than per request, and whether Pi records an overridden system
+prompt in the session is unverified, where the transformed message list
+demonstrably goes only to the provider.
+
+It is added to the request and not to the session. Pi transforms the message
+list on its way to the provider, so the transcript keeps no copy and `/swarm
+off` removes the block from the next request rather than editing history.
+
+The names are read again for every request, not captured when the mode is
+entered. The orchestration tool loads the configuration on every call, so a
+snapshot taken at activation would let the parent name profiles its graph is no
+longer validated against — the rejection this block exists to prevent, returned
+for a name the parent was told to use. The two reads can never be one, because
+the parent composes a graph before the tool runs; rereading removes the
+divergence that would otherwise outlive the turn that introduced it. A read
+that fails falls back to the last profiles that were read successfully, which
+activation seeds and every later successful read replaces: a failed read is not
+evidence that the profiles changed, dropping the block would leave the parent
+guessing again, and falling back to what activation saw would revive a name the
+parent had already been told was gone.
+
+A profile is marked read-only only when every tool it holds is one that cannot
+change the checkout — `read`, `grep`, `find`, `ls`. `bash` and `powershell` are
+excluded: a shell rewrites or deletes any file the worker process can reach, so
+a profile holding one is no safer to review on than a profile holding `edit`.
+The label exists to steer a review policy, so a wrong one is worse than none. A
+profile with no tools is not labelled either, having nothing to read the
+checkout with.
+
+Nothing is truncated. A profile name the model must type exactly is worth less
+than nothing shortened, and it never needs to be: the configuration parser
+admits at most `maxTasks` profiles with identifier-shaped names, providers, and
+models, one thinking level from a fixed set, and tools from a fixed allowlist,
+which bounds the rendered block by construction. The same parser is why the
+block needs no escaping and carries no untrusted-data label: no configured
+value can contain `<` or a line break, and none of it is worker-authored.
+
 ## Open decisions
 
 1. Whether advisory path and symbol claims belong in the MVP or a follow-up.

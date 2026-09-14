@@ -4,11 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  MAX_PROFILE_CONTEXT_BYTES,
   registerWorkerGraphOrchestratorTool,
   WORKER_GRAPH_TOOL_NAME,
+  workerProfilesContext,
 } from "../src/orchestrator.js";
-import type { PiSubprocessExecutorOptions } from "../src/pi-subprocess.js";
+import type {
+  PiSubprocessExecutorOptions,
+  PiThinkingLevel,
+  PiWorkerProfile,
+  PiWorkerTool,
+} from "../src/pi-subprocess.js";
+import { parsePiWorkerProfiles } from "../src/pi-subprocess.js";
 import type { TaskExecutor } from "../src/run.js";
+import { RUN_GRAPH_LIMITS } from "../src/run.js";
 import { nodeOutput } from "./fixtures.js";
 
 interface RegisteredTool {
@@ -535,5 +544,109 @@ test("attributes spend to the task that incurred it", async (t) => {
       ["cheap", 100],
       ["costly", 9_000],
     ],
+  );
+});
+
+function profile(
+  tools: readonly PiWorkerTool[],
+  overrides: {
+    readonly provider?: string;
+    readonly model?: string;
+    readonly thinkingLevel?: PiThinkingLevel;
+  } = {},
+): PiWorkerProfile {
+  return {
+    provider: overrides.provider ?? "test-provider",
+    model: overrides.model ?? "test-model",
+    thinkingLevel: overrides.thinkingLevel ?? "medium",
+    tools,
+  };
+}
+
+test("the profile block names every configured profile in a fixed order", () => {
+  const block = workerProfilesContext({
+    writer: profile(["bash", "edit", "read", "write"]),
+    auditor: profile(["grep", "read"], { model: "cheap-model" }),
+  });
+
+  // The model has to type these names exactly, so the block carries each one
+  // whole and in an order that does not move between requests.
+  assert.equal(
+    block,
+    [
+      "<worker_graph_profiles>",
+      `Worker profiles configured for ${WORKER_GRAPH_TOOL_NAME} in this session:`,
+      "- auditor: test-provider/cheap-model, medium thinking, read-only, tools: grep, read",
+      "- writer: test-provider/test-model, medium thinking, tools: bash, edit, read, write",
+      `Use one of these names exactly for a task's profile and for review.profile. Any other name rejects the whole graph before any worker starts, and ${WORKER_GRAPH_TOOL_NAME} cannot create a profile.`,
+      "</worker_graph_profiles>",
+    ].join("\n"),
+  );
+});
+
+test("a profile that can write is not offered as a reviewer", () => {
+  // `read-only` is derived from the tool allowlist, because nothing else in
+  // the configuration says whether a profile is safe to review on.
+  for (const tools of [["read"], ["find", "grep", "ls", "read"]] as const) {
+    assert.match(workerProfilesContext({ a: profile(tools) }), /read-only/u);
+  }
+  for (const tools of [
+    ["edit", "read"],
+    ["read", "write"],
+    // A shell rewrites or deletes any file the worker can reach, so a profile
+    // holding one is no safer to review on than one holding `edit`.
+    ["bash", "read"],
+    ["powershell", "read"],
+    ["bash"],
+  ] as const) {
+    assert.doesNotMatch(
+      workerProfilesContext({ a: profile(tools) }),
+      /read-only/u,
+    );
+  }
+});
+
+test("a profile with no tools is named but never offered as a reviewer", () => {
+  const block = workerProfilesContext({ a: profile([]) });
+
+  // Nothing it can write, but nothing it can read either: a reviewer that
+  // cannot open the checkout it was asked to judge is not a reviewer.
+  assert.match(
+    block,
+    /- a: test-provider\/test-model, medium thinking, tools: none$/mu,
+  );
+  assert.doesNotMatch(block, /read-only/u);
+});
+
+test("no profile block is rendered when none are configured", () => {
+  // An empty block would tell the parent nothing while still costing a turn.
+  assert.equal(workerProfilesContext({}), "");
+});
+
+test("the largest configuration that can be loaded still fits the block bound", () => {
+  // Nothing truncates a profile name at render time, so the bound holds only
+  // because the configuration parser already bounds what can reach here. This
+  // builds the largest configuration that survives `parsePiWorkerProfiles`.
+  const longest = `a${"b".repeat(255)}`;
+  const profiles = Object.fromEntries(
+    Array.from({ length: RUN_GRAPH_LIMITS.maxTasks }, (_value, index) => [
+      `${longest.slice(0, 252)}${String(index).padStart(4, "0")}`,
+      profile(
+        ["bash", "edit", "find", "grep", "ls", "powershell", "read", "write"],
+        {
+          provider: longest,
+          model: longest,
+          // The longest level name, so the line is as long as one can be.
+          thinkingLevel: "minimal",
+        },
+      ),
+    ]),
+  );
+  const parsed = parsePiWorkerProfiles(profiles);
+
+  assert.equal(Object.keys(parsed).length, RUN_GRAPH_LIMITS.maxTasks);
+  assert.ok(
+    Buffer.byteLength(workerProfilesContext(parsed)) <=
+      MAX_PROFILE_CONTEXT_BYTES,
   );
 });

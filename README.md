@@ -353,12 +353,23 @@ thinking level, and tool allowlist explicitly:
 }
 ```
 
-Nothing yet tells the orchestrator which profile names this file defines. The
-`worker_graph` schema requires a name from it, and the whole graph is validated
-against the configuration before any worker starts, so a name the parent
-guessed rejects the entire graph with `Worker profile is invalid`. Until the
-extension surfaces the configured names, state them to the parent session
-yourself, and restate them whenever profiles are added or renamed.
+The `worker_graph` schema requires a profile name from this file, and the whole
+graph is validated against the configuration before any worker starts, so a
+guessed name rejects the entire graph with `Worker profile is invalid`. While
+the mode is enabled, the extension names the configured profiles to the parent
+itself: each one's name, provider, model, thinking level, and tools are
+prepended to the request. A profile whose every tool is `read`, `grep`, `find`,
+or `ls` is marked read-only, so the parent has something to point a review
+policy at; a profile holding `bash` or `powershell` is not, because a shell
+rewrites any file the worker can reach. Nothing is shortened — a name the
+parent must reproduce exactly is carried whole — and the block is bounded by
+the configuration's own limits.
+
+It is added to the request rather than to the session, so the transcript keeps
+no copy of it and `/swarm off` drops it from the next request. The file is read
+again for each request, the way the tool reads it for each call, so editing
+`worker-graph.json` under an enabled mode renames the profiles the parent sees
+without leaving and re-entering the mode.
 
 Run state defaults to the `worker-graph` subdirectory of Pi's agent directory.
 An optional `stateRoot` may be absolute or relative to the agent directory, but

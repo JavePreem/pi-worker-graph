@@ -51,7 +51,7 @@ interface SessionContext {
 type SessionHandler = (
   event: unknown,
   context: SessionContext,
-) => void | Promise<void>;
+) => unknown | Promise<unknown>;
 
 interface CustomEntry {
   readonly type: "custom";
@@ -80,6 +80,8 @@ interface ModeSession {
   tree(entries?: readonly unknown[]): Promise<void>;
   shutdown(): Promise<void>;
   swarm(action: string): Promise<void>;
+  /** Applies the context handler the way Pi transforms a provider request. */
+  transform(messages: readonly unknown[]): Promise<readonly unknown[]>;
   /** The session's current model, as the extension left it. */
   model: FakeModel | undefined;
   thinkingLevel: string;
@@ -91,6 +93,10 @@ interface ModeSession {
     readonly agentDirectory: string;
     readonly workingDirectory: string;
   }[];
+  /** The profiles the configuration reports; assignable so a test can edit it. */
+  profiles: Readonly<Record<string, unknown>>;
+  /** Fails every configuration load with this message while it is set. */
+  configurationError: string | undefined;
 }
 
 function modeSession(
@@ -113,6 +119,8 @@ function modeSession(
     readonly authenticated?: boolean;
     /** Fails every configuration load with this message. */
     readonly configurationError?: string;
+    /** The worker profiles the configuration reports. */
+    readonly profiles?: Readonly<Record<string, unknown>>;
   } = {},
 ): ModeSession {
   const stateRoot = options.stateRoot;
@@ -150,6 +158,8 @@ function modeSession(
   const session: ModeSession = {
     stateRoot: stateRoot ?? "",
     configurationLoads: [],
+    profiles: options.profiles ?? {},
+    configurationError: options.configurationError,
     model:
       options.model === undefined && !("model" in options)
         ? { provider: "test-provider", id: "test-model" }
@@ -168,6 +178,15 @@ function modeSession(
     async swarm(action) {
       if (!swarmCommand) throw new Error("/swarm was not registered");
       await swarmCommand(action, context());
+    },
+    async transform(messages) {
+      const handler = handlers.get("context");
+      if (!handler) throw new Error("context was not registered");
+      const result = (await handler(
+        { type: "context", messages: [...messages] },
+        context(),
+      )) as { readonly messages?: readonly unknown[] } | undefined;
+      return result?.messages ?? messages;
     },
   };
   registerWorkerGraph(
@@ -222,13 +241,13 @@ function modeSession(
           agentDirectory: loadOptions.agentDirectory,
           workingDirectory: loadOptions.workingDirectory,
         });
-        if (options.configurationError !== undefined) {
-          throw new Error(options.configurationError);
+        if (session.configurationError !== undefined) {
+          throw new Error(session.configurationError);
         }
         return {
           stateRoot: stateRoot ?? "/agent/worker-graph",
           maxRetainedRuns: 64,
-          profiles: {},
+          profiles: session.profiles,
           ...(options.orchestrator === undefined
             ? {}
             : { orchestrator: options.orchestrator }),
@@ -1211,4 +1230,88 @@ test("reports what a retained run spent, and what it cannot account for", async 
 
   await session.swarm("usage 00000000-0000-4000-8000-000000000000");
   assert.equal(session.notifications.at(-1)?.type, "error");
+});
+
+const WRITER_PROFILE = {
+  provider: "test-provider",
+  model: "test-model",
+  thinkingLevel: "medium",
+  tools: ["edit", "read"],
+} as const;
+
+test("the enabled mode names its configured profiles in the request", async (t) => {
+  parentSession(t);
+  const session = modeSession({ profiles: { writer: WRITER_PROFILE } });
+  await session.start();
+  const history = [{ role: "user", content: "Split this work up" }];
+
+  const before = await session.transform(history);
+  await session.swarm("on");
+  const during = await session.transform(history);
+  await session.swarm("off");
+  const after = await session.transform(history);
+
+  // Nothing is added while the tool the names belong to is inactive.
+  assert.deepEqual(before, history);
+  assert.deepEqual(after, history);
+  // Prepended, so it can never land between an assistant message and the tool
+  // results answering it, and the history itself is left exactly as it was.
+  assert.equal(during.length, history.length + 1);
+  assert.deepEqual(during.slice(1), history);
+  const [block] = during as [{ role: string; content: string }];
+  assert.equal(block.role, "user");
+  assert.match(block.content, /<worker_graph_profiles>/u);
+  assert.match(block.content, /- writer: test-provider\/test-model/u);
+});
+
+test("a mode the configuration refused names no profiles", async (t) => {
+  parentSession(t);
+  const session = modeSession({
+    profiles: { writer: WRITER_PROFILE },
+    configurationError: "Worker graph configuration is invalid",
+  });
+  await session.start();
+  const history = [{ role: "user", content: "Split this work up" }];
+
+  await session.swarm("on");
+
+  // Activation refused, so the tool is inactive and naming profiles for it
+  // would describe a capability the parent does not have.
+  assert.deepEqual(await session.transform(history), history);
+});
+
+test("a configuration edited under an enabled mode renames its profiles", async (t) => {
+  parentSession(t);
+  const session = modeSession({ profiles: { writer: WRITER_PROFILE } });
+  await session.start();
+  const history = [{ role: "user", content: "Split this work up" }];
+  await session.swarm("on");
+
+  session.profiles = { author: WRITER_PROFILE };
+  const [block] = (await session.transform(history)) as [{ content: string }];
+
+  // The tool loads the configuration per call, so a name the parent was given
+  // at activation would be a name its graph is no longer validated against.
+  assert.match(block.content, /- author: /u);
+  assert.doesNotMatch(block.content, /- writer: /u);
+});
+
+test("a configuration caught mid-save keeps the last names that were read", async (t) => {
+  parentSession(t);
+  const session = modeSession({ profiles: { writer: WRITER_PROFILE } });
+  await session.start();
+  const history = [{ role: "user", content: "Split this work up" }];
+  await session.swarm("on");
+
+  session.profiles = { author: WRITER_PROFILE };
+  await session.transform(history);
+  session.configurationError = "Worker graph configuration is not valid JSON";
+  const [block] = (await session.transform(history)) as [{ content: string }];
+
+  // A failed read is not evidence that the profiles changed, and dropping the
+  // block would leave the parent guessing again. What it falls back to is the
+  // last configuration that was read, not the one the mode was entered with:
+  // reviving a renamed profile would recreate the rejection this prevents.
+  assert.match(block.content, /- author: /u);
+  assert.doesNotMatch(block.content, /- writer: /u);
 });

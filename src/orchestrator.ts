@@ -6,8 +6,10 @@ import {
 } from "./config.js";
 import type {
   PiSubprocessExecutorOptions,
+  PiWorkerProfile,
   PiWorkerProgress,
   PiWorkerTaskPayload,
+  PiWorkerTool,
   PiWorkerUsage,
 } from "./pi-subprocess.js";
 import { createPiSubprocessExecutor, REVIEW_LIMITS } from "./pi-subprocess.js";
@@ -17,6 +19,19 @@ import type { NodeOutputRecord, NodeStateRecord } from "./store.js";
 import { readNodeOutput } from "./store.js";
 
 export const WORKER_GRAPH_TOOL_NAME = "worker_graph";
+
+/**
+ * The largest profile block `workerProfilesContext()` can render.
+ *
+ * It is an upper bound the configuration already guarantees rather than a
+ * limit enforced by truncating: at most `RUN_GRAPH_LIMITS.maxTasks` profiles
+ * survive `parsePiWorkerProfiles()`, and each one's name, provider, and model
+ * are bounded identifiers, its thinking level comes from a fixed set, and its
+ * tools from a fixed allowlist. A name the model must type exactly is never
+ * worth shortening, so the bound is asserted against a maximal configuration
+ * in the tests rather than applied to a rendered line.
+ */
+export const MAX_PROFILE_CONTEXT_BYTES = 32 * 1024;
 
 const MAX_ID_BYTES = 256;
 const MAX_ASSIGNMENT_BYTES = 48 * 1024;
@@ -28,6 +43,18 @@ const MAX_RESULT_REPORT_BYTES = 128 * 1024;
 const MAX_REVIEW_SUMMARY_BYTES = 1024;
 const MAX_REVIEW_TEXT_BYTES = 512;
 const MAX_REVIEW_ITEMS = 4;
+
+/**
+ * The worker tools that cannot change the checkout.
+ *
+ * `bash` and `powershell` are deliberately absent. A shell rewrites or deletes
+ * any file the worker process can reach, so a profile holding one is no safer
+ * to review on than a profile holding `edit`, and calling it read-only would
+ * steer the parent into pointing a review policy at a writable worker.
+ */
+const READ_ONLY_WORKER_TOOLS: ReadonlySet<PiWorkerTool> = new Set<PiWorkerTool>(
+  ["find", "grep", "ls", "read"],
+);
 
 const TOOL_FIELDS = new Set(["tasks", "concurrency", "taskTimeoutMs"]);
 const TASK_FIELDS = new Set([
@@ -600,6 +627,55 @@ function finalText(
     "<worker_graph_reports_json>",
     serializeReviews(nodes),
     "</worker_graph_reports_json>",
+  ].join("\n");
+}
+
+/**
+ * Names the configured worker profiles for the parent model.
+ *
+ * `worker_graph` requires every task to name a profile, and the whole graph is
+ * validated against the configuration before any worker starts, so one guessed
+ * name rejects every task at once with a diagnostic that deliberately names
+ * neither the profile that failed nor the ones that exist. The names live in
+ * the operator's configuration, which is loaded per session against the
+ * session's working directory rather than at registration, so they cannot be
+ * written into this tool's static schema; this block carries them into the
+ * request instead.
+ *
+ * Nothing rendered here is worker-authored. Every value reached this function
+ * through `parsePiWorkerProfiles()`, which admits only identifier-shaped
+ * profile names, providers, and models, one thinking level from a fixed set,
+ * and tools from a fixed allowlist. No value can contain `<` or a line break,
+ * so the block's delimiter is unforgeable without escaping and the rendering
+ * stays a faithful copy of what the graph will be validated against.
+ */
+export function workerProfilesContext(
+  profiles: Readonly<Record<string, PiWorkerProfile>>,
+): string {
+  // Sorted by code unit rather than by locale: the block is rendered again for
+  // every request, and a name that changes position changes the bytes.
+  const entries = Object.entries(profiles).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+  if (entries.length === 0) return "";
+  const lines = entries.map(([name, profile]) => {
+    // Derived rather than configured: the review guidance asks for a reviewer
+    // that cannot write, and a profile's tools are the only thing that says so.
+    // A profile with no tools at all is not offered either — it could not read
+    // the checkout it was asked to review.
+    const readOnly =
+      profile.tools.length > 0 &&
+      profile.tools.every((tool) => READ_ONLY_WORKER_TOOLS.has(tool));
+    const tools =
+      profile.tools.length === 0 ? "none" : profile.tools.join(", ");
+    return `- ${name}: ${profile.provider}/${profile.model}, ${profile.thinkingLevel} thinking, ${readOnly ? "read-only, " : ""}tools: ${tools}`;
+  });
+  return [
+    "<worker_graph_profiles>",
+    `Worker profiles configured for ${WORKER_GRAPH_TOOL_NAME} in this session:`,
+    ...lines,
+    `Use one of these names exactly for a task's profile and for review.profile. Any other name rejects the whole graph before any worker starts, and ${WORKER_GRAPH_TOOL_NAME} cannot create a profile.`,
+    "</worker_graph_profiles>",
   ].join("\n");
 }
 

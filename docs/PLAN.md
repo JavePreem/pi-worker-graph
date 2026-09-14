@@ -157,9 +157,9 @@ Implement:
 - [x] orchestrator guidance for decomposition, bounded overlap, review, validation,
   and repair delegation;
 - [x] bounded graph progress through tool updates.
-- Surface the configured worker profile names to the parent. The tool requires a
-  profile name and nothing enumerates the available ones, so a guessed name
-  rejects the whole graph; see "Known defects" in `docs/NEXT.md`.
+- [x] Surface the configured worker profile names to the parent, carried in the
+      request the enabled mode makes rather than in the tool's static schema
+      (D21).
 
 Acceptance tests:
 

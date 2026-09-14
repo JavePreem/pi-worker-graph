@@ -88,6 +88,14 @@ adapter. Automated tests remain provider-free:
   round limit is reached, with a still-rejected node failing rather than
   publishing work review refused, every round's spend summed into the node's one
   attempt, and the graph left frozen because rounds are not nodes;
+- configured worker profile names carried to the parent in the request while
+  the mode is enabled, prepended by a `context` handler so registration stays
+  static, the transcript keeps no copy, and `/swarm off` drops the block from
+  the next request, read again per request so the names cannot diverge from the
+  configuration the tool validates against, marked read-only only for a profile
+  holding no tool that can change the checkout, and bounded by the
+  configuration parser rather than by shortening a name the model must type
+  exactly;
 - immutable bounded run-scoped coordination events and directed inbox messages,
   in one run-global journal, with cursor-based queries and child-only Pi tools;
 - a run mutation lock that names its holder, so contention between the parent
@@ -158,49 +166,27 @@ length:
   awaited on `emergencyTerminalExit` or `uncaughtCrash`, where the terminal is
   already gone.
 
+The profile-discovery gap that preceded the prerelease is closed (D21): the
+configured names now reach the parent in the request while the mode is enabled,
+so an orchestrated run no longer needs an out-of-band patch naming them. It is
+covered by the automated suites but has not yet been exercised against a live
+provider.
+
 What remains, in order:
 
-1. Close the profile-discovery gap recorded under "Known defects" below. It
-   precedes the prerelease: until it is closed, every orchestrated run needs an
-   out-of-band patch naming the profiles.
-2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
-   and registry workflow.
-3. Run the Phase 8 trial still outstanding: a controlled same-tree exercise with
-   intentional minor overlap, routed across at least two profiles, compared
-   against a sequential run on duration, conflicts, usage, and review findings.
+1. Confirm profile discovery live: a Pi 0.85.1 session in `--mode rpc`, a
+   configuration naming two profiles, and a graph the parent builds without
+   being told the names out of band.
+2. Review, tag, and publish the next npm prerelease through the
+   maintainer-owned Git and registry workflow.
+3. Design the Phase 8 bench before running it, then run it: a controlled
+   same-tree exercise with intentional minor overlap, routed across at least
+   two profiles, compared against a sequential run on duration, conflicts,
+   usage, and review findings. `bench/DESIGN.md` records the
+   `--append-system-prompt` patch as a confound; with the gap closed, the
+   design can drop it.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
-
-## Known defects
-
-### The orchestrator cannot discover profile names
-
-`worker_graph` requires every task to name a worker profile "from the global
-worker-graph configuration" (`src/orchestrator.ts:62`), and a review policy to
-name its reviewer profile the same way (`src/orchestrator.ts:87`). Nothing
-enumerates the configured names for the parent. `/swarm status` reports only
-whether the mode is on and which orchestrator model it applied
-(`src/extension.ts:811`), and the tool description and prompt guidelines are
-static strings fixed at registration.
-
-The configuration is loaded, and the names are therefore in hand, when the tool
-runs (`src/orchestrator.ts:657`) — but by then the model has already guessed.
-Whole-graph validation resolves every profile before any worker starts
-(`src/pi-subprocess.ts:1562`), so a guessed name rejects the entire graph with
-the fixed diagnostic `Worker profile is invalid`
-(`src/execution-failure.ts:20`), which names neither the profile that failed
-nor the ones that exist.
-
-This was observed in the first bench suite, which compensated with a one-line
-`--append-system-prompt` naming the profile. `bench/DESIGN.md` records that
-patch as a confound precisely because it is scaffolding around a real defect.
-
-How the names should reach the parent is a decision that has not been made.
-Building the tool description from the loaded configuration puts them where the
-model reads its schema, but registration and configuration loading are separate
-today: the tool is registered once, and the configuration is loaded per call
-against `ctx.cwd`. Naming them from `/swarm on` and `/swarm status` needs no
-such change but puts them in session text rather than in the schema.
 
 ## Deferred run-store work
 

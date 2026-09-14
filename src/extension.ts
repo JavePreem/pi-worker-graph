@@ -15,6 +15,7 @@ import {
   registerWorkerGraphOrchestratorTool,
   WORKER_GRAPH_TOOL_NAME,
   type WorkerGraphOrchestratorDependencies,
+  workerProfilesContext,
 } from "./orchestrator.js";
 import {
   NODE_OUTPUT_LIMITS,
@@ -26,6 +27,7 @@ import {
 import type {
   PiOrchestratorProfile,
   PiSessionThinkingLevel,
+  PiWorkerProfile,
 } from "./pi-subprocess.js";
 import type { RetainedRun, RunUsage } from "./store.js";
 import { deleteRun, listRetainedRuns, readRunUsage } from "./store.js";
@@ -440,6 +442,14 @@ export default function registerWorkerGraph(
   let thinkingLevelBeforeMode: PiSessionThinkingLevel | undefined;
   /** The profile the mode applied, for `/swarm status`. */
   let appliedOrchestrator: PiOrchestratorProfile | undefined;
+  /**
+   * The most recent worker profiles the mode managed to read — seeded when it
+   * was entered and replaced by every later read that succeeds. Not what the
+   * parent is normally shown, which is read again per request, but what it
+   * falls back to when a read fails, so a configuration caught mid-save costs
+   * the parent neither its profile names nor the last edit it was given.
+   */
+  let lastKnownProfiles: Readonly<Record<string, PiWorkerProfile>> | undefined;
 
   const refuse = (message: string) => ({ ok: false as const, message });
 
@@ -483,13 +493,14 @@ export default function registerWorkerGraph(
 
     let restoredModelFailed = false;
     let orchestrator: PiOrchestratorProfile | undefined;
+    let profiles: Readonly<Record<string, PiWorkerProfile>> = {};
     try {
-      orchestrator = (
-        await loadConfiguration({
-          agentDirectory: resolved.getAgentDirectory(),
-          workingDirectory: ctx.cwd,
-        })
-      ).orchestrator;
+      const configuration = await loadConfiguration({
+        agentDirectory: resolved.getAgentDirectory(),
+        workingDirectory: ctx.cwd,
+      });
+      orchestrator = configuration.orchestrator;
+      profiles = configuration.profiles;
     } catch (error) {
       return refuse(
         error instanceof Error
@@ -522,6 +533,7 @@ export default function registerWorkerGraph(
       modelBeforeMode = undefined;
       thinkingLevelBeforeMode = undefined;
       appliedOrchestrator = undefined;
+      lastKnownProfiles = profiles;
       applyTools();
       return {
         ok: true,
@@ -574,6 +586,7 @@ export default function registerWorkerGraph(
     modelBeforeMode = previousModel;
     thinkingLevelBeforeMode = previousLevel;
     appliedOrchestrator = orchestrator;
+    lastKnownProfiles = profiles;
     return { ok: true };
   };
 
@@ -593,6 +606,7 @@ export default function registerWorkerGraph(
       thinkingLevelBeforeMode = undefined;
     }
     appliedOrchestrator = undefined;
+    lastKnownProfiles = undefined;
     if (toolsBeforeMode !== undefined) {
       pi.setActiveTools([...toolsBeforeMode]);
       toolsBeforeMode = undefined;
@@ -666,6 +680,60 @@ export default function registerWorkerGraph(
       ...(warning === undefined ? {} : { warning }),
     };
   };
+
+  /**
+   * The profiles the next graph will actually be validated against.
+   *
+   * Read again for every request rather than reused from activation. The
+   * orchestration tool loads the configuration per call, so a file edited
+   * while the mode stays enabled would otherwise leave the parent naming
+   * profiles its graph is no longer checked against — the rejection this block
+   * exists to prevent. The two reads can never be one, because the parent
+   * composes a graph before the tool runs; what this removes is a divergence
+   * that would outlive the turn that introduced it.
+   */
+  const currentProfiles = async (
+    ctx: ExtensionContext,
+  ): Promise<Readonly<Record<string, PiWorkerProfile>>> => {
+    try {
+      const configuration = await loadConfiguration({
+        agentDirectory: resolved.getAgentDirectory(),
+        workingDirectory: ctx.cwd,
+      });
+      lastKnownProfiles = configuration.profiles;
+    } catch {
+      // A failed read is not evidence that the profiles changed, so the last
+      // ones read stand. They are replaced by every read that succeeds, or a
+      // single failure would put back names the parent has already moved past.
+    }
+    return lastKnownProfiles ?? {};
+  };
+
+  /**
+   * Carries the configured profile names into every request the mode makes.
+   *
+   * Pi fixes a tool's description and prompt guidelines when it is registered,
+   * before any session names a working directory, so the profile names cannot
+   * reach the model through the schema that demands them. This handler only
+   * ever adds: the transformed list is what Pi sends to the provider, so the
+   * session transcript keeps no copy and `/swarm off` removes the block from
+   * the next request rather than editing the history.
+   *
+   * The block is prepended. Appending it would risk landing between an
+   * assistant message and the tool results that answer it, and a stable
+   * prefix is also the half of the request a provider can cache.
+   */
+  pi.on("context", async (event, ctx) => {
+    if (!enabled) return {};
+    const block = workerProfilesContext(await currentProfiles(ctx));
+    if (block === "") return {};
+    return {
+      messages: [
+        { role: "user" as const, content: block, timestamp: Date.now() },
+        ...event.messages,
+      ],
+    };
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     const restored = await restoreModeState(ctx, true);
