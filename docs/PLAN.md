@@ -70,7 +70,9 @@ Acceptance tests:
 - malformed records fail visibly without hiding valid records;
 - runs cannot be mixed accidentally;
 - deleting a run releases its capacity slot and readmits work;
-- a run an orchestrator holds is never deleted;
+- a run an orchestrator holds is never deleted — which currently also refuses a
+  run whose orchestrator is gone, stranding its slot; see "Known defects" in
+  `docs/NEXT.md`;
 - task IDs cannot escape their run directory;
 - the default state root is outside the target checkout.
 
@@ -174,6 +176,11 @@ Acceptance tests:
 Intra-node review landed in Phase 6 under D20: a reviewed node runs its own
 work-review-repair cycle, and a repair is a fresh attempt rather than a resumed
 child session. What is left here is attempt history and recovery across runs.
+
+Whether it is worth building is itself unsettled — the checkout already carries
+the work an interrupted run completed, so what this phase recovers is the run's
+diagnostic record rather than the run. See "Deferred attempt and recovery work"
+in `docs/NEXT.md`.
 
 - Define attempt and interrupted-run state.
 - Persist child sessions if the selected execution adapter supports resumption.

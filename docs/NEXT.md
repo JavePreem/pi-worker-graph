@@ -176,9 +176,13 @@ properly.
 
 What remains, in order:
 
-1. Review, tag, and publish the next npm prerelease through the
+1. Close the two defects recorded under "Known defects" below. The first
+   strands retained capacity on any hard kill and has no in-package recovery;
+   the second has the package manifest claiming a Pi compatibility range the
+   README disclaims, which matters now that something is published.
+2. Review, tag, and publish the next npm prerelease through the
    maintainer-owned Git and registry workflow.
-2. Finish designing the Phase 8 bench, then start working the queue.
+3. Finish designing the Phase 8 bench, then start working the queue.
    `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
    fixed run, so it fits any budget: cells are enumerated in a fixed order, a
    run executes as many of the next pending ones as asked for, and the store
@@ -192,8 +196,51 @@ What remains, in order:
    its three unverified dataset facts, and the feasibility spike on one
    TypeScript instance that settles them. The harness is the bulk of the work,
    and the accumulating store is the part that makes batching add up.
-3. Keep every automated path provider-free behind the existing fake subprocess
+4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
+
+## Known defects
+
+### A hard-killed orchestrator strands its retained-run slot
+
+The owner record carries `ownerId` and `acquiredAt` and no liveness signal, and
+nothing reads the timestamp (`src/store.ts:1589`). `deleteRun` refuses on the
+mere presence of that record (`src/store.ts:1751`), so a run whose orchestrator
+died without running its release — SIGKILL, a crashed Pi, a lost machine —
+reports `owned` in `/swarm runs` for good (`src/extension.ts:358`) and
+`/swarm delete` will not take it. The only recovery is removing files from the
+state root by hand.
+
+Capacity is structural rather than counted: a fixed set of slot files, so each
+stranded run costs one permanently. At the default `maxRetainedRuns` of 64 that
+is slow; at the 8 a small configuration might set, it is eight crashes to a
+store that admits no new work at all.
+
+The graceful paths are unaffected. `runGraph` releases the hold in a `finally`,
+so an aborted graph, a thrown executor, and a cancelled run all release
+normally. This is specifically the case where the process never runs its own
+cleanup.
+
+The invariant being protected is real and should be kept: two live
+orchestrators must never advance one run. What is missing is the operator's
+ability to assert that one of them is not live. The store already refuses to
+decide on an operator's behalf which diagnostic state to lose — but here the
+operator is asking explicitly and being refused, with no override. The fix is
+an explicit operator act in the same family as `/swarm delete`, either a
+`/swarm release <run-id>` or a force flag on delete, and not an automatic
+reclaim on a timestamp: a stale-looking record and a dead process are not the
+same thing, and only the operator can tell them apart.
+
+### The package claims a Pi compatibility range it disclaims
+
+`package.json` declares `"@earendil-works/pi-coding-agent": "*"` as a peer
+dependency while the README says Pi integration is tested against 0.85.1 and
+compatibility outside it is not guaranteed. A wildcard admits every future
+release, including breaking ones, so the manifest promises what the
+documentation withholds. It mattered less before anything was published.
+
+Narrowing the range to what is actually tested is the fix. Widening it again is
+cheap once a second version has been tested; claiming it now is not.
 
 ## Deferred run-store work
 
@@ -239,6 +286,11 @@ report, so the question stands; it is no longer a dead end.
 
 ## Deferred budget work
 
+**Backlogged deliberately.** Nothing currently needs a ceiling badly enough to
+buy one: a graph is bounded per task by its timeout, and the operator watching
+a run is the enforcement. It moves up the list only when something runs graphs
+unattended.
+
 Usage is now recorded but nothing acts on it. The runtime bounds tasks,
 concurrency, payload, output, context, and per-task runtime; it has no token or
 cost ceiling, so a graph can spend without limit as long as each worker stays
@@ -250,6 +302,26 @@ already settles remaining nodes and returns a result with usage intact. Two
 things to settle first: whether the budget counts tokens or cost — cost is the
 provider's estimate, tokens are the sturdy number — and whether crossing it
 aborts the graph or only refuses to open the next frontier.
+
+## Deferred attempt and recovery work
+
+Phase 7 is the largest slice still unbuilt: attempt history, interrupted-run
+state, and explicit retry and recovery controls.
+
+Its value is worth questioning before it is built, because the obvious reading
+overstates it. The shared checkout is the real state, and the documented
+recovery is already available without any of this: read the checkout with the
+parent's read-only tools and invoke another narrow graph for whatever is left.
+A run interrupted halfway leaves its successful work on disk, not in the store.
+What is actually lost is the run's own diagnostic record — which attempt did
+what, and why it stopped — and whether that is worth a persistence layer is a
+different and much smaller question than "recovery".
+
+Two things would change the answer. A worker session that could be resumed
+rather than restarted would make an attempt worth persisting in its own right,
+and that depends on the adapter rather than on this decision. And a consumer
+that runs graphs unattended and cannot inspect a checkout between them would
+need the store to say what happened; nothing does that yet.
 
 ## Constraints to preserve
 
@@ -270,4 +342,8 @@ node its own work-review-repair cycle, and decides that a repair is a fresh
 attempt rather than a resumed child session. Whether execution also pauses at
 review barriers between frontiers is independent and still open. Broader Pi
 compatibility can be claimed only after testing versions beyond the current
-0.85.1 development pin.
+0.85.1 development pin. CI tests one of each today — Pi 0.85.1 on Node 22
+(`.github/workflows/ci.yml`) — while development happens on Node 24, so the
+runtime the package is written against is the one CI does not cover. A matrix
+over both axes is the cheap half of the compatibility question; the dear half
+is that every Pi API this package binds to is one Pi may change.
