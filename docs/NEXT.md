@@ -60,8 +60,8 @@ adapter. Automated tests remain provider-free:
 - a default state root beneath Pi's agent directory, with checkout-local roots
   rejected by the extension;
 - one static, fully bounded `worker_graph` parent tool;
-- explicit `/swarm on`, `/swarm status`, `/swarm off`, `/swarm usage`, and
-  `--swarm` activation;
+- explicit `/swarm on`, `/swarm status`, `/swarm off`, `/swarm usage`,
+  `/swarm runs`, `/swarm delete`, and `--swarm` activation;
 - an optional configured orchestrator session model and thinking level, applied
   on activation and restored on exit, refused unless the mode knows the
   identifiers that restore it, the model is one Pi can find, and its provider
@@ -117,9 +117,9 @@ pi -e .
 ```
 
 `npm run check` currently runs the adapter, configuration, context, extension,
-graph, orchestrator, report, store, and runner suites. `npm run build` must run
-before `pi -e .`, because `extensions/index.ts` re-exports the compiled entry
-point from `dist/`. The configuration copy is required rather than optional:
+graph, orchestrator, report, store, and runner suites, and the bench RPC-client
+suite under `bench/`. `npm run build` must run before `pi -e .`, because
+`extensions/index.ts` re-exports the compiled entry point from `dist/`. The configuration copy is required rather than optional:
 the extension has no provider or model defaults, and `/swarm runs` and
 `/swarm delete` resolve the state root through the same file, so a missing
 `worker-graph.json` answers both subcommands with a configuration error.
@@ -133,51 +133,74 @@ or externally addressable runs are not implemented yet.
 
 ## Next implementation slice
 
-Items 1, 3 and 5 below were verified live against Pi 0.85.1 driven headlessly in
-`--mode rpc`, with a throwaway agent directory supplied through
-`PI_CODING_AGENT_DIR`. What each run showed is recorded inline.
+Items 1, 3 and 5 of the previous slice were verified live against Pi 0.85.1
+driven headlessly in `--mode rpc`, with a throwaway agent directory supplied
+through `PI_CODING_AGENT_DIR`. They are recorded here in summary rather than at
+length:
 
-1. A provider-backed smoke test ran: two independent workers and a dependent
-   validation node, real Pi subprocesses, succeeded in 22.7s. Each worker
-   changed only its own file, the validation node received both prerequisite
-   reports, run usage summed with nothing unaccounted, and the store kept mode
-   `0700`.
+- a provider-backed smoke test — two independent workers and a dependent
+  validation node, real Pi subprocesses — succeeded in 22.7s. Each worker
+  changed only its own file, the validation node received both prerequisite
+  reports, run usage summed with nothing unaccounted, and the store kept mode
+  `0700`;
+- the `/swarm` command surface behaved as specified: usage text, `status`,
+  `on`/`off`/repeat-`on`, `runs`, `usage <id>`, `delete <id>`, and every
+  bad-argument path. `ctx.cwd` was confirmed as the working directory by
+  pointing a state root inside the checkout and getting the checkout-local
+  refusal;
+- a configured orchestrator profile moved the parent from `gpt-5-mini` to
+  `gpt-5` on `/swarm on` and back on `/swarm off`, against a real provider
+  catalogue and real authentication. The shutdown restore lands: in a persisted
+  session the entries run model change to the orchestrator model, the mode
+  record carrying `modelBeforeMode`, then a model change back at
+  `session_shutdown`. Pi awaits the handler on the graceful path, and RPC mode
+  disposes the runtime host the same way interactive mode does. It is not
+  awaited on `emergencyTerminalExit` or `uncaughtCrash`, where the terminal is
+  already gone.
+
+What remains, in order:
+
+1. Close the profile-discovery gap recorded under "Known defects" below. It
+   precedes the prerelease: until it is closed, every orchestrated run needs an
+   out-of-band patch naming the profiles.
 2. Review, tag, and publish the npm prerelease through the maintainer-owned Git
    and registry workflow.
-3. Verified. The command surface was exercised live — usage text, `status`,
-   `on`/`off`/repeat-`on`, `runs`, `usage <id>`, `delete <id>`, and every
-   bad-argument path — and `ctx.cwd` was confirmed as the working directory by
-   pointing a state root inside the checkout and getting the checkout-local
-   refusal. Superseded detail follows.
-
-   Type `/swarm runs` and `/swarm delete <run-id>` once in a live Pi session.
-   Their state-root resolution has now been exercised against a real agent
-   directory: a real `worker-graph.json` resolved the default
-   `~/.pi/agent/worker-graph` root, and a created run was listed with its slot
-   and then deleted, leaving `runs/slots` empty at mode `0700`. What remains
-   unverified is the command surface itself — argument parsing, the notified
-   text, and `ctx.cwd` as the working directory — because those need the
-   interactive session rather than a direct store call.
+3. Run the Phase 8 trial still outstanding: a controlled same-tree exercise with
+   intentional minor overlap, routed across at least two profiles, compared
+   against a sequential run on duration, conflicts, usage, and review findings.
 4. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
-5. Verified. A configured orchestrator profile moved the parent from
-   `gpt-5-mini` to `gpt-5` on `/swarm on` and back on `/swarm off`, against a
-   real provider catalogue and real authentication. The shutdown restore lands:
-   in a persisted session the entries run model change to the orchestrator
-   model, the mode record carrying `modelBeforeMode`, then a model change back
-   at `session_shutdown` — Pi awaits the handler on the graceful path, and RPC
-   mode disposes the runtime host the same way interactive mode does. Original
-   item follows.
 
-   Exercise the configured orchestrator model once in a live session. Its
-   activation, refusal, and restore paths are covered by fakes; what no test
-   can cover is Pi's own `setModel` against a real provider catalogue and real
-   authentication. Confirm specifically whether the shutdown restore lands:
-   `session_shutdown` awaits an asynchronous model change, and Pi does wait for
-   that handler on both quit paths: `interactive-mode.js` awaits
-   `runtimeHost.dispose()`, which awaits `emitSessionShutdownEvent`, which
-   awaits each handler in turn. It is not awaited on `emergencyTerminalExit`
-   or `uncaughtCrash`, where the terminal is already gone.
+## Known defects
+
+### The orchestrator cannot discover profile names
+
+`worker_graph` requires every task to name a worker profile "from the global
+worker-graph configuration" (`src/orchestrator.ts:62`), and a review policy to
+name its reviewer profile the same way (`src/orchestrator.ts:87`). Nothing
+enumerates the configured names for the parent. `/swarm status` reports only
+whether the mode is on and which orchestrator model it applied
+(`src/extension.ts:811`), and the tool description and prompt guidelines are
+static strings fixed at registration.
+
+The configuration is loaded, and the names are therefore in hand, when the tool
+runs (`src/orchestrator.ts:657`) — but by then the model has already guessed.
+Whole-graph validation resolves every profile before any worker starts
+(`src/pi-subprocess.ts:1562`), so a guessed name rejects the entire graph with
+the fixed diagnostic `Worker profile is invalid`
+(`src/execution-failure.ts:20`), which names neither the profile that failed
+nor the ones that exist.
+
+This was observed in the first bench suite, which compensated with a one-line
+`--append-system-prompt` naming the profile. `bench/DESIGN.md` records that
+patch as a confound precisely because it is scaffolding around a real defect.
+
+How the names should reach the parent is a decision that has not been made.
+Building the tool description from the loaded configuration puts them where the
+model reads its schema, but registration and configuration loading are separate
+today: the tool is registered once, and the configuration is loaded per call
+against `ctx.cwd`. Naming them from `/swarm on` and `/swarm status` needs no
+such change but puts them in session text rather than in the schema.
 
 ## Deferred run-store work
 

@@ -13,10 +13,11 @@ discovered while work is in progress.
 Early implementation. The package currently provides tested graph primitives,
 a versioned structured worker-report contract, canonical byte-bounded
 prerequisite context, an explicit-root filesystem store, a bounded DAG runner,
-a one-shot Pi subprocess adapter, immutable run-scoped coordination events and
-inboxes, and an explicitly activated parent orchestration tool. The parent tool
-is inactive by default; worker children receive only the final-report and
-coordination tools.
+a one-shot Pi subprocess adapter, an optional per-node work-review-repair
+cycle, per-attempt token and cost accounting, immutable run-scoped coordination
+events and inboxes, and an explicitly activated parent orchestration tool. The
+parent tool is inactive by default; worker children receive only the
+final-report and coordination tools.
 
 ## Installation
 
@@ -185,6 +186,27 @@ Neither overflow becomes truncation. An oversized report is rejected so the
 worker can correct and resubmit it, and oversized prerequisite context fails
 the downstream node rather than handing it a partial prerequisite contract.
 
+## Node review
+
+A graph task may carry a `review` policy naming a reviewer profile, a round
+limit of 1 through 4, and optionally the criteria the reviewer must check.
+After the worker reports, a reviewer runs against the same checkout on that
+profile and answers with the same report contract: empty blockers accept,
+non-empty blockers reject and carry the findings. The findings become the
+repair worker's instructions, and the cycle repeats until a reviewer accepts or
+the rounds run out. A node still rejected on its last round fails and blocks
+its dependents, rather than publishing work a reviewer refused.
+
+The cycle lives in the Pi adapter rather than the graph runner, so the graph
+stays frozen: rounds are not nodes, the node keeps one immutable terminal
+output, and the node's existing timeout bounds the whole cycle rather than any
+single round. A repair is a fresh child process carrying the reviewer's
+structured findings, never a resumed session. Both the worker profile and the
+reviewer profile are resolved during whole-graph validation, before any worker
+starts, so an unresolvable reviewer is not discovered by spending a worker
+first. Findings are bounded on count and size, and overflow fails the node
+rather than handing a repair worker half its defects.
+
 ## Pi worker adapter
 
 `createPiSubprocessExecutor()` selects an explicitly named worker profile for
@@ -331,6 +353,13 @@ thinking level, and tool allowlist explicitly:
 }
 ```
 
+Nothing yet tells the orchestrator which profile names this file defines. The
+`worker_graph` schema requires a name from it, and the whole graph is validated
+against the configuration before any worker starts, so a name the parent
+guessed rejects the entire graph with `Worker profile is invalid`. Until the
+extension surfaces the configured names, state them to the parent session
+yourself, and restate them whenever profiles are added or renamed.
+
 Run state defaults to the `worker-graph` subdirectory of Pi's agent directory.
 An optional `stateRoot` may be absolute or relative to the agent directory, but
 the extension rejects the filesystem root and any path that is inside the target
@@ -429,6 +458,13 @@ unaccounted. A task that never ran is reported separately again: it is not a
 gap in the accounting. The live aggregate on the tool result is best-effort by
 contrast — it projects the running figures whether or not they turned out to be
 usable, which is what makes it a superset of what was persisted.
+
+A reviewed node is one attempt however many rounds it ran, so its work,
+review, and repair processes are summed into that attempt: a node that reported
+only its last round would look cheaper than it was. The sum is as complete as
+its least-accounted round. If any round records nothing usable, the node is
+reported as unaccounted rather than as the total of the rounds that did report,
+which would read as a node that cost less than it did.
 
 The runtime bounds tasks, concurrency, payload, output, context, and runtime,
 but does not yet enforce a token or cost ceiling.

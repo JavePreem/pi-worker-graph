@@ -300,7 +300,7 @@ available names, so an orchestrator guesses and every graph is rejected with
 `--append-system-prompt` naming the profile, and the new harness will need the
 same patch. It must stay documented as a confound until the package closes the
 gap, because it is scaffolding around a real defect rather than part of the
-experiment.
+experiment. The defect is recorded under "Known defects" in `docs/NEXT.md`.
 
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.

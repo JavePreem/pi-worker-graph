@@ -157,6 +157,9 @@ Implement:
 - [x] orchestrator guidance for decomposition, bounded overlap, review, validation,
   and repair delegation;
 - [x] bounded graph progress through tool updates.
+- Surface the configured worker profile names to the parent. The tool requires a
+  profile name and nothing enumerates the available ones, so a guessed name
+  rejects the whole graph; see "Known defects" in `docs/NEXT.md`.
 
 Acceptance tests:
 
@@ -167,6 +170,10 @@ Acceptance tests:
 - child sessions do not enter orchestrator mode.
 
 ## Phase 7 — Feedback and recovery
+
+Intra-node review landed in Phase 6 under D20: a reviewed node runs its own
+work-review-repair cycle, and a repair is a fresh attempt rather than a resumed
+child session. What is left here is attempt history and recovery across runs.
 
 - Define attempt and interrupted-run state.
 - Persist child sessions if the selected execution adapter supports resumption.
@@ -182,6 +189,10 @@ Acceptance tests:
 - recovery distinguishes succeeded, failed, blocked, and interrupted nodes.
 
 ## Phase 8 — Package trial and release
+
+The provider-backed smoke test and the live command-surface exercise are done
+and recorded in `docs/NEXT.md`. What is left is the comparative trial and the
+release itself.
 
 - [x] Add versioned installation instructions.
 - Run a controlled same-tree exercise with intentional minor overlap.
