@@ -30,7 +30,12 @@ import type {
   PiWorkerProfile,
 } from "./pi-subprocess.js";
 import type { RetainedRun, RunUsage } from "./store.js";
-import { deleteRun, listRetainedRuns, readRunUsage } from "./store.js";
+import {
+  deleteRun,
+  forceReleaseRunOwnership,
+  listRetainedRuns,
+  readRunUsage,
+} from "./store.js";
 
 const WORKER_ROLE_VARIABLE = "PI_WORKER_GRAPH_ROLE";
 const WORKER_ROLE = "worker";
@@ -56,8 +61,9 @@ const SESSION_THINKING_LEVELS = new Set<PiSessionThinkingLevel>([
   "max",
 ]);
 const SWARM_USAGE =
-  "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>";
+  "Usage: /swarm on|status|off|runs|usage <run-id>|release <run-id>|delete <run-id>";
 const SWARM_DELETE_USAGE = "Usage: /swarm delete <run-id>";
+const SWARM_RELEASE_USAGE = "Usage: /swarm release <run-id>";
 const SWARM_RUN_USAGE_USAGE = "Usage: /swarm usage <run-id>";
 const UNRESTORABLE_TOOLS_MESSAGE =
   "Worker-graph mode not enabled: the active tool set cannot be restored later";
@@ -831,6 +837,24 @@ export default function registerWorkerGraph(
         }
         await runStore(ctx, async (stateRoot) =>
           runUsageText(await readRunUsage(stateRoot, runId)),
+        );
+        return;
+      }
+      if (action === "release") {
+        const [runId] = operands;
+        if (runId === undefined || operands.length !== 1) {
+          ctx.ui.notify(SWARM_RELEASE_USAGE, "warning");
+          return;
+        }
+        // The operator is asserting that the orchestrator holding this run is
+        // gone. Nothing here can check that, which is why it is a separate act
+        // from deletion rather than a flag on it: the hold is given up and the
+        // run's diagnostic state is kept, so a mistaken release costs a second
+        // orchestrator advancing the run rather than the record of what it did.
+        await runStore(ctx, async (stateRoot) =>
+          (await forceReleaseRunOwnership(stateRoot, runId))
+            ? `Released the orchestrator hold on run ${runId}; /swarm delete can now remove it`
+            : `No orchestrator holds run ${runId}`,
         );
         return;
       }

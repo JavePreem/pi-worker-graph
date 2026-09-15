@@ -17,6 +17,7 @@ import {
   acquireRunOwnership,
   createRun,
   deleteRun,
+  forceReleaseRunOwnership,
   listRetainedRuns,
   NODE_OUTPUT_LIMITS,
   normalizeGraph,
@@ -748,6 +749,99 @@ test("refuses to delete a run an orchestrator still holds", async (t) => {
   assert.deepEqual(await readRun(root, manifest.runId), manifest);
 
   await releaseRunOwnership(root, ownership);
+  assert.equal(await deleteRun(root, manifest.runId), true);
+});
+
+test("releases a hold whose orchestrator is gone, on the operator's word", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  // An orchestrator that was killed without running its release leaves this
+  // record behind. Nothing about it says the holder is dead, so only the
+  // operator can say so.
+  const stranded = await acquireRunOwnership(root, manifest.runId);
+  await rejectsWithCode(() => deleteRun(root, manifest.runId), "ownership");
+
+  // A mutation in flight is evidence of the live writer the operator is
+  // claiming is absent, so contention is reported rather than overridden.
+  const mutationLock = join(root, "runs", manifest.runId, "mutation.lock");
+  await writeFile(
+    mutationLock,
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "run-mutation-lock",
+      runId: manifest.runId,
+      taskId: "task",
+    }),
+  );
+  await rejectsWithCode(
+    () => forceReleaseRunOwnership(root, manifest.runId),
+    "locked",
+  );
+  // A kill inside a mutation strands this file too, and then nothing recovers
+  // the run in-package: every path that needs the lock waits it out and fails.
+  // Pinned so the documented defect stays a measured fact rather than a claim.
+  await rejectsWithCode(() => deleteRun(root, manifest.runId), "locked");
+  await rejectsWithCode(
+    () => acquireRunOwnership(root, manifest.runId),
+    "locked",
+  );
+  await rm(mutationLock);
+
+  assert.equal(await forceReleaseRunOwnership(root, manifest.runId), true);
+  // Only the hold is given up: the diagnostic state the run was retained for
+  // survives, and deletion is still a separate operator act.
+  assert.deepEqual(await readRun(root, manifest.runId), manifest);
+  assert.deepEqual(await listRetainedRuns(root), [
+    {
+      runId: manifest.runId,
+      slot: 0,
+      createdAt: manifest.createdAt,
+      owned: false,
+    },
+  ]);
+
+  // The stranded capability names a hold that no longer exists, so it can
+  // neither mutate the run nor release it a second time.
+  await rejectsWithCode(
+    () => writeNodeState(root, manifest.runId, "task", "running", stranded),
+    "ownership",
+  );
+  await releaseRunOwnership(root, stranded);
+
+  // Releasing is idempotent, never invents a run, and readmits ownership.
+  assert.equal(await forceReleaseRunOwnership(root, manifest.runId), false);
+  await rejectsWithCode(
+    () => forceReleaseRunOwnership(root, "not-a-run-id"),
+    "invalid_identifier",
+  );
+  await rejectsWithCode(
+    () =>
+      forceReleaseRunOwnership(root, "00000000-0000-4000-8000-000000000000"),
+    "not_found",
+  );
+  const replacement = await acquireRunOwnership(root, manifest.runId);
+  await releaseRunOwnership(root, replacement);
+  assert.equal(await deleteRun(root, manifest.runId), true);
+});
+
+test("removes an owner record it cannot read", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const manifest = await createRun(
+    root,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  // `deleteRun` treats anything in the owner record's place as an owner, so a
+  // record no caller can validate is one nothing else could ever release.
+  await writeFile(
+    join(root, "runs", manifest.runId, "owner.json"),
+    "{ not json",
+  );
+  await rejectsWithCode(() => deleteRun(root, manifest.runId), "ownership");
+
+  assert.equal(await forceReleaseRunOwnership(root, manifest.runId), true);
   assert.equal(await deleteRun(root, manifest.runId), true);
 });
 

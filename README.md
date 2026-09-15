@@ -106,7 +106,8 @@ parent stays exactly as you started it, with its model coming from Pi's own
 settings or preset.
 
 A valid configuration is required to enable the mode at all, and by `/swarm
-runs` and `/swarm delete`, which resolve the run-store state root through it.
+runs`, `/swarm release`, and `/swarm delete`, which resolve the run-store state
+root through it.
 See [Orchestrator tool](#orchestrator-tool) for `stateRoot`,
 `maxRetainedRuns`, and the activation commands.
 
@@ -395,11 +396,28 @@ tool: deleting a run destroys the diagnostic state it was kept for, so it is an
 operator's act and the model has no way to reach it. Cleanup is by name:
 nothing decides on the operator's behalf which diagnostic state is worth
 losing, so there is no deletion by age or by count. A run an orchestrator holds
-is refused. The directory goes first and the slot second, so an interruption
-strands a slot the store reports as reclaimable rather than leaving a published
-run whose slot is missing: that disagreement stops the store admitting any new
-work at all — rather than letting every waiting creator claim the same
-apparently free capacity — until the two agree again.
+is refused.
+
+That refusal reads the owner record, which carries no liveness signal, so an
+orchestrator killed without running its release — a SIGKILL, a crashed Pi, a
+lost machine — would hold its run and its slot for good. `/swarm release
+<run-id>`, exported as `forceReleaseRunOwnership()`, gives up that hold. It is
+the operator asserting that the holder is gone, because nothing in the store
+can tell a stale-looking record from a live one, and elapsed time is not the
+missing signal. It is a separate act from deletion rather than a flag on it: it
+gives up only the hold and keeps the run, so a mistaken release costs a second
+orchestrator advancing the run rather than the record of what the first one
+did. A mutation in flight refuses the release, since contention is evidence of
+exactly the live writer the operator is claiming is absent. A kill that landed
+inside a mutation is the one case this does not recover: it leaves the lock
+behind as well, and the lock is waited out rather than forced. Removing
+`mutation.lock` from the run's directory in the state root is the recovery.
+
+The directory goes first and the slot second, so an interruption strands a slot
+the store reports as reclaimable rather than leaving a published run whose slot
+is missing: that disagreement stops the store admitting any new work at all —
+rather than letting every waiting creator claim the same apparently free
+capacity — until the two agree again.
 
 Load the package and activate orchestration explicitly:
 
@@ -409,6 +427,7 @@ Load the package and activate orchestration explicitly:
 /swarm off
 /swarm runs
 /swarm usage <run-id>
+/swarm release <run-id>
 /swarm delete <run-id>
 ```
 
@@ -493,9 +512,11 @@ restores, cleans, or pushes.
 
 ## Development
 
-Requires Node.js 22.19 or newer. Pi integration is currently tested against
-`@earendil-works/pi-coding-agent` 0.85.1; the peer dependency follows Pi package
-conventions and compatibility outside the tested version is not yet guaranteed.
+Requires Node.js 22.19 or newer, and is tested on Node.js 22 and 24. Pi
+integration is currently tested against `@earendil-works/pi-coding-agent`
+0.85.1, and the peer dependency declares only that range: compatibility outside
+the tested version is not guaranteed, so the manifest does not claim it. The
+range widens once a further Pi version has been tested.
 
 See [`docs/NEXT.md`](docs/NEXT.md) for current development status,
 [`docs/PLAN.md`](docs/PLAN.md) for the implementation sequence, and

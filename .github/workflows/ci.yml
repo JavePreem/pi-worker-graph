@@ -10,11 +10,17 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # 22 is the lowest version `engines` admits; 24 is what development runs
+    # on. Testing only one leaves the other runtime uncovered.
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run check

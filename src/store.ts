@@ -1881,6 +1881,43 @@ export async function releaseRunOwnership(
   }
 }
 
+/**
+ * Removes the owner record of a run whose orchestrator is gone, and reports
+ * whether one was there to remove.
+ *
+ * Ownership is otherwise released only by the capability the holder was given,
+ * which is correct while that holder is alive and leaves nothing to do when it
+ * was killed without running its release: the record has no liveness signal,
+ * and `deleteRun` refuses on its mere presence, so the run and its capacity
+ * slot are held for good. Elapsed time is not the missing signal — a
+ * stale-looking record and a dead process are not the same thing — so this is
+ * an operator's assertion that the holder is gone, in the same family as
+ * `deleteRun`, and never something the runtime does on its own.
+ *
+ * The mutation lock is taken the way every other ownership change takes it,
+ * and contention is reported rather than overridden: a mutation in flight is
+ * evidence of exactly the live writer the operator is claiming is absent. An
+ * unreadable owner record is removed rather than parsed, because a record this
+ * call cannot validate is one nothing else can release either.
+ */
+export async function forceReleaseRunOwnership(
+  stateRoot: string,
+  runId: string,
+): Promise<boolean> {
+  assertRunId(runId);
+  const path = ownerPath(stateRoot, runId);
+  const releaseMutationLock = await acquireRunMutationLock(stateRoot, runId);
+  try {
+    await rm(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  } finally {
+    await releaseMutationLock();
+  }
+  return true;
+}
+
 export async function readRun(
   stateRoot: string,
   runId: string,

@@ -61,7 +61,8 @@ Implement run-scoped persistence outside the target checkout:
 - [x] bounded reads with explicit malformed and overflow errors;
 - [x] bounded retained-run count with atomic capacity reservation;
 - [x] deliberate artifact publication through the final-report tool;
-- [x] explicit cleanup of a named run with its capacity slot.
+- [x] explicit cleanup of a named run with its capacity slot;
+- [x] an operator release of a hold whose orchestrator is gone.
 
 Acceptance tests:
 
@@ -70,9 +71,8 @@ Acceptance tests:
 - malformed records fail visibly without hiding valid records;
 - runs cannot be mixed accidentally;
 - deleting a run releases its capacity slot and readmits work;
-- a run an orchestrator holds is never deleted — which currently also refuses a
-  run whose orchestrator is gone, stranding its slot; see "Known defects" in
-  `docs/NEXT.md`;
+- a run an orchestrator holds is never deleted, and a hold left by an
+  orchestrator that is gone is given up only on an explicit operator act;
 - task IDs cannot escape their run directory;
 - the default state root is outside the target checkout.
 
@@ -152,7 +152,7 @@ Acceptance tests:
 Implement:
 
 - [x] explicit on, status, and off commands;
-- [x] operator-only run-store listing, usage, and deletion subcommands;
+- [x] operator-only run-store listing, usage, release, and deletion subcommands;
 - [x] an opt-in startup flag;
 - [x] session setting snapshot and restoration, covering the active tools and an
       optionally configured parent model and thinking level;

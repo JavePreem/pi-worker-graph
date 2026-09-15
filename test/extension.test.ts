@@ -770,6 +770,51 @@ test("reports and deletes retained run state from the swarm command", async (t) 
   );
 });
 
+test("releases a stranded run hold from the swarm command", async (t) => {
+  const session = await storeSession(t);
+  const stateRoot = session.stateRoot;
+  const manifest = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "task" }] }),
+  );
+  // The hold an orchestrator killed without releasing. Only an operator can
+  // assert that the holder is gone, so only a command can give it up.
+  await acquireRunOwnership(stateRoot, manifest.runId);
+
+  await session.swarm(`release ${manifest.runId}`);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: `Released the orchestrator hold on run ${manifest.runId}; /swarm delete can now remove it`,
+    type: "info",
+  });
+  await session.swarm("runs");
+  assert.ok((session.notifications.at(-1)?.message ?? "").includes("free"));
+
+  // Releasing only gives up the hold; the run is still deleted by name.
+  await session.swarm(`release ${manifest.runId}`);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: `No orchestrator holds run ${manifest.runId}`,
+    type: "info",
+  });
+  await session.swarm(`delete ${manifest.runId}`);
+  assert.deepEqual(session.notifications.at(-1), {
+    message: `Deleted run ${manifest.runId} and released its capacity`,
+    type: "info",
+  });
+
+  await session.swarm("release");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm release <run-id>",
+    type: "warning",
+  });
+  await session.swarm("release one two");
+  assert.deepEqual(session.notifications.at(-1), {
+    message: "Usage: /swarm release <run-id>",
+    type: "warning",
+  });
+  await session.swarm("release not-a-run-id");
+  assert.equal(session.notifications.at(-1)?.type, "error");
+});
+
 test("refuses swarm deletion of an owned run and reports misuse", async (t) => {
   const session = await storeSession(t);
   const stateRoot = session.stateRoot;
@@ -794,7 +839,8 @@ test("refuses swarm deletion of an owned run and reports misuse", async (t) => {
   assert.equal(session.notifications.at(-1)?.type, "error");
   await session.swarm("nonsense");
   assert.deepEqual(session.notifications.at(-1), {
-    message: "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>",
+    message:
+      "Usage: /swarm on|status|off|runs|usage <run-id>|release <run-id>|delete <run-id>",
     type: "warning",
   });
 });
@@ -819,7 +865,8 @@ test("answers a misused run-store subcommand before touching the store", async (
 
   await session.swarm("runs extra");
   assert.deepEqual(session.notifications.at(-1), {
-    message: "Usage: /swarm on|status|off|runs|usage <run-id>|delete <run-id>",
+    message:
+      "Usage: /swarm on|status|off|runs|usage <run-id>|release <run-id>|delete <run-id>",
     type: "warning",
   });
   await session.swarm("delete one two");

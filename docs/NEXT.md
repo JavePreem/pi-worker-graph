@@ -82,6 +82,11 @@ adapter. Automated tests remain provider-free:
   listing of everything holding capacity, and deletion of a named run with its
   slot, refused while an orchestrator holds the run and ordered so an
   interruption can only strand a slot;
+- an operator release of a hold whose orchestrator is gone, through `/swarm
+  release`: the hold is given up and the run kept, an owner record no caller
+  could validate is removed rather than parsed, a mutation in flight refuses
+  the release as evidence of a live writer, and nothing reclaims a hold on
+  elapsed time;
 - an optional per-node work-review-repair cycle: a reviewer profile judges the
   worker's result against the assignment, its blockers become the repair
   worker's instructions, and the cycle repeats until a reviewer accepts or the
@@ -176,13 +181,9 @@ properly.
 
 What remains, in order:
 
-1. Close the two defects recorded under "Known defects" below. The first
-   strands retained capacity on any hard kill and has no in-package recovery;
-   the second has the package manifest claiming a Pi compatibility range the
-   README disclaims, which matters now that something is published.
-2. Review, tag, and publish the next npm prerelease through the
+1. Review, tag, and publish the next npm prerelease through the
    maintainer-owned Git and registry workflow.
-3. Finish designing the Phase 8 bench, then start working the queue.
+2. Finish designing the Phase 8 bench, then start working the queue.
    `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
    fixed run, so it fits any budget: cells are enumerated in a fixed order, a
    run executes as many of the next pending ones as asked for, and the store
@@ -196,51 +197,38 @@ What remains, in order:
    its three unverified dataset facts, and the feasibility spike on one
    TypeScript instance that settles them. The harness is the bulk of the work,
    and the accumulating store is the part that makes batching add up.
-4. Keep every automated path provider-free behind the existing fake subprocess
+3. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
 ## Known defects
 
-### A hard-killed orchestrator strands its retained-run slot
+### A kill inside a mutation strands the run's mutation lock
 
-The owner record carries `ownerId` and `acquiredAt` and no liveness signal, and
-nothing reads the timestamp (`src/store.ts:1589`). `deleteRun` refuses on the
-mere presence of that record (`src/store.ts:1751`), so a run whose orchestrator
-died without running its release — SIGKILL, a crashed Pi, a lost machine —
-reports `owned` in `/swarm runs` for good (`src/extension.ts:358`) and
-`/swarm delete` will not take it. The only recovery is removing files from the
-state root by hand.
+`/swarm release` closes the hard-kill case for the owner record (D22), but the
+lock is the other thing a kill can leave behind, and it is deliberately not
+forced. A process killed while holding the run mutation lock leaves the file in
+place with no holder, and every path that needs the lock then waits it out and
+fails `locked`: the release, `deleteRun`, and a fresh `acquireRunOwnership`.
+Verified against the built package — all three report "has a mutation in
+flight". The run and its capacity slot are held until `mutation.lock` is
+removed from the run directory by hand.
 
-Capacity is structural rather than counted: a fixed set of slot files, so each
-stranded run costs one permanently. At the default `maxRetainedRuns` of 64 that
-is slow; at the 8 a small configuration might set, it is eight crashes to a
-store that admits no new work at all.
+`recoverRunMutationLock` is not a way out. It takes an ownership capability,
+and after a hard kill nobody holds one and nobody can acquire one.
 
-The graceful paths are unaffected. `runGraph` releases the hold in a `finally`,
-so an aborted graph, a thrown executor, and a cancelled run all release
-normally. This is specifically the case where the process never runs its own
-cleanup.
+It is recorded rather than fixed because the exposure is small and the fix is
+not. The lock is held across one file write, where an owner record is held
+across a whole run, so the window is orders of magnitude narrower than the one
+D22 closed. Forcing it would give up the lock's stated contract — waited out
+rather than resolved by force, recovered only by a holder shown to have
+finished — which the deferred run-store work below depends on, and would race:
+the supposed holder's release removes the file by path, so it would take a lock
+acquired after it.
 
-The invariant being protected is real and should be kept: two live
-orchestrators must never advance one run. What is missing is the operator's
-ability to assert that one of them is not live. The store already refuses to
-decide on an operator's behalf which diagnostic state to lose — but here the
-operator is asking explicitly and being refused, with no override. The fix is
-an explicit operator act in the same family as `/swarm delete`, either a
-`/swarm release <run-id>` or a force flag on delete, and not an automatic
-reclaim on a timestamp: a stale-looking record and a dead process are not the
-same thing, and only the operator can tell them apart.
-
-### The package claims a Pi compatibility range it disclaims
-
-`package.json` declares `"@earendil-works/pi-coding-agent": "*"` as a peer
-dependency while the README says Pi integration is tested against 0.85.1 and
-compatibility outside it is not guaranteed. A wildcard admits every future
-release, including breaking ones, so the manifest promises what the
-documentation withholds. It mattered less before anything was published.
-
-Narrowing the range to what is actually tested is the fix. Widening it again is
-cheap once a second version has been tested; claiming it now is not.
+The fix, when something needs it, is the same shape as D22: an operator act
+that names what it is giving up, not a timeout. It should wait the lock out
+first, so an ordinary in-flight mutation is never interrupted, and it has to
+solve the race before it is worth having.
 
 ## Deferred run-store work
 
@@ -342,8 +330,10 @@ node its own work-review-repair cycle, and decides that a repair is a fresh
 attempt rather than a resumed child session. Whether execution also pauses at
 review barriers between frontiers is independent and still open. Broader Pi
 compatibility can be claimed only after testing versions beyond the current
-0.85.1 development pin. CI tests one of each today — Pi 0.85.1 on Node 22
-(`.github/workflows/ci.yml`) — while development happens on Node 24, so the
-runtime the package is written against is the one CI does not cover. A matrix
-over both axes is the cheap half of the compatibility question; the dear half
-is that every Pi API this package binds to is one Pi may change.
+0.85.1 development pin, and the peer range in `package.json` now declares only
+that pin rather than claiming what the README withholds. CI runs the Node axis
+of the question — 22 and 24, the lowest version `engines` admits and the one
+development runs on (`.github/workflows/ci.yml`). The Pi axis is untested and
+is the dear half: every Pi API this package binds to is one Pi may change, so
+widening the peer range is a decision to take after a second version has
+actually been run.

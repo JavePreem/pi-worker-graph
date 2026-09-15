@@ -101,13 +101,17 @@ process-tree cancellation boundary and keeps worker failures isolated from the
 orchestrator. SDK sessions remain a possible post-MVP optimization, not a second
 MVP transport.
 
-### D14 — Pi compatibility follows package peer conventions
+### D14 — The peer range claims only the tested Pi version
 
 Pi-facing code is currently tested against `@earendil-works/pi-coding-agent`
-0.85.1. The package declares Pi's extension-provided imports as `"*"` peers, as
-required by Pi package conventions, while pinning the tested versions in
-development dependencies. Compatibility outside the tested version is not
-claimed until a broader matrix exists.
+0.85.1, and the peer range is `~0.85.1`, with the tested versions pinned in
+development dependencies. The range was `"*"` while nothing was published,
+following the loosest reading of Pi package conventions. A wildcard admits
+every future release including breaking ones, so it had the manifest promising
+what the README withholds; a published artifact makes that promise to people
+who never read the README. Widening the range is cheap once a second Pi version
+has been run, and claiming it before then is the thing that cannot be taken
+back.
 
 ### D15 — One explicitly activated parent graph tool
 
@@ -310,6 +314,53 @@ models, one thinking level from a fixed set, and tools from a fixed allowlist,
 which bounds the rendered block by construction. The same parser is why the
 block needs no escaping and carries no untrusted-data label: no configured
 value can contain `<` or a line break, and none of it is worker-authored.
+
+## D22. A hold left by a dead orchestrator is given up on the operator's word
+
+The owner record carries no liveness signal, and `deleteRun` refuses on its mere
+presence (D17), so an orchestrator killed without running its release — a
+SIGKILL, a crashed Pi, a lost machine — held its run and its capacity slot for
+good. Capacity is structural (D16), so each such run cost one slot permanently;
+at a `maxRetainedRuns` of 8 it is eight crashes to a store that admits no work.
+The only recovery was removing files from the state root by hand.
+
+The invariant is kept: two live orchestrators must never advance one run, and
+nothing reclaims a hold on elapsed time. A stale-looking record and a dead
+process are not the same thing, and D16 already refuses that guess for a
+capacity slot. What was missing was the operator's ability to assert that the
+holder is not live — the one party who can tell them apart was being refused
+with no override.
+
+`/swarm release <run-id>` is that assertion, in the same family as `/swarm
+delete` (D17): an operator command rather than a parent tool, because an
+orchestration request must not be able to take a hold away from another
+orchestrator.
+
+It is a separate act rather than a force flag on deletion. The two failures
+differ in what a mistake costs. A mistaken release lets a second orchestrator
+advance a run the first is still writing; a mistaken force-delete also destroys
+the diagnostic record of what either of them did. Keeping them apart means the
+operator who only needs the slot back never has to reach for the one that
+discards state, and `/swarm delete`'s refusal stays exactly as strict as it was.
+
+An owner record the store cannot validate is removed rather than parsed: D17
+has `deleteRun` treat anything in that record's place as an owner, so a record
+no caller can read is one nothing else could ever release.
+
+A mutation in flight refuses the release rather than overriding it. Contention
+on the run mutation lock names a live writer, which is precisely what the
+operator is claiming is absent, and the lock's own contract is that it is
+waited out rather than forced and recovered only by a holder shown to have
+finished.
+
+That leaves one case unrecovered, deliberately: a kill that lands inside a
+mutation strands the lock too, and then the release, the deletion, and a fresh
+acquisition all wait it out and fail. Forcing the lock would buy that case at
+the price of the contract above, and of a race — the supposed holder's own
+release removes the file by path, so it would take a lock acquired after it.
+The exposure is also not the size of the one this decision closes: a hold is
+held for a whole run, a mutation lock for one file write. See "Known defects"
+in `docs/NEXT.md`.
 
 ## Open decisions
 

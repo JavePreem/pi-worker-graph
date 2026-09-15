@@ -89,6 +89,7 @@ export {
   acquireRunOwnership,
   createRun,
   deleteRun,
+  forceReleaseRunOwnership,
   listRetainedRuns,
   publishNodeOutput,
   publishRunEvent,
