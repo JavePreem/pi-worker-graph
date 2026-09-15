@@ -1275,6 +1275,13 @@ function reviewFindings(report: NodeOutput): readonly string[] | undefined {
   return blockers.length === 0 ? undefined : blockers;
 }
 
+/**
+ * The shared worker contract tells a worker doing work to preserve concurrent
+ * changes; it says nothing about reading one. A reviewer pointed at the whole
+ * tree attributes every diff to the worker under review and rejects correct
+ * work — measured, not predicted. Reverting is called out separately because
+ * the repair round would carry out a revert the worker contract forbids.
+ */
 function reviewPayload(
   payload: PiWorkerTaskPayload,
   policy: PiReviewPolicy,
@@ -1295,6 +1302,8 @@ function reviewPayload(
         : ["", "ADDITIONAL REVIEW CRITERIA", ...policy.criteria]),
       "",
       "Inspect the checkout yourself and judge whether the work actually meets that assignment.",
+      "Other workers are changing this same checkout while you review. Judge the work against its assignment, not against the state of the whole tree: a change you did not expect is as likely to be theirs, so a modified file outside this assignment is not evidence that this worker touched it.",
+      "Never raise another worker's change as a defect and never ask for one to be reverted. Their work is not under review here, and undoing it is forbidden.",
       "Do not change any file: you are reviewing, not fixing.",
       "Report every defect you find as a separate blocker, each one a specific, actionable instruction to whoever repairs it.",
       "If the work meets the assignment, report no blockers at all. Do not invent defects to look thorough, and do not raise style preferences the assignment never asked for.",

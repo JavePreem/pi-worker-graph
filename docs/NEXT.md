@@ -87,6 +87,9 @@ adapter. Automated tests remain provider-free:
   could validate is removed rather than parsed, a mutation in flight refuses
   the release as evidence of a live writer, and nothing reclaims a hold on
   elapsed time;
+- a reviewer told how to read a checkout other workers are changing: a modified
+  file outside the assignment is not evidence about the work under review, and
+  another worker's change is never a finding and never to be reverted;
 - an optional per-node work-review-repair cycle: a reviewer profile judges the
   worker's result against the assignment, its blockers become the repair
   worker's instructions, and the cycle repeats until a reviewer accepts or the
@@ -179,11 +182,29 @@ one-off live session: the bench exercises the same path under measurement, and
 a hand-run session would only tell us what the bench is built to tell us
 properly.
 
+`0.1.0-dev.1` is published and tagged, carrying the `/swarm release` operator
+act, the narrowed `~0.85.1` peer range, and a CI matrix green on Node 22 and
+24.
+
+It was smoke-tested as a user gets it: installed from npm into an empty agent
+directory, then a real three-node graph over three Pi subprocesses through
+`bench/rpc-client.mjs`. Neither earlier check covered that combination — real
+workers had only run from the checkout, and the artifact had only been loaded
+offline. Everything mechanical held, down to the store at `0700` outside the
+checkout with no git operation run.
+
+The graph failed, and that was the trial's value. Both workers made exactly
+their assigned edit; each node's reviewer then saw the other worker's file
+modified and rejected on the criterion that no other file be changed, with
+blockers asking for the sibling's work to be reverted. A reviewer is a worker
+child and already carried the shared concurrency contract, but that text is
+written for a worker doing work, not one reading a diff. The attribution rule
+is now stated in `reviewPayload` (`src/pi-subprocess.ts`).
+Re-run after the fix: all three nodes succeeded, `unaccounted` empty.
+
 What remains, in order:
 
-1. Review, tag, and publish the next npm prerelease through the
-   maintainer-owned Git and registry workflow.
-2. Finish designing the Phase 8 bench, then start working the queue.
+1. Finish designing the Phase 8 bench, then start working the queue.
    `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
    fixed run, so it fits any budget: cells are enumerated in a fixed order, a
    run executes as many of the next pending ones as asked for, and the store
@@ -197,7 +218,7 @@ What remains, in order:
    its three unverified dataset facts, and the feasibility spike on one
    TypeScript instance that settles them. The harness is the bulk of the work,
    and the accumulating store is the part that makes batching add up.
-3. Keep every automated path provider-free behind the existing fake subprocess
+2. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
 ## Known defects

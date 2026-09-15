@@ -1396,6 +1396,20 @@ test("an accepted first review publishes the worker report, not the reviewer's",
   assert.match(prompts[1] as string, /Do not change any file/u);
 });
 
+test("a reviewer is told a sibling's edits are not the work under review", async () => {
+  const { result, prompts } = await runFakeCycle(
+    [nodeOutput("Implemented the change"), nodeOutput("Clean")],
+    reviewedPayload(2),
+  );
+  await result;
+  const review = prompts[1] as string;
+  // Without this a reviewer reads the whole tree as one worker's doing and
+  // rejects correct work for a file that worker never touched.
+  assert.match(review, /Other workers are changing this same checkout/u);
+  assert.match(review, /not evidence that this worker touched it/u);
+  assert.match(review, /never ask for one to be reverted/u);
+});
+
 test("a worker is never told that a reviewer will check its work", async () => {
   const { result, prompts } = await runFakeCycle(
     [nodeOutput("Implemented the change"), nodeOutput("Clean")],
