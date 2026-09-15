@@ -21,9 +21,18 @@ final-report and coordination tools.
 
 ## Installation
 
-Version `0.1.0` has not been published yet. For the currently supported
-persistent install, use a local checkout, build its ignored `dist/` output, and
-register that checkout with Pi:
+Everything published so far is a prerelease; `0.1.0` itself is not out. Install
+the current one from npm:
+
+```bash
+pi install npm:pi-worker-graph@0.1.0-dev.1
+```
+
+Name the exact version. A prerelease promises nothing between builds, and the
+`dev` and `latest` tags both move as soon as the next one is published.
+
+To work against a checkout instead, build its ignored `dist/` output and
+register the checkout with Pi:
 
 ```bash
 npm install
@@ -42,12 +51,6 @@ option instead of `pi install`:
 
 ```bash
 pi -e /absolute/path/to/pi-worker-graph
-```
-
-After publication, the exact npm installation command will be:
-
-```bash
-pi install npm:pi-worker-graph@0.1.0
 ```
 
 ## Configuration
