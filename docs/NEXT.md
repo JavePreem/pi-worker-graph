@@ -182,9 +182,9 @@ one-off live session: the bench exercises the same path under measurement, and
 a hand-run session would only tell us what the bench is built to tell us
 properly.
 
-`0.1.0-dev.1` is published and tagged, carrying the `/swarm release` operator
-act, the narrowed `~0.85.1` peer range, and a CI matrix green on Node 22 and
-24.
+`0.1.0-dev.2` is published and tagged, carrying the reviewer attribution fix,
+the `/swarm release` operator act, the narrowed `~0.85.1` peer range, and a CI
+matrix green on Node 22 and 24.
 
 It was smoke-tested as a user gets it: installed from npm into an empty agent
 directory, then a real three-node graph over three Pi subprocesses through

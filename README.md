@@ -25,11 +25,14 @@ Everything published so far is a prerelease; `0.1.0` itself is not out. Install
 the current one from npm:
 
 ```bash
-pi install npm:pi-worker-graph@0.1.0-dev.1
+pi install npm:pi-worker-graph
 ```
 
-Name the exact version. A prerelease promises nothing between builds, and the
-`dev` and `latest` tags both move as soon as the next one is published.
+That resolves the newest prerelease. Pin the exact version it gave you once you
+have tested it: a prerelease promises nothing between builds, and both the
+`dev` and `latest` tags move as soon as the next one is published. No version
+is named here on purpose — this file ships inside the package, so a pinned one
+would name the previous release from the moment it is published.
 
 To work against a checkout instead, build its ignored `dist/` output and
 register the checkout with Pi:
