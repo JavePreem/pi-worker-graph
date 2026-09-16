@@ -191,8 +191,10 @@ insufficient complexity or limited cross-file scope were filtered out during
 curation. That is the regime the first suite failed to reach, and the only one
 where delegation has anything to amortize against.
 
-**It grades mechanically.** Each instance carries `image_name`, `eval_script`,
-`test_patch` and a gold `patch`. The primary gate needs no judge.
+**It grades mechanically.** Each instance carries `image_name`, `test_patch`
+and a gold `patch`, so the primary gate needs no judge. It does *not* carry an
+`eval_script`, whatever the dataset card says, and the fail-to-pass set has to
+be derived per repo -- see **Measured**.
 
 **The best evaluated model resolves 41.2%.** This matters more than it appears.
 A suite everything passes cannot show a quality difference, and neither can one
@@ -201,9 +203,11 @@ nothing passes. Around 40% is where a pass-rate comparison has resolution.
 **The gold patch enables reference-anchored judging**, which is substantially
 more reliable than open-ended scoring. See below.
 
-Instance fields, per the dataset card: `instance_id`, `repo`, `language`,
+Instance fields, as actually served: `instance_id`, `repo`, `language`,
 `problem_statement`, `hints_text`, `base_commit`, `environment_setup_commit`,
-`patch`, `test_patch`, `image_name`, `working_dir`, `created_at`, `eval_script`.
+`patch`, `test_patch`, `image_name`, `working_dir`, `created_at`,
+`issue_numbers`, `pull_number`. Fourteen fields, and no `eval_script`; the
+dataset card lists one.
 
 ### Top-up pools
 
@@ -225,9 +229,17 @@ Two tiers. The judge never decides whether the work succeeded.
 
 ### Tier 1 — mechanical, the gate
 
-The instance's own `eval_script` passes, and nothing that passed before
-regresses. Binary. This is the resolve rate and the denominator for cost per
-resolved instance.
+Every target in the instance's derived fail-to-pass set passes, and nothing
+that passed before regresses. Binary. This is the resolve rate and the
+denominator for cost per resolved instance.
+
+The set is derived rather than read: the dataset ships no `eval_script` and no
+fail-to-pass list, so `bench/validate-instances.py` climbs from each
+`test_patch` path to the nearest Bazel test rule, runs every rule before and
+after the gold patch, and keeps the ones that flip. An instance yielding none
+is not gradeable and is dropped before the queue is enumerated, so grading at
+trial time reads a recorded target set rather than deriving one. See
+**Measured**.
 
 The agent must never see the tests. `test_patch` ships separately from the
 checkout and is applied only at grade time, so a run cannot be gamed by editing
@@ -634,32 +646,44 @@ Principles that carry over, to be rebuilt around containers rather than copied:
 - per-trial isolation: throwaway agent directory, credentials copied from the
   real one, a fresh session each time.
 
-Has to be built:
+Built, and covered by `npm run test:bench` against fakes:
 
-- **Container setup.** ProMax needs a per-instance Docker environment
-  (`image_name`, `environment_setup_commit`, `working_dir`). `gitInit` on a
-  temporary folder is replaced by starting the instance's container and running
-  the agent against that checkout. This is the bulk of the work.
-- **`eval_script` grading**, applying `test_patch` only after the agent has
-  finished.
+- **Container setup** (`bench/container.mjs`). A per-instance Docker
+  environment, capped in memory and CPUs because Bazel will otherwise take the
+  whole host. The agent runs *inside* the container rather than on the host:
+  the checkout only exists in the image, and `pi-worker-graph` spawns its
+  workers in the target checkout, so a worker that cannot reach the checkout is
+  not the package under test. Pi and the package are installed once into a host
+  directory and copied in (`bench/toolchain.mjs`), which keeps a registry fetch
+  out of the measurement and a 14 GB image layer off the disk budget.
+- **Grading** (`bench/grade.mjs`). `test_patch` is applied only after the agent
+  has finished. The target set is read from `validate-results.json` rather than
+  derived per trial, and every target's outcome comes from Bazel's exit code
+  rather than from its wording -- exit 4, no test ran, is a failure, and a text
+  scraper reads it as success.
+- **The queue, the store, and the commands over them** (`bench/queue.mjs`,
+  `bench/store.mjs`, `bench/bench.mjs`): `init` draws and records the
+  permutation once and refuses to redraw it, `run <count>` executes the next
+  pending cells under a per-cell spend cap, `status` reports spend and
+  preconditions and provably not the quality gap, and `analyse` has to be asked
+  for.
+- **Preconditions** (`bench/preconditions.mjs`), evaluated from the tool's own
+  arguments. Arguments the stream did not carry are unknown, never satisfied.
+- **Paired analysis and spend split** (`bench/analyse.mjs`): exact McNemar over
+  discordant pairs, cost per resolved instance, and the worker share of a
+  `graph` cell's spend, reported as unreadable rather than as zero when the
+  tool's accounting cannot be parsed.
+
+Still to build:
+
 - **The Tier-2 judge**, including order swapping, blinding, and identical-pair
-  controls.
-- **Paired analysis**: McNemar over discordant pairs, and cost per resolved
-  instance.
-- **The queue, the store, and the three commands over them.** A fixed cell
-  permutation recorded before the first run; `run <count>` executing the next
-  pending cells under a per-cell spend cap and writing one append-only
-  version-stamped record each, classed resolved, not resolved, or not
-  attempted; `status` reporting spend, projected spend, complete tasks and
-  preconditions but not the quality gap; and `analyse` reading the whole store
-  on demand. This is what makes three cells now and nine later add up rather
-  than becoming disconnected results, and what lets execution stop anywhere.
-  See **Budget case**.
-- **Spend-split reporting.** The share of a `graph` run's tokens spent on the
-  parent, the reviewer, and the workers. It is the first measurement the queue
-  produces and the one that caps every cost claim after it; `worker_graph`
-  already reports worker usage separately, so this is arithmetic over records
-  the run already has rather than new instrumentation.
+  controls. It is only worth building once the spend split says a saving is
+  there to defend.
+- **The live proof of the grading path.** `bench/grade-selftest.mjs` runs a
+  cell with the gold patch standing in for the agent and expects every
+  gradeable instance to grade as resolved. It costs no provider spend, and a
+  gold patch that does not grade as resolved is a harness fault rather than a
+  model one.
 
 ## Threats to validity
 
@@ -697,6 +721,12 @@ the reviewer runs `sol` on read-only tools, so the nudge and the arm agree; had
 the reviewer been given a writable profile, the block would not have endorsed
 it and the disagreement would have belonged in the disclosure.
 
+**The TypeScript subset is one repository.** 25 of 28 instances are
+`angular/angular`. A result from the pilot is a statement about Angular, not
+about TypeScript, and the grading harness that reads Bazel targets will not
+transfer to the 3 ant-design instances without separate work. Either say so
+plainly in the result or widen the subset before drawing anything general.
+
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.
 
@@ -730,19 +760,100 @@ is uninformative and must be reported as such rather than quietly used anyway.
    and it is the last remaining place where the harness could put words in the
    orchestrator's mouth.
 
-## Unverified
+## Measured
 
-Stated so nobody builds on them as though they were checked:
+Spike run 2026-09-15 on `angular__angular-64903`, one instance, no agent and no
+provider spend. It replaces the three facts that were unverified here, and
+turned up three more.
 
-- how `eval_script` reports pass and fail, and whether ProMax carries
-  fail-to-pass / pass-to-pass semantics — the dataset card does not document
-  those fields;
-- whether the TypeScript instances' containers are npm-shaped and pull cleanly;
-- the actual per-instance runtime and container size, which set the cost and
-  wall-clock budget for the whole run.
+- **There is no `eval_script`, and no fail-to-pass / pass-to-pass lists.** The
+  dataset has 14 fields and carries none of them, and no grading script is baked
+  into the image either. Tier-1 grading has to be derived per repo: map the
+  `test_patch` paths to a build target, run it, read the result. The design
+  assumed this field existed; it does not.
+- **Containers pull cleanly and need no setup.** 2.56 GB for angular
+  (1.78–1.85 GB for ant-design), 234s to pull, with `node_modules` (1.8 GB) and
+  a warm Bazel cache already baked in, on Node 22 and pnpm 10. No install step.
+- **Runtime is not the bottleneck.** 23s for the pre-patch run and 3s for the
+  post-patch one. The one-time image pull dominates a cell, not the test.
+- **The TypeScript subset is effectively one repository:** 25 of 28 instances
+  are `angular/angular` and 3 are `ant-design/ant-design`. The pilot is an
+  Angular benchmark with a rounding error attached. See **Threats to validity**.
+- **The pre-state fails to compile rather than failing a test.** The gold
+  patch's API does not exist yet, so `test_patch` is a TypeScript error, and
+  Bazel reports `Executed 0 out of 1 test: 1 fails to build`. A grader keying on
+  test counts alone cannot tell that from a cache hit; key on the exit code and
+  the `Executed N out of M` line together.
+- **Bazel caches test results.** A re-run without `--nocache_test_results`
+  reports `(cached) PASSED` and `Executed 0 out of 1 test`. Grading must pass
+  that flag or it will score a stale result as a fresh pass.
 
-A feasibility spike on a single TypeScript instance settles all three and should
-precede any harness work.
+Then run on five instances to see whether the grading generalises. **Four of
+five validate.** The derivation is: changed test file → climb to the nearest
+`BUILD.bazel` that declares a test rule → run each rule. The oracle is per
+target, not aggregated — run each before the gold patch and after, and keep the
+ones that flip fail→pass. That set is exactly what the missing fail-to-pass
+lists would have given us.
+
+It has to be per target. On `c_1d3b914` the derivation yields six targets, three
+of which pass before the patch as well as after; only the three `symbol_test`s
+flip. An aggregated pass/fail would have scored the instance on tests the patch
+never touched.
+
+The fifth, `c_4a3d39c`, patches a schematics test helper. Nothing between it and
+`packages/core` declares a test rule, so the climb overshoots and grabs five
+unrelated targets that fail both before and after. It yields no fail-to-pass set
+and is dropped. That is the design working: validation costs no provider spend,
+so an instance the harness cannot grade is filtered before it costs anything.
+The number that matters is the yield, and two of the five were picked because
+their patches looked awkward, so 80% is a floor rather than an estimate.
+
+Grading runtime once the image is local: 9s to 112s per instance.
+
+Swept across the Angular subset as far as the host allowed: **19 of 25
+validated, 17 with a fail-to-pass set — 89% yield.** The two without are
+`c_4a3d39c` and `c_7118dac`, both patching test helpers the climb cannot
+resolve to a test rule. At that rate roughly 22 of the 25 Angular instances are
+gradeable, against the 28 the statistical design assumes; size the pilot on 22,
+not 28, until the last 6 are checked.
+
+The grading path is proven end to end on one instance:
+`bench/grade-selftest.mjs` ran `angular__angular-64903` with the gold patch
+standing in for the agent and graded it **resolved in 327s**, applying
+`test_patch` afterwards and reading Bazel's exit code. It cost no provider
+spend. The rest of the gradeable set is unchecked.
+
+The remaining 6 were not attempted: the sweep outran the development machine.
+Budget disk as well as tokens — an image is 2.5 GB compressed and ~14 GB
+unpacked, so a cell holds that much while it runs, and `BENCH_RMI=1` drops each
+image after its instance. Results are written per instance, so a resumed run
+only repeats what it has not done.
+
+## Running it
+
+```bash
+# 1. Derive the fail-to-pass targets the dataset does not ship. Resumable, and
+#    on a small host it has to be: an image is ~14 GB unpacked.
+BENCH_RMI=1 python3 bench/validate-instances.py            # or name instances
+
+# 2. Prove the grading path with no provider spend: the gold patch stands in
+#    for the agent and must grade as resolved.
+BENCH_RMI=1 node bench/grade-selftest.mjs
+
+# 3. Draw the task order, once. Refused while instances are still unvalidated.
+node bench/bench.mjs init --seed 1234
+
+# 4. Work the queue, a few cells at a time.
+BENCH_RMI=1 node bench/bench.mjs run 12 --cap 5
+node bench/bench.mjs status
+node bench/bench.mjs analyse
+```
+
+`status` is what may be consulted between runs; `analyse` is the quality gap
+and has to be asked for. Environment: `BENCH_RMI=1` drops each image after its
+instance, `BENCH_MEM` and `BENCH_CPUS` cap the container, `BENCH_PROVIDER`
+names the provider serving the arm models, `BENCH_AGENT_DIR` is the real agent
+directory credentials are copied from, and `BENCH_STORE` is the store.
 
 ## Sources
 

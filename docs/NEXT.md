@@ -204,20 +204,36 @@ Re-run after the fix: all three nodes succeeded, `unaccounted` empty.
 
 What remains, in order:
 
-1. Finish designing the Phase 8 bench, then start working the queue.
-   `bench/DESIGN.md` carries the design. It is a resumable queue rather than a
-   fixed run, so it fits any budget: cells are enumerated in a fixed order, a
-   run executes as many of the next pending ones as asked for, and the store
-   is the state. It runs four arms, two of them solo and two through the
-   orchestration machinery on different worker models, so a quality deficit can
-   be attributed to the package or to the models rather than to both at once.
-   The first three tasks measure the spend split, which caps the saving the
-   whole experiment can report and is cheap because it is a ratio taken inside
-   one run; twelve tasks across all four arms at one repetition is an estimated
-   $67 to $267. What is unsettled there is two of its four open decisions,
-   its three unverified dataset facts, and the feasibility spike on one
-   TypeScript instance that settles them. The harness is the bulk of the work,
-   and the accumulating store is the part that makes batching add up.
+1. Work the Phase 8 bench queue. `bench/DESIGN.md` carries the design and
+   `bench/DESIGN.md` "What carries over" now says which parts exist. The
+   harness is built and covered by `npm run test:bench` against fakes:
+   containers and the in-container toolchain, Tier-1 grading from recorded
+   fail-to-pass targets, the queue and its append-only store, preconditions,
+   and paired analysis with the spend split. What is not built is the Tier-2
+   judge, which is only worth having once the spend split says there is a
+   saving to defend.
+
+   Three things stand between the harness and the first cell. The dataset sweep
+   is at 19 of 28 TypeScript instances, 17 of them gradeable, with 6 Angular
+   and 3 ant-design left; the ant-design three need a second grading path,
+   because the target derivation reads Bazel. `bench/grade-selftest.mjs` has
+   proven the grading path on one instance -- `angular__angular-64903`, gold
+   patch in, resolved out, 327s, no provider spend -- and the rest of the
+   gradeable set is unchecked. And no cell has been run against a provider, so
+   nothing in the agent-side path -- Pi inside the container, the package
+   loaded from the throwaway agent directory, `/swarm on`, the spend cap -- is
+   verified live.
+
+   Then the first three tasks across all four arms, an estimated $17 to $67,
+   for the spend split. It caps the saving the whole experiment can report and
+   is cheap because it is a ratio taken inside one run. Two of the four open
+   decisions are still unsettled -- whether a third review round buys anything,
+   and whether the `graph` arms get extra orchestrator guidance on fan-out --
+   and neither blocks the harness.
+
+   The gradeable subset projects to about 22 instances rather than the 28 the
+   statistical design assumes, so size the pilot on 22 until the last 8 Angular
+   instances are checked.
 2. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 
