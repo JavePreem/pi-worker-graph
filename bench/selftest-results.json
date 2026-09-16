@@ -1,0 +1,14 @@
+[
+  {
+    "instance_id": "angular__angular-64903",
+    "targets": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "//packages/forms/signals/test/node:test": "pass: passed"
+    },
+    "total_s": 327
+  }
+]

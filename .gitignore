@@ -6,3 +6,6 @@ coverage/
 .DS_Store
 .pi/
 __pycache__/
+LOCAL.md
+bench/store/
+bench/.toolchain/

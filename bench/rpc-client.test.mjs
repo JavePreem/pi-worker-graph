@@ -189,3 +189,26 @@ test("close waits for the streams to drain, not just for the process to exit", a
     "the final record must be drained before close() returns",
   );
 });
+
+test("the command defaults to pi and can be replaced to reach a container", () => {
+  const spawned = [];
+  const make = (options) => {
+    const child = new FakeChild();
+    child.stdin.resume();
+    new PiRpcClient({
+      args: ["--mode", "rpc"],
+      cwd: ".",
+      env: {},
+      spawnProcess: (command, args) => {
+        spawned.push([command, args]);
+        return child;
+      },
+      ...options,
+    });
+  };
+  make({});
+  make({ command: "docker" });
+  assert.equal(spawned[0][0], "pi");
+  assert.equal(spawned[1][0], "docker");
+  assert.deepEqual(spawned[0][1], ["--mode", "rpc"]);
+});

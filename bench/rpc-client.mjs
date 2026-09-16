@@ -40,9 +40,14 @@ export class PiRpcClient {
   /**
    * `spawnProcess` is a seam for tests, matching the adapter's own fakeable
    * subprocess boundary. Nothing else supplies it.
+   *
+   * `command` is a seam for the bench: a ProMax checkout only exists inside
+   * its container, so Pi runs there, reached as `docker exec -i <container>
+   * pi`. The protocol is the same either way -- it is stdio -- so only the
+   * argument vector changes.
    */
-  constructor({ args, cwd, env, spawnProcess = spawn }) {
-    this.#child = spawnProcess("pi", args, {
+  constructor({ command = "pi", args, cwd, env, spawnProcess = spawn }) {
+    this.#child = spawnProcess(command, args, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
