@@ -1,0 +1,802 @@
+[
+  {
+    "instance_id": "angular__angular-64903",
+    "pull_s": 1,
+    "files": [
+      "packages/forms/signals/test/node/field_proxy.spec.ts"
+    ],
+    "targets": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "before": {
+      "//packages/forms/signals/test/node:test": "fail"
+    },
+    "after": {
+      "//packages/forms/signals/test/node:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 41
+  },
+  {
+    "instance_id": "angular__angular-c_0362665",
+    "pull_s": 413,
+    "files": [
+      "packages/core/test/bundling/animations-standalone/bundle.golden_symbols.json",
+      "packages/core/test/bundling/animations/bundle.golden_symbols.json",
+      "packages/core/test/bundling/cyclic_import/bundle.golden_symbols.json",
+      "packages/core/test/bundling/defer/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_reactive/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hello_world/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hydration/bundle.golden_symbols.json",
+      "packages/core/test/bundling/router/bundle.golden_symbols.json",
+      "packages/core/test/bundling/standalone_bootstrap/bundle.golden_symbols.json",
+      "packages/core/test/bundling/todo/bundle.golden_symbols.json"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/animations-standalone:test",
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "before": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "fail",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "fail",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "fail",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "fail",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "fail",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "fail",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "fail",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "pass",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "pass",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "pass",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "pass",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "pass",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "pass",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=11",
+    "total_s": 696
+  },
+  {
+    "instance_id": "angular__angular-c_1d3b914",
+    "pull_s": 1,
+    "files": [
+      "packages/core/test/bundling/defer/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_reactive/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/defer:test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test"
+    ],
+    "before": {
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=3",
+    "total_s": 122
+  },
+  {
+    "instance_id": "angular__angular-c_3a6e45f",
+    "pull_s": 1,
+    "files": [
+      "packages/compiler/test/ml_parser/util/util.ts"
+    ],
+    "targets": [
+      "//packages/compiler/test/ml_parser:ml_parser",
+      "//packages/compiler/test/ml_parser:ml_parser_web"
+    ],
+    "before": {
+      "//packages/compiler/test/ml_parser:ml_parser": "fail",
+      "//packages/compiler/test/ml_parser:ml_parser_web": "fail"
+    },
+    "after": {
+      "//packages/compiler/test/ml_parser:ml_parser": "pass",
+      "//packages/compiler/test/ml_parser:ml_parser_web": "fail"
+    },
+    "fail_to_pass": [
+      "//packages/compiler/test/ml_parser:ml_parser"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 22
+  },
+  {
+    "instance_id": "angular__angular-c_4a3d39c",
+    "pull_s": 1,
+    "files": [
+      "packages/core/schematics/utils/tsurge/testing/run_single.ts"
+    ],
+    "targets": [
+      "//packages/core:base_locale_file",
+      "//packages/core:tsec_test",
+      "//packages/core:core_api",
+      "//packages/core:ng_global_utils_api",
+      "//packages/core:core_errors"
+    ],
+    "before": {
+      "//packages/core:base_locale_file": "fail",
+      "//packages/core:tsec_test": "fail",
+      "//packages/core:core_api": "fail",
+      "//packages/core:ng_global_utils_api": "fail",
+      "//packages/core:core_errors": "fail"
+    },
+    "after": {
+      "//packages/core:base_locale_file": "fail",
+      "//packages/core:tsec_test": "fail",
+      "//packages/core:core_api": "fail",
+      "//packages/core:ng_global_utils_api": "fail",
+      "//packages/core:core_errors": "fail"
+    },
+    "fail_to_pass": [],
+    "regressed": [],
+    "outcome": "NO FAIL-TO-PASS TARGET",
+    "total_s": 10
+  },
+  {
+    "instance_id": "angular__angular-c_4f8ab4f",
+    "pull_s": 306,
+    "files": [
+      "packages/forms/signals/test/node/api/validators/max.spec.ts",
+      "packages/forms/signals/test/node/api/validators/min.spec.ts"
+    ],
+    "targets": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "before": {
+      "//packages/forms/signals/test/node:test": "fail"
+    },
+    "after": {
+      "//packages/forms/signals/test/node:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 332
+  },
+  {
+    "instance_id": "angular__angular-c_55ac384",
+    "pull_s": 434,
+    "files": [
+      "packages/core/test/bundling/forms_reactive/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json",
+      "packages/core/test/bundling/router/bundle.golden_symbols.json",
+      "packages/core/test/bundling/todo/bundle.golden_symbols.json"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/forms_reactive:test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/router:test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/todo:test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "before": {
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "fail",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "pass",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=4",
+    "total_s": 571
+  },
+  {
+    "instance_id": "angular__angular-c_5e0dcf1",
+    "pull_s": 428,
+    "files": [
+      "packages/core/test/bundling/animations-standalone/bundle.golden_symbols.json",
+      "packages/core/test/bundling/animations/bundle.golden_symbols.json",
+      "packages/core/test/bundling/cyclic_import/bundle.golden_symbols.json",
+      "packages/core/test/bundling/defer/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_reactive/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hello_world/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hydration/bundle.golden_symbols.json",
+      "packages/core/test/bundling/router/bundle.golden_symbols.json",
+      "packages/core/test/bundling/standalone_bootstrap/bundle.golden_symbols.json",
+      "packages/core/test/bundling/todo/bundle.golden_symbols.json"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/animations-standalone:test",
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "before": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "fail",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "fail",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "fail",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "fail",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "fail",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "fail",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "fail",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "pass",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "pass",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "pass",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "pass",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "pass",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "pass",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:symbol_test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=11",
+    "total_s": 739
+  },
+  {
+    "instance_id": "angular__angular-c_6960ec0",
+    "pull_s": 1,
+    "files": [
+      "packages/compiler-cli/src/ngtsc/typecheck/test/type_check_block_spec.ts"
+    ],
+    "targets": [
+      "//packages/compiler-cli/src/ngtsc/typecheck/test:test"
+    ],
+    "before": {
+      "//packages/compiler-cli/src/ngtsc/typecheck/test:test": "fail"
+    },
+    "after": {
+      "//packages/compiler-cli/src/ngtsc/typecheck/test:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/compiler-cli/src/ngtsc/typecheck/test:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 97
+  },
+  {
+    "instance_id": "angular__angular-c_7118dac",
+    "pull_s": 445,
+    "files": [
+      "packages/compiler-cli/src/ngtsc/scope/test/local_spec.ts",
+      "packages/compiler-cli/src/ngtsc/typecheck/testing/index.ts"
+    ],
+    "targets": [
+      "//packages/compiler-cli/src/ngtsc/scope/test:test",
+      "//packages/compiler-cli:error_code_api",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api",
+      "//packages/compiler-cli:compiler_options_api"
+    ],
+    "before": {
+      "//packages/compiler-cli/src/ngtsc/scope/test:test": "fail",
+      "//packages/compiler-cli:error_code_api": "fail",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api": "fail",
+      "//packages/compiler-cli:compiler_options_api": "fail"
+    },
+    "after": {
+      "//packages/compiler-cli/src/ngtsc/scope/test:test": "fail",
+      "//packages/compiler-cli:error_code_api": "fail",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api": "fail",
+      "//packages/compiler-cli:compiler_options_api": "fail"
+    },
+    "fail_to_pass": [],
+    "regressed": [],
+    "outcome": "NO FAIL-TO-PASS TARGET",
+    "total_s": 451
+  },
+  {
+    "instance_id": "angular__angular-c_768a09d",
+    "pull_s": 321,
+    "files": [
+      "packages/compiler/test/expression_parser/parser_spec.ts",
+      "packages/compiler/test/expression_parser/utils/unparser.ts",
+      "packages/compiler/test/i18n/extractor_merger_spec.ts",
+      "packages/compiler/test/i18n/i18n_ast_spec.ts",
+      "packages/compiler/test/i18n/i18n_parser_spec.ts",
+      "packages/compiler/test/i18n/integration_common.ts",
+      "packages/compiler/test/i18n/message_bundle_spec.ts",
+      "packages/compiler/test/i18n/serializers/xliff2_spec.ts",
+      "packages/compiler/test/i18n/serializers/xliff_spec.ts",
+      "packages/compiler/test/i18n/serializers/xmb_spec.ts",
+      "packages/compiler/test/i18n/whitespace_sensitivity_spec.ts",
+      "packages/compiler/test/ml_parser/lexer_spec.ts",
+      "packages/compiler/test/render3/view/util.ts"
+    ],
+    "targets": [
+      "//packages/compiler/test/expression_parser:expression_parser",
+      "//packages/compiler/test/expression_parser:expression_parser_web",
+      "//packages/compiler/test:test",
+      "//packages/compiler/test:test_web",
+      "//packages/compiler/test/ml_parser:ml_parser",
+      "//packages/compiler/test/ml_parser:ml_parser_web",
+      "//packages/compiler/test/render3:test"
+    ],
+    "before": {
+      "//packages/compiler/test/expression_parser:expression_parser": "pass",
+      "//packages/compiler/test/expression_parser:expression_parser_web": "fail",
+      "//packages/compiler/test:test": "fail",
+      "//packages/compiler/test:test_web": "fail",
+      "//packages/compiler/test/ml_parser:ml_parser": "pass",
+      "//packages/compiler/test/ml_parser:ml_parser_web": "fail",
+      "//packages/compiler/test/render3:test": "fail"
+    },
+    "after": {
+      "//packages/compiler/test/expression_parser:expression_parser": "pass",
+      "//packages/compiler/test/expression_parser:expression_parser_web": "fail",
+      "//packages/compiler/test:test": "pass",
+      "//packages/compiler/test:test_web": "fail",
+      "//packages/compiler/test/ml_parser:ml_parser": "pass",
+      "//packages/compiler/test/ml_parser:ml_parser_web": "fail",
+      "//packages/compiler/test/render3:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/compiler/test:test",
+      "//packages/compiler/test/render3:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=2",
+    "total_s": 437
+  },
+  {
+    "instance_id": "angular__angular-c_815f1b1",
+    "pull_s": 452,
+    "files": [
+      "packages/core/test/acceptance/profiler_spec.ts"
+    ],
+    "targets": [
+      "//packages/core/test/acceptance:acceptance",
+      "//packages/core/test/acceptance:acceptance_web"
+    ],
+    "before": {
+      "//packages/core/test/acceptance:acceptance": "fail",
+      "//packages/core/test/acceptance:acceptance_web": "fail"
+    },
+    "after": {
+      "//packages/core/test/acceptance:acceptance": "pass",
+      "//packages/core/test/acceptance:acceptance_web": "fail"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/acceptance:acceptance"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 513
+  },
+  {
+    "instance_id": "angular__angular-c_8562667",
+    "pull_s": 541,
+    "files": [
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test"
+    ],
+    "before": {
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/forms_template_driven:symbol_test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 600
+  },
+  {
+    "instance_id": "angular__angular-c_92c4123",
+    "pull_s": 348,
+    "files": [
+      "packages/compiler/test/render3/util/expression.ts",
+      "packages/compiler/test/render3/view/util.ts"
+    ],
+    "targets": [
+      "//packages/compiler/test/render3:test"
+    ],
+    "before": {
+      "//packages/compiler/test/render3:test": "fail"
+    },
+    "after": {
+      "//packages/compiler/test/render3:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/compiler/test/render3:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 369
+  },
+  {
+    "instance_id": "angular__angular-c_9f44b41",
+    "pull_s": 396,
+    "files": [
+      "packages/core/test/bundling/animations-standalone/bundle.golden_symbols.json",
+      "packages/core/test/bundling/animations/bundle.golden_symbols.json",
+      "packages/core/test/bundling/cyclic_import/bundle.golden_symbols.json",
+      "packages/core/test/bundling/defer/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_reactive/bundle.golden_symbols.json",
+      "packages/core/test/bundling/forms_template_driven/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hello_world/bundle.golden_symbols.json",
+      "packages/core/test/bundling/hydration/bundle.golden_symbols.json",
+      "packages/core/test/bundling/router/bundle.golden_symbols.json",
+      "packages/core/test/bundling/standalone_bootstrap/bundle.golden_symbols.json",
+      "packages/core/test/bundling/todo/bundle.golden_symbols.json",
+      "packages/core/test/render3/is_shape_of.ts"
+    ],
+    "targets": [
+      "//packages/core/test/bundling/animations-standalone:test",
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:test",
+      "//packages/core/test/bundling/todo:symbol_test",
+      "//packages/core/test/render3:render3",
+      "//packages/core/test/render3:render3_web"
+    ],
+    "before": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "fail",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "fail",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "fail",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "fail",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "fail",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "fail",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "fail",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "fail",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "fail",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "fail",
+      "//packages/core/test/render3:render3": "fail",
+      "//packages/core/test/render3:render3_web": "fail"
+    },
+    "after": {
+      "//packages/core/test/bundling/animations-standalone:test": "pass",
+      "//packages/core/test/bundling/animations-standalone:symbol_test": "pass",
+      "//packages/core/test/bundling/animations:test": "pass",
+      "//packages/core/test/bundling/animations:symbol_test": "pass",
+      "//packages/core/test/bundling/cyclic_import:test": "pass",
+      "//packages/core/test/bundling/cyclic_import:symbol_test": "pass",
+      "//packages/core/test/bundling/defer:test": "pass",
+      "//packages/core/test/bundling/defer:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_reactive:test": "pass",
+      "//packages/core/test/bundling/forms_reactive:symbol_test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:test": "pass",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test": "pass",
+      "//packages/core/test/bundling/hello_world:test": "pass",
+      "//packages/core/test/bundling/hello_world:symbol_test": "pass",
+      "//packages/core/test/bundling/hydration:test": "pass",
+      "//packages/core/test/bundling/hydration:symbol_test": "pass",
+      "//packages/core/test/bundling/router:test": "pass",
+      "//packages/core/test/bundling/router:symbol_test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:test": "pass",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test": "pass",
+      "//packages/core/test/bundling/todo:test": "pass",
+      "//packages/core/test/bundling/todo:symbol_test": "pass",
+      "//packages/core/test/render3:render3": "pass",
+      "//packages/core/test/render3:render3_web": "fail"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/bundling/animations-standalone:symbol_test",
+      "//packages/core/test/bundling/animations:symbol_test",
+      "//packages/core/test/bundling/cyclic_import:symbol_test",
+      "//packages/core/test/bundling/defer:symbol_test",
+      "//packages/core/test/bundling/forms_reactive:symbol_test",
+      "//packages/core/test/bundling/forms_template_driven:symbol_test",
+      "//packages/core/test/bundling/hello_world:symbol_test",
+      "//packages/core/test/bundling/hydration:symbol_test",
+      "//packages/core/test/bundling/router:symbol_test",
+      "//packages/core/test/bundling/standalone_bootstrap:symbol_test",
+      "//packages/core/test/bundling/todo:symbol_test",
+      "//packages/core/test/render3:render3"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=12",
+    "total_s": 806
+  },
+  {
+    "instance_id": "angular__angular-c_a4001c4",
+    "pull_s": 322,
+    "files": [
+      "packages/core/test/acceptance/animation_spec.ts"
+    ],
+    "targets": [
+      "//packages/core/test/acceptance:acceptance",
+      "//packages/core/test/acceptance:acceptance_web"
+    ],
+    "before": {
+      "//packages/core/test/acceptance:acceptance": "fail",
+      "//packages/core/test/acceptance:acceptance_web": "fail"
+    },
+    "after": {
+      "//packages/core/test/acceptance:acceptance": "fail",
+      "//packages/core/test/acceptance:acceptance_web": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/core/test/acceptance:acceptance_web"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 436
+  },
+  {
+    "instance_id": "angular__angular-c_b29e646",
+    "pull_s": 327,
+    "files": [
+      "packages/forms/signals/test/node/resource.spec.ts"
+    ],
+    "targets": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "before": {
+      "//packages/forms/signals/test/node:test": "fail"
+    },
+    "after": {
+      "//packages/forms/signals/test/node:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/forms/signals/test/node:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 364
+  },
+  {
+    "instance_id": "angular__angular-c_b8f2a50",
+    "pull_s": 522,
+    "files": [
+      "packages/compiler-cli/src/ngtsc/annotations/component/test/component_spec.ts",
+      "packages/compiler-cli/src/ngtsc/annotations/directive/test/directive_spec.ts",
+      "packages/compiler-cli/src/ngtsc/typecheck/testing/index.ts"
+    ],
+    "targets": [
+      "//packages/compiler-cli/src/ngtsc/annotations/component/test:test",
+      "//packages/compiler-cli/src/ngtsc/annotations/directive/test:test",
+      "//packages/compiler-cli:error_code_api",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api",
+      "//packages/compiler-cli:compiler_options_api"
+    ],
+    "before": {
+      "//packages/compiler-cli/src/ngtsc/annotations/component/test:test": "fail",
+      "//packages/compiler-cli/src/ngtsc/annotations/directive/test:test": "fail",
+      "//packages/compiler-cli:error_code_api": "pass",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api": "pass",
+      "//packages/compiler-cli:compiler_options_api": "pass"
+    },
+    "after": {
+      "//packages/compiler-cli/src/ngtsc/annotations/component/test:test": "pass",
+      "//packages/compiler-cli/src/ngtsc/annotations/directive/test:test": "pass",
+      "//packages/compiler-cli:error_code_api": "pass",
+      "//packages/compiler-cli:extended_template_diagnostic_name_api": "pass",
+      "//packages/compiler-cli:compiler_options_api": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/compiler-cli/src/ngtsc/annotations/component/test:test",
+      "//packages/compiler-cli/src/ngtsc/annotations/directive/test:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=2",
+    "total_s": 592
+  },
+  {
+    "instance_id": "angular__angular-c_b973c5b",
+    "pull_s": 378,
+    "files": [
+      "packages/compiler-cli/src/ngtsc/indexer/test/template_spec.ts",
+      "packages/compiler-cli/src/ngtsc/indexer/test/util.ts"
+    ],
+    "targets": [
+      "//packages/compiler-cli/src/ngtsc/indexer/test:test"
+    ],
+    "before": {
+      "//packages/compiler-cli/src/ngtsc/indexer/test:test": "fail"
+    },
+    "after": {
+      "//packages/compiler-cli/src/ngtsc/indexer/test:test": "pass"
+    },
+    "fail_to_pass": [
+      "//packages/compiler-cli/src/ngtsc/indexer/test:test"
+    ],
+    "regressed": [],
+    "outcome": "OK f2p=1",
+    "total_s": 402
+  }
+]
