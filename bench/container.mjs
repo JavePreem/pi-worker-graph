@@ -13,6 +13,7 @@
  * is piped, so the code is available and the wording is only for the record.
  */
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export const TESTBED = "/testbed";
 
@@ -61,8 +62,58 @@ export async function pullImage(image, { timeoutMs = 2_400_000 } = {}) {
     throw new Error(`docker pull ${image}: ${result.stderr.slice(-400)}`);
 }
 
+/**
+ * Drop an image once its instance is done.
+ *
+ * An image is ~14 GB unpacked, so a sweep that keeps them accumulates faster
+ * than the backing disk gives space back. A prune of dangling layers was tried
+ * here and removed: it reclaimed 0B on every instance of a six-instance sweep,
+ * because `docker rmi` on a tagged image with no other references already
+ * drops its layers -- and a prune would have been free to remove another
+ * project's dangling layers on a shared box, which is not the bench's to do.
+ */
 export async function removeImage(image) {
   await run(["docker", "rmi", "-f", image], { timeoutMs: 600_000 });
+}
+
+function memAvailableKb() {
+  try {
+    const meminfo = readFileSync("/proc/meminfo", "utf8");
+    const match = /^MemAvailable:\s+(\d+) kB$/m.exec(meminfo);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait until the host has memory again before pulling the next image.
+ *
+ * Four runs on a 13 GB development box were killed for host memory, always
+ * during the pull and never during the grading. **Why is not settled.** Page
+ * cache from unpacking ~14 GB is the suspect, but the sweep that first
+ * completed did so without this wait ever engaging, so nothing here is shown
+ * to be the cure. It is cheap insurance against a documented failure: it
+ * touches nothing, and when the memory does not come back it says so and
+ * proceeds rather than becoming a stall of its own.
+ */
+export async function awaitHeadroom({
+  minFreeKb = Number(process.env.BENCH_MIN_FREE_GB ?? 5) * 1024 * 1024,
+  waitMs = Number(process.env.BENCH_HEADROOM_WAIT_S ?? 300) * 1000,
+  pollMs = 15_000,
+  onWait = () => {},
+} = {}) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const available = memAvailableKb();
+    if (available === null || available >= minFreeKb) return available;
+    if (Date.now() >= deadline) {
+      onWait(available, true);
+      return available;
+    }
+    onWait(available, false);
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 /**

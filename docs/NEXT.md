@@ -213,16 +213,21 @@ What remains, in order:
    judge, which is only worth having once the spend split says there is a
    saving to defend.
 
-   Three things stand between the harness and the first cell. The dataset sweep
-   is at 19 of 28 TypeScript instances, 17 of them gradeable, with 6 Angular
-   and 3 ant-design left; the ant-design three need a second grading path,
-   because the target derivation reads Bazel. `bench/grade-selftest.mjs` has
-   proven the grading path on one instance -- `angular__angular-64903`, gold
-   patch in, resolved out, 327s, no provider spend -- and the rest of the
-   gradeable set is unchecked. And no cell has been run against a provider, so
-   nothing in the agent-side path -- Pi inside the container, the package
-   loaded from the throwaway agent directory, `/swarm on`, the spend cap -- is
-   verified live.
+   The Angular subset is swept in full: 25 of 25 validated, 23 with a
+   fail-to-pass set. The 3 ant-design instances are not done and need a second
+   derivation path, because the current one climbs to Bazel rules and
+   ant-design has none; dropping them and sizing the pilot on 23 is the cheaper
+   answer for 3 instances out of 28, and it is a design call rather than a
+   mechanical one.
+
+   Two things then stand between the harness and the first cell.
+   `bench/grade-selftest.mjs` has proven the grading path on one instance --
+   `angular__angular-64903`, gold patch in, resolved out, 327s, no provider
+   spend -- and the other 22 are unchecked. And no cell has been run against a
+   provider, so nothing in the agent-side path -- Pi inside the container, the
+   package loaded from the throwaway agent directory, `/swarm on`, the spend
+   cap -- is verified live. Prove that path on one `solo-luna` cell, the
+   cheapest arm in the design, before buying the twelve.
 
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and
@@ -231,9 +236,9 @@ What remains, in order:
    and whether the `graph` arms get extra orchestrator guidance on fan-out --
    and neither blocks the harness.
 
-   The gradeable subset projects to about 22 instances rather than the 28 the
-   statistical design assumes, so size the pilot on 22 until the last 8 Angular
-   instances are checked.
+   The pool is 23 instances, not the 28 the statistical design's tables are
+   computed at, so every figure in that section is optimistic by two -- by five
+   if ant-design goes. The conclusions do not change; they get slightly worse.
 2. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 

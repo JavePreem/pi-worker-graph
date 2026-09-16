@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyPatch,
+  awaitHeadroom,
   pullImage,
   removeImage,
   startContainer,
@@ -48,8 +49,16 @@ console.log(
 );
 
 for (const instance of pending) {
-  const started = Date.now();
   console.log(`\n${"=".repeat(70)}\n${instance.id}`);
+  await awaitHeadroom({
+    onWait: (kb, giveUp) =>
+      console.log(
+        giveUp
+          ? `  only ${Math.round(kb / 1024)} MB available; continuing anyway`
+          : `  ${Math.round(kb / 1024)} MB available, waiting`,
+      ),
+  });
+  const started = Date.now();
   const record = { instance_id: instance.id, targets: instance.targets };
   const name = `selftest_${instance.id.replace(/[^a-z0-9]/gi, "_").slice(-40)}`;
   let container;

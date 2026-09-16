@@ -341,6 +341,12 @@ and belongs in its own line of the results rather than buried in a pass rate.
 
 ## Statistical design
 
+Every figure in this section is computed at **n=28**, which is the size of the
+TypeScript subset rather than the size of the pool. The validated pool is 23
+(see **Measured**), so read each one as optimistic by two instances -- and by
+five if the ant-design three are dropped. None of the conclusions change; they
+get slightly worse.
+
 **"Quality stayed the same" is an equivalence claim, not a difference claim**,
 and equivalence needs more samples than difference. At n=28 with a ~41% base
 rate, the interval on a single arm's resolve rate is roughly ±18 points. That
@@ -810,24 +816,42 @@ their patches looked awkward, so 80% is a floor rather than an estimate.
 
 Grading runtime once the image is local: 9s to 112s per instance.
 
-Swept across the Angular subset as far as the host allowed: **19 of 25
-validated, 17 with a fail-to-pass set — 89% yield.** The two without are
+The Angular subset is now swept in full: **25 of 25 validated, 23 with a
+fail-to-pass set — 92% yield, 78 targets in total.** The two without are
 `c_4a3d39c` and `c_7118dac`, both patching test helpers the climb cannot
-resolve to a test rule. At that rate roughly 22 of the 25 Angular instances are
-gradeable, against the 28 the statistical design assumes; size the pilot on 22,
-not 28, until the last 6 are checked.
+resolve to a test rule. **Size the pilot on 23**, not on the 28 the statistical
+design assumes. That is a real loss of power rather than a rounding error: the
+sizing tables in **Statistical design** are computed at n=28, and every one of
+them is optimistic by two instances at this pool size.
+
+The 3 ant-design instances are not validated and are not counted in the 23.
+The derivation climbs to Bazel rules and ant-design has none, so they need a
+second grading path for 3 of 28 instances in a design that already says a pilot
+result is a statement about Angular. Dropping them is the cheaper answer and
+the honest one, provided the write-up says so.
 
 The grading path is proven end to end on one instance:
 `bench/grade-selftest.mjs` ran `angular__angular-64903` with the gold patch
 standing in for the agent and graded it **resolved in 327s**, applying
 `test_patch` afterwards and reading Bazel's exit code. It cost no provider
-spend. The rest of the gradeable set is unchecked.
+spend. The other 22 are unchecked.
 
-The remaining 6 were not attempted: the sweep outran the development machine.
 Budget disk as well as tokens — an image is 2.5 GB compressed and ~14 GB
 unpacked, so a cell holds that much while it runs, and `BENCH_RMI=1` drops each
 image after its instance. Results are written per instance, so a resumed run
 only repeats what it has not done.
+
+**A sweep can be killed for host memory, and the cause is not settled.** Four
+runs died on a 13 GB box, always during the pull and never during the grading.
+Two mitigations were tried. A prune of dangling layers after each image
+reclaimed 0B every time -- `docker rmi` on a tagged image with no other
+references already drops its layers -- and it was removed rather than kept,
+because on a shared box a prune is also free to take another project's dangling
+layers. A wait for `MemAvailable` to recover before each pull was kept, but it
+never engaged on the six-instance sweep that first completed: memory never fell
+below the threshold. So neither is shown to be why a sweep now finishes. The
+likelier difference is that the runs that died shared the box with a test
+suite. Treat the wait as cheap insurance whose value is unmeasured.
 
 ## Running it
 

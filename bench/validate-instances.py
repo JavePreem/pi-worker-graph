@@ -24,6 +24,8 @@ RESULTS = os.environ.get("BENCH_RESULTS", f"{HERE}/validate-results.json")
 LANGUAGE = os.environ.get("BENCH_LANGUAGE", "typescript")
 MEM_LIMIT = os.environ.get("BENCH_MEM", "6g")
 CPU_LIMIT = os.environ.get("BENCH_CPUS", "4")
+MIN_FREE_KB = int(os.environ.get("BENCH_MIN_FREE_GB", "5")) * 1024 * 1024
+HEADROOM_WAIT_S = int(os.environ.get("BENCH_HEADROOM_WAIT_S", "300"))
 BAZEL_FLAGS = "--jobs=3 --local_ram_resources=3072"
 ROWS_URL = ("https://datasets-server.huggingface.co/rows"
             "?dataset=swe-bench-promax/SWE-Bench-ProMax"
@@ -33,6 +35,37 @@ IDS = sys.argv[1:]
 
 def sh(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
+
+
+def mem_available_kb():
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1])
+    return None
+
+
+def await_headroom(label):
+    """Wait until the host has memory again before pulling the next image.
+
+    Four runs on this 13 GB box were killed for host memory, always during the
+    pull and never during the grading. Why is not settled. Page cache from
+    unpacking ~14 GB is the suspect, but the six-instance sweep that first
+    completed did so without this wait ever engaging, so nothing here is shown
+    to be the cure. It is cheap insurance against a documented failure: it
+    touches nothing, and when the memory does not come back it says so and
+    proceeds rather than becoming a stall of its own.
+    """
+    deadline = time.time() + HEADROOM_WAIT_S
+    while True:
+        available = mem_available_kb()
+        if available is None or available >= MIN_FREE_KB:
+            return
+        if time.time() >= deadline:
+            print(f"  {label}: only {available // 1024} MB available after "
+                  f"{HEADROOM_WAIT_S}s; continuing anyway", flush=True)
+            return
+        print(f"  {label}: {available // 1024} MB available, waiting", flush=True)
+        time.sleep(15)
 
 
 def dex(c, script, timeout=1800):
@@ -110,6 +143,7 @@ print(f"{len(done)} recorded, {len(pending)} to validate -> {RESULTS}", flush=Tr
 for iid in pending:
     inst = by_id[iid]
     print(f"\n{'='*70}\n{iid}", flush=True)
+    await_headroom(iid)
     t0 = time.time()
     rec = {"instance_id": iid}
 
@@ -173,6 +207,10 @@ for iid in pending:
         # Pulling 25 of these decompresses ~17 layers each and was enough to
         # exhaust a 13 GB host. Dropping the image between instances keeps the
         # footprint to one at a time, at the cost of re-pulling on a rerun.
+        # A `docker image prune` was tried alongside this and removed: it
+        # reclaimed 0B every time, because `rmi` on a tagged image with no
+        # other references already drops its layers, and a prune is free to
+        # take another project's dangling layers on a shared box.
         if os.environ.get("BENCH_RMI") == "1":
             sh(["docker", "rmi", "-f", inst["image_name"]])
     rec["total_s"] = round(time.time() - t0)
