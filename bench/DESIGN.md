@@ -160,17 +160,18 @@ adds.
 Typical 95% confidence interval on the cost ratio, paired across tasks, from
 `bench/power.py`:
 
-| true saving | 3 tasks | 6 tasks | 12 tasks | 24 tasks |
+| true saving | 3 tasks | 6 tasks | 12 tasks | 23 tasks |
 | --- | --- | --- | --- | --- |
 | 1.15x | 0.50–2.58x | 0.75–1.79x | 0.87–1.52x | 0.94–1.40x |
-| 1.5x | 0.65–3.36x | 0.97–2.33x | 1.13–1.99x | 1.23–1.82x |
-| 2.3x | 1.00–5.16x | 1.49–3.57x | 1.73–3.05x | 1.89–2.79x |
-| 5x | 2.18–11.21x | 3.25–7.76x | 3.76–6.62x | 4.11–6.07x |
+| 1.5x | 0.65–3.36x | 0.97–2.33x | 1.13–1.99x | 1.22–1.83x |
+| 2.3x | 1.00–5.16x | 1.49–3.57x | 1.73–3.05x | 1.87–2.81x |
+| 5x | 2.18–11.21x | 3.25–7.76x | 3.76–6.62x | 4.07–6.10x |
 
-Read the first row carefully. **If the true saving is 15%, twenty-four tasks
-still cannot establish that `graph-luna` is cheaper at all** — the interval spans
-1.0. Only from about a 1.5x saving does a twelve-task run separate the arms,
-and only from about 2.3x does a three-task run say anything.
+The last column is the whole pool, every task run once. Read the first row
+carefully. **If the true saving is 15%, exhausting the pool still cannot
+establish that `graph-luna` is cheaper at all** — the interval spans 1.0. Only
+from about a 1.5x saving does a twelve-task run separate the arms, and only
+from about 2.3x does a three-task run say anything.
 
 This inverts an assumption worth stating plainly, because an earlier draft of
 this design made it: cost was taken to be the cheap, robust half of the
@@ -341,16 +342,20 @@ and belongs in its own line of the results rather than buried in a pass rate.
 
 ## Statistical design
 
-Every figure in this section is computed at **n=28**, which is the size of the
-TypeScript subset rather than the size of the pool. The validated pool is 23
-(see **Measured**), so read each one as optimistic by two instances -- and by
-five if the ant-design three are dropped. None of the conclusions change; they
-get slightly worse.
+The pool is **23**: two instances yield no fail-to-pass target and the
+ant-design three are out by decision (see **Why the ant-design three are out**).
+Tables here lead with n=23 and keep n=28 -- the size of the TypeScript subset --
+as the column the earlier sizing was done at, so the two can be read against
+each other. Prose figures are the pool's unless they name n=28.
+
+Losing five instances costs less than it sounds and more than nothing: the gap
+the run can detect moves from 0.94 to 0.90 at 40 points and from 0.49 to 0.43 at
+20 points. None of the conclusions change; they get slightly worse.
 
 **"Quality stayed the same" is an equivalence claim, not a difference claim**,
-and equivalence needs more samples than difference. At n=28 with a ~41% base
-rate, the interval on a single arm's resolve rate is roughly ±18 points. That
-cannot distinguish "identical" from "fifteen points worse". Reporting "no
+and equivalence needs more samples than difference. At the pool of 23 with a
+~41% base rate, the interval on a single arm's resolve rate is roughly ±20
+points. That cannot distinguish "identical" from "fifteen points worse". Reporting "no
 difference detected" as "quality is equal" would be the central dishonesty
 available in this experiment.
 
@@ -384,24 +389,39 @@ turn into an arbitrarily easy pass.
 
 **Power, and what it rules out.** `bench/power.py` simulates a bench where the
 two arms are truly equal and reports how often it would correctly conclude
-non-inferiority. At one-sided 95% and 20% discordance:
+non-inferiority, at a one-sided 95% bound on the paired per-task difference.
+Regenerate with `python3 bench/power.py`; the table below was computed
+2026-09-17 and the leading column is the actual pool rather than the subset:
 
-| margin | n=28 binary | n=28, R=3 graded | n=56, R=3 | n=112, R=3 |
-| --- | --- | --- | --- | --- |
-| 5 points | 0.19 | 0.19 | 0.26 | 0.40 |
-| 10 points | 0.39 | 0.42 | 0.63 | 0.88 |
-| 15 points | 0.60 | 0.68 | 0.91 | 0.99 |
-| 20 points | 0.78 | 0.88 | 0.99 | 1.00 |
+| margin | n=23 | n=23, R=3 | n=28 | n=28, R=3 | n=56, R=3 | n=112, R=3 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 points | 0.10 | 0.16 | 0.11 | 0.17 | 0.25 | 0.40 |
+| 10 points | 0.18 | 0.34 | 0.20 | 0.40 | 0.62 | 0.87 |
+| 15 points | 0.27 | 0.59 | 0.35 | 0.66 | 0.90 | 0.99 |
+| 20 points | 0.43 | 0.80 | 0.50 | 0.87 | 0.99 | 1.00 |
 
-The smallest margin reaching 80% power at n=28 is 21 points on binary McNemar
-and about 17 using per-instance pass fractions. Five points would need roughly
-450 instances.
+An earlier version of this table was left in place after the bound switched
+from a normal quantile to a t quantile, which is the correction `_critical` in
+`bench/power.py` documents. It overstated every cell -- 0.39 where the current
+model says 0.20 for a 10-point margin at n=28 -- and the claims under it were
+read off it. The corrected ones:
+
+**At one repetition the non-inferiority test is not available at any usable
+margin.** The smallest margin reaching 80% power is 33 points at the pool of
+23, and 30.5 at n=28. A 33-point margin is not a claim of equivalence; it is a
+statement that the arms are not catastrophically different. Three repetitions
+bring it to 20.5 points at n=23, which is still far above the 10-point cap
+pre-registered in **Open decisions**.
+
+Five points would need roughly 450 instances at three repetitions, and about a
+thousand at one.
 
 This is the decisive constraint on the whole design, and it is worse than it
-looks. M1 is plausibly 10 to 15 points. The margin 28 instances can afford is
-17 to 21. **The margin is wider than the effect it exists to protect**, so at
-this sample size the non-inferiority claim is not available at any value that
-means anything — a 20-point margin is one the arm cannot fail.
+looks. M1 is plausibly 10 to 15 points. The margin the pool of 23 can afford is
+20.5 points at three repetitions and 33 at one. **The margin is wider than the
+effect it exists to protect** — twice it, at one repetition — so at this sample
+size the non-inferiority claim is not available at any value that means
+anything. A 33-point margin is one the arm cannot fail.
 
 Two things follow.
 
@@ -415,21 +435,36 @@ available at every sample size the budget allows.
 
 **Score the graded outcome, not the binary.** Per-instance pass fraction over
 the three repetitions costs nothing extra — the repetitions are already
-budgeted — and moves the achievable margin from 21 points to about 17. Keep
-McNemar on the binary as a secondary, since it is the comparable number.
+budgeted — and moves the achievable margin from 33 points to 20.5 at the pool
+of 23. That is the single largest gain available, and it is still not enough to
+reach the pre-registered cap. Keep McNemar on the binary as a secondary, since
+it is the comparable number.
 
-**The cost claim is not subject to any of this.** A 17-to-20x price gap is
-large and low-variance, and n=28 establishes it comfortably. Only the quality
-guarantee is underpowered. Report cost as a measurement and quality as a bound,
-rather than letting the weaker half set the tone for both.
+**The cost claim is underpowered too, for the opposite reason.** An earlier
+draft of this section held that it was not — that a 17-to-20x price gap is
+large and low-variance and n=28 settles it comfortably. That is the conflation
+**What the saving actually is** exists to refute: 17-to-20x is the gap between
+token prices, and the gap between arms is bounded by how much of the work
+leaves the expensive model, which under `sol`-reviews-`luna` is expected to be
+about 15%. At a true 1.15x saving the pool of 23 gives a cost-ratio interval of
+0.94–1.40x — it spans 1.0, so the run cannot establish that `graph-luna` is
+cheaper at all. See **Sizing the cost claim**.
+
+So both halves are underpowered, and they fail differently. Quality is a large
+effect the design cannot bound tightly enough to call equivalence. Cost is an
+effect so small it may not be separable from zero at any sample size this
+budget reaches — and unlike quality, spending more may not rescue it, because
+the effect itself may be near zero. Neither half sets the tone for the other;
+both are reported as intervals, and the pilot's job is to size a confirmatory
+run for whichever one still looks worth buying.
 
 **Pair by instance and analyze discordant pairs.** Between-instance difficulty
 variance dominates everything else here. Comparing two independent rates throws
 that away; McNemar over per-instance paired outcomes removes it and buys back
 substantial power at the same n. Run every arm on every instance.
 
-If the margin still cannot be resolved at 28 instances, extend from the top-up
-pools rather than narrowing the claim after the fact.
+If the margin still cannot be resolved once the pool is exhausted, extend from
+the top-up pools rather than narrowing the claim after the fact.
 
 Repetitions: Pi exposes no seed, and run-to-run variance was large on the first
 suite. Budget at least three repetitions per instance per arm, and treat a
@@ -437,10 +472,10 @@ single repetition as a smoke test rather than a measurement.
 
 ## Budget case: a resumable queue
 
-The full pilot — 28 tasks, four arms, three repetitions — is 336 agent runs at
-an estimated $470 to $1,870. That is more than this question is worth spending
-in one go, and the estimate itself rests on per-instance figures nobody has
-measured yet.
+The full pilot — the pool of 23, four arms, three repetitions — is 276 agent
+runs at an estimated $384 to $1,533. That is more than this question is worth
+spending in one go, and the estimate itself rests on per-instance figures
+nobody has measured yet.
 
 Per task at one repetition, all four arms: $5.56 low, $22.22 high. `graph-sol`
 is roughly half of it on its own, which is the price of being able to attribute
@@ -521,9 +556,9 @@ that on its own by stopping earlier.
 
 ### Why tasks before repetitions
 
-Twelve tasks at two repetitions and twenty-four tasks at one repetition cost the
-same and have the same power — 0.45 against 0.46 for detecting a 20-point gap —
-but twenty-four tasks covers twice as much ground. The queue therefore
+Twelve tasks at two repetitions and twenty-three at one cost about the same and
+have about the same power — 0.41 against 0.43 for detecting a 20-point gap —
+but twenty-three tasks covers nearly twice as much ground. The queue therefore
 enumerates every task at repetition 1 before any task at repetition 2.
 
 The exception is deliberate: repetitions are the only way to measure
@@ -533,18 +568,23 @@ tasks already done rather than spreading repetitions thinly from the start.
 
 ### What a given amount of accumulated work can say
 
-| | 12x4x1 | 24x4x1 | 28x4x3 |
+The columns are what this queue can actually produce: 23 tasks is the pool
+exhausted, and nothing beyond it is buyable without the top-up pools.
+
+| | 12x4x1 | 23x4x1 | 23x4x3 |
 | --- | --- | --- | --- |
-| Runs | 48 | 96 | 336 |
-| Estimated cost | $67–267 | $133–533 | $470–1,870 |
-| Cost ratio, if the true saving is 1.5x | 1.13–1.99x | 1.23–1.82x | 1.23–1.82x |
+| Runs | 48 | 92 | 276 |
+| Estimated cost | $67–267 | $128–511 | $384–1,533 |
+| Cost ratio, if the true saving is 1.5x | 1.13–1.99x | 1.22–1.83x | 1.22–1.83x |
 | Cost ratio, if the true saving is 1.15x | inconclusive | inconclusive | inconclusive |
 | Preconditions fired | yes | yes | yes |
-| Detects a 40-point quality gap | 0.63 | 0.91 | 1.00 |
-| Detects a 20-point gap | 0.26 | 0.43 | 0.83 |
-| If arms are equal, concludes "no worse than" | 31.3 pts | 22.1 pts | 12.0 pts |
+| Detects a 40-point quality gap | 0.63 | 0.90 | 1.00 |
+| Detects a 20-point gap | 0.26 | 0.43 | 0.77 |
+| If arms are equal, concludes "no worse than" | 31.3 pts | 21.6 pts | 13.5 pts |
 
-Reproduce with `python3 bench/power.py`.
+Reproduce with `python3 bench/power.py`. Repetitions do not move the cost row:
+the cost ratio is paired across tasks, and pairing is what the between-task
+variance already costs. They buy quality power and run-to-run variance only.
 
 Twelve tasks proves the mechanism fires, screens for gross machinery loss and
 for catastrophe, and — if the saving turns out to be large enough to see —
@@ -727,11 +767,13 @@ the reviewer runs `sol` on read-only tools, so the nudge and the arm agree; had
 the reviewer been given a writable profile, the block would not have endorsed
 it and the disagreement would have belonged in the disclosure.
 
-**The TypeScript subset is one repository.** 25 of 28 instances are
-`angular/angular`. A result from the pilot is a statement about Angular, not
-about TypeScript, and the grading harness that reads Bazel targets will not
-transfer to the 3 ant-design instances without separate work. Either say so
-plainly in the result or widen the subset before drawing anything general.
+**The pilot is an Angular benchmark.** Not mostly Angular -- entirely. 25 of
+the 28 TypeScript instances are `angular/angular`, and the ant-design three are
+out of the pool by decision, so all 23 gradeable instances come from one
+repository. A result from this pilot is a statement about Angular, and the
+write-up has to say exactly that rather than "TypeScript". Widening means the
+top-up pools, not the three that were dropped; three instances would not have
+made it a statement about anything broader.
 
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.
@@ -754,8 +796,8 @@ is uninformative and must be reported as such rather than quietly used anyway.
    anything is measurable and unmeasured.
 3. ~~**Non-inferiority margin.**~~ **Settled: f = 0.5, absolute cap 10
    points.** `graph-luna` must retain half the `solo-sol`-over-`solo-luna` effect, and in
-   no case fall more than 10 points behind `solo-sol`. Neither is testable at 28
-   instances — see **Statistical design** — which is why the first run is a
+   no case fall more than 10 points behind `solo-sol`. Neither is testable at
+   the pool of 23 — see **Statistical design** — which is why the first run is a
    pilot that measures M1 and discordance and sizes the confirmatory run from
    them. The numbers are pre-registered here so that sizing cannot quietly
    become a choice of margin.
@@ -819,16 +861,60 @@ Grading runtime once the image is local: 9s to 112s per instance.
 The Angular subset is now swept in full: **25 of 25 validated, 23 with a
 fail-to-pass set — 92% yield, 78 targets in total.** The two without are
 `c_4a3d39c` and `c_7118dac`, both patching test helpers the climb cannot
-resolve to a test rule. **Size the pilot on 23**, not on the 28 the statistical
-design assumes. That is a real loss of power rather than a rounding error: the
-sizing tables in **Statistical design** are computed at n=28, and every one of
-them is optimistic by two instances at this pool size.
+resolve to a test rule. **The pilot is sized on 23**, which is a real loss of
+power against the 28 the design was originally sized at rather than a rounding
+error -- the tables in **Statistical design** now carry both, and the n=23
+columns are the ones that apply.
 
-The 3 ant-design instances are not validated and are not counted in the 23.
-The derivation climbs to Bazel rules and ant-design has none, so they need a
-second grading path for 3 of 28 instances in a design that already says a pilot
-result is a statement about Angular. Dropping them is the cheaper answer and
-the honest one, provided the write-up says so.
+### Why the ant-design three are out
+
+**Settled: dropped. The pool is 23.** They are recorded in
+`bench/excluded-instances.json`, which both the validation sweep and the pool
+loader read, and deliberately not in `validate-results.json` -- nothing was run
+on them, and that file's warrant is that every row in it was measured.
+
+Cost is not the reason, and an earlier draft of this section had it as the
+reason. A jest path -- run the changed test file, per file -- is *simpler* than
+the Bazel climb already built. Four other things decide it.
+
+**It buys no power.** At one repetition, from `power_gap` in
+`bench/power.py` (the 26 row is the hypothetical, so it is not a column of the
+table `python3 bench/power.py` prints):
+
+| pool | detect a 40-point gap | a 30-point gap | a 20-point gap |
+| --- | --- | --- | --- |
+| 23 | 0.90 | 0.70 | 0.43 |
+| 26 | 0.93 | 0.75 | 0.47 |
+
+Three instances move the machinery screen by three points of power. That is
+inside the noise of the placeholder resolve rate the simulation is centred on.
+
+**It does not fix the threat it looks like it fixes.** 23 Angular plus 3
+ant-design is still an Angular benchmark, and the write-up still has to say so.
+See **Threats to validity**.
+
+**The grader would be an exact-output oracle on the largest one.** In
+`ant-design__ant-design-52470`, 13 of the 15 files the `test_patch` touches are
+`__snapshots__/*.snap`, and the change in them is a class rename --
+`ant-skeleton-content` to `ant-skeleton-section` -- which the problem statement
+spells out by name. Grading it scores whether the agent reproduced a named
+string. That is the grader **Why the first suite could not answer it** says
+reports "quality equal" almost by construction. No Angular `test_patch` in the
+subset contains a snapshot file at all.
+
+**Two graders make a three-instance difference unattributable.** Every Angular
+instance is graded by one derivation with one oracle. A second path means an
+arm-level difference on those three could be the grader rather than the arm,
+and in a 23-task paired design there is no n to spare on noise.
+
+The honest counterweight, recorded because it is the one real loss:
+`ant-design__ant-design-53739` is the instance in the subset best shaped for
+fan-out -- a 39-file gold patch spanning drawer, dropdown and tooltip, with
+only 1 of its 6 changed test files a snapshot. It is not worth a second grading
+path on its own.
+
+Removing an entry from `bench/excluded-instances.json` is how this is
+revisited; the sweep picks the instance up again on its next run.
 
 The grading path is proven end to end on one instance:
 `bench/grade-selftest.mjs` ran `angular__angular-64903` with the gold patch
@@ -864,7 +950,8 @@ BENCH_RMI=1 python3 bench/validate-instances.py            # or name instances
 #    for the agent and must grade as resolved.
 BENCH_RMI=1 node bench/grade-selftest.mjs
 
-# 3. Draw the task order, once. Refused while instances are still unvalidated.
+# 3. Draw the task order, once. Refused while instances are still unvalidated;
+#    the excluded ones count as accounted for, so this needs no flag.
 node bench/bench.mjs init --seed 1234
 
 # 4. Work the queue, a few cells at a time.

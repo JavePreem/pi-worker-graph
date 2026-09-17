@@ -214,11 +214,14 @@ What remains, in order:
    saving to defend.
 
    The Angular subset is swept in full: 25 of 25 validated, 23 with a
-   fail-to-pass set. The 3 ant-design instances are not done and need a second
-   derivation path, because the current one climbs to Bazel rules and
-   ant-design has none; dropping them and sizing the pilot on 23 is the cheaper
-   answer for 3 instances out of 28, and it is a design call rather than a
-   mechanical one.
+   fail-to-pass set. **The pool is settled at 23.** The 3 ant-design instances
+   are out by decision, recorded in `bench/excluded-instances.json` and argued
+   in `bench/DESIGN.md` "Why the ant-design three are out": they buy three
+   points of power, they do not make the pilot any less an Angular benchmark,
+   the largest of them would be graded by a snapshot oracle over a class rename
+   the problem statement names, and a second grading path would make any
+   difference on those three unattributable. `bench/bench.mjs init` therefore
+   needs no `--partial-pool`.
 
    Two things then stand between the harness and the first cell.
    `bench/grade-selftest.mjs` has proven the grading path on one instance --
@@ -237,8 +240,8 @@ What remains, in order:
    and neither blocks the harness.
 
    The pool is 23 instances, not the 28 the statistical design's tables are
-   computed at, so every figure in that section is optimistic by two -- by five
-   if ant-design goes. The conclusions do not change; they get slightly worse.
+   computed at, so every figure in that section is optimistic by five. The
+   conclusions do not change; they get slightly worse.
 2. Keep every automated path provider-free behind the existing fake subprocess
    and injected orchestrator boundaries.
 

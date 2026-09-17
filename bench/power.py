@@ -164,8 +164,12 @@ def cost_ratio_interval(tasks, true_ratio, rng):
     return math.exp(st.fmean(logs) - half), math.exp(st.fmean(logs) + half)
 
 
-MARGIN_CASES = ((28, 1), (28, 3), (28, 5), (56, 3), (112, 3))
-BUDGET_CASES = ((12, 1), (24, 1), (28, 1), (28, 3))
+# 23 is the pool; 28 is the TypeScript subset the earlier tables were computed
+# at. Both are carried so DESIGN.md's table can be regenerated as it stands.
+MARGIN_CASES = ((23, 1), (23, 3), (28, 1), (28, 3), (56, 3), (112, 3))
+# Exactly the columns of DESIGN.md "What a given amount of accumulated work can
+# say": a first tranche, the pool exhausted, and the pool at three repetitions.
+BUDGET_CASES = ((12, 1), (23, 1), (23, 3))
 
 
 def margin_table():
@@ -200,10 +204,12 @@ def cost_table(sims=2000, seed=2):
     expensive reviewer. A small ratio needs more tasks to establish, not fewer.
     """
     print("\nTypical 95% CI on the cost ratio, by true saving and task count")
-    print(f"{'true':>6}  " + "  ".join(f"{n} tasks".rjust(14) for n in (3, 6, 12, 24)))
+    # 23 is the pool exhausted at one repetition, which is the most this
+    # design can buy on cost before repetitions start costing more than tasks.
+    print(f"{'true':>6}  " + "  ".join(f"{n} tasks".rjust(14) for n in (3, 6, 12, 23)))
     for ratio in (1.15, 1.5, 2.3, 5.0):
         cells = []
-        for tasks in (3, 6, 12, 24):
+        for tasks in (3, 6, 12, 23):
             rng = random.Random(seed)
             lows, highs = zip(*(
                 cost_ratio_interval(tasks, ratio, rng) for _ in range(sims)

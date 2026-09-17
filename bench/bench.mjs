@@ -18,7 +18,11 @@ import { fileURLToPath } from "node:url";
 
 import { analyse } from "./analyse.mjs";
 import { runCell } from "./cell.mjs";
-import { gradeableInstances, loadInstances } from "./dataset.mjs";
+import {
+  gradeableInstances,
+  loadExclusions,
+  loadInstances,
+} from "./dataset.mjs";
 import { createManifest, pendingCells, statusReport } from "./queue.mjs";
 import {
   appendRecord,
@@ -60,13 +64,22 @@ async function init() {
       row.language.toLowerCase() ===
       (process.env.BENCH_LANGUAGE ?? "typescript"),
   );
-  const unvalidated = subset.length - (gradeable.length + dropped.length);
-  if (unvalidated > 0 && !process.argv.includes("--partial-pool")) {
+  // Counted by id rather than by subtracting lengths: an exclusion or a record
+  // for an instance outside the subset would otherwise cancel out a genuinely
+  // unvalidated one and the pool would be drawn short without saying so.
+  const accounted = new Set([
+    ...gradeable.map((i) => i.id),
+    ...dropped.map((d) => d.id),
+  ]);
+  const unvalidated = subset
+    .map((row) => row.instance_id)
+    .filter((id) => !accounted.has(id));
+  if (unvalidated.length > 0 && !process.argv.includes("--partial-pool")) {
     throw new Error(
-      `${unvalidated} of ${subset.length} instances are not validated yet. ` +
-        "The task order is drawn once and cannot be extended: finish " +
-        "validate-instances.py, or pass --partial-pool to fix the order over " +
-        "the smaller pool deliberately.",
+      `${unvalidated.length} of ${subset.length} instances are not validated ` +
+        `yet: ${unvalidated.join(", ")}. The task order is drawn once and ` +
+        "cannot be extended: finish validate-instances.py, or pass " +
+        "--partial-pool to fix the order over the smaller pool deliberately.",
     );
   }
   const seed = Number(flag("seed", String(Date.now() % 2 ** 31)));
@@ -88,8 +101,12 @@ async function init() {
       (await readAgentSettings(AGENT_DIR)).defaultProvider,
   });
   const paths = await writeManifest(STORE, manifest);
+  // Split, because the two are different claims: one is a derivation that came
+  // up empty, the other a decision someone took. A single total hides which.
+  const excluded = await loadExclusions();
   console.log(
-    `${manifest.order.length} tasks, seed ${seed}, ${dropped.length} dropped`,
+    `${manifest.order.length} tasks, seed ${seed}, ${dropped.length} dropped ` +
+      `(${dropped.length - excluded.size} ungradeable, ${excluded.size} excluded)`,
   );
   console.log(
     `${pendingCells(manifest, []).length} cells -> ${paths.manifest}`,

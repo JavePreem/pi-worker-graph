@@ -11,7 +11,8 @@ Resumable. Results accumulate in bench/validate-results.json, and an instance
 already recorded there is skipped, so the sweep can be run a couple of
 instances at a time -- which on a small host it has to be. Named instance ids
 are validated in the order given; with no arguments the whole TypeScript subset
-is swept, minus what is already recorded.
+is swept, minus what is already recorded and minus what
+bench/excluded-instances.json keeps out of the pool by decision.
 
 Dataset pages are fetched to $BENCH_SCRATCH on first use; see DESIGN.md
 "Measured".
@@ -21,6 +22,7 @@ import json, os, re, subprocess, sys, time, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRATCH = os.environ.get("BENCH_SCRATCH", "/tmp/pi-worker-graph-bench")
 RESULTS = os.environ.get("BENCH_RESULTS", f"{HERE}/validate-results.json")
+EXCLUSIONS = f"{HERE}/excluded-instances.json"
 LANGUAGE = os.environ.get("BENCH_LANGUAGE", "typescript")
 MEM_LIMIT = os.environ.get("BENCH_MEM", "6g")
 CPU_LIMIT = os.environ.get("BENCH_CPUS", "4")
@@ -135,10 +137,27 @@ by_id = {r["row"]["instance_id"]: r["row"] for r in rows}
 results = json.load(open(RESULTS)) if os.path.exists(RESULTS) else []
 done = {r["instance_id"] for r in results}
 
+# Instances kept out of the pool by decision rather than by a derivation that
+# came up empty. They are skipped even when named explicitly: an entry removed
+# from the file is how the decision is revisited, and a run that could override
+# it would leave a record the pool still refuses, which reads as a bug.
+excluded = json.load(open(EXCLUSIONS)) if os.path.exists(EXCLUSIONS) else {}
+if not isinstance(excluded, dict):
+    sys.exit(f"{EXCLUSIONS}: expected an object of id -> reason")
+unknown = sorted(i for i in excluded if i not in by_id)
+if unknown:
+    sys.exit(f"{EXCLUSIONS} names instances absent from the dataset: "
+             f"{', '.join(unknown)}. An exclusion that matches no instance "
+             "leaves it in the pool while still counting as dropped.")
+
 if not IDS:
     IDS = [i for i, r in by_id.items() if r["language"].lower() == LANGUAGE]
-pending = [i for i in IDS if i not in done]
-print(f"{len(done)} recorded, {len(pending)} to validate -> {RESULTS}", flush=True)
+skipped = [i for i in IDS if i in excluded]
+pending = [i for i in IDS if i not in done and i not in excluded]
+print(f"{len(done)} recorded, {len(skipped)} excluded, "
+      f"{len(pending)} to validate -> {RESULTS}", flush=True)
+for iid in skipped:
+    print(f"  excluded: {iid}: {excluded[iid]}", flush=True)
 
 for iid in pending:
     inst = by_id[iid]

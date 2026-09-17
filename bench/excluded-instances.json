@@ -1,0 +1,5 @@
+{
+  "ant-design__ant-design-52470": "ant-design declares no Bazel test rules, so the target derivation does not apply, and its test patch is 13 snapshot files: an exact-output oracle. See DESIGN.md \"Why the ant-design three are out\".",
+  "ant-design__ant-design-53739": "ant-design declares no Bazel test rules, so the target derivation does not apply. See DESIGN.md \"Why the ant-design three are out\".",
+  "ant-design__ant-design-54813": "ant-design declares no Bazel test rules, so the target derivation does not apply. See DESIGN.md \"Why the ant-design three are out\"."
+}
