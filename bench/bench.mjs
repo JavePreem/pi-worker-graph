@@ -8,6 +8,10 @@
  *   analyse         the reading, asked for deliberately
  *   cell <id> <arm> --cap U   one named cell, outside queue and store
  *
+ * Both runners take --settle-minutes; a queued cell defaults to 60 and a
+ * trial to 20. A trial also takes --events <file>, which writes the session's
+ * event stream: a record says what happened, a transcript says why.
+ *
  * `status` is what may be consulted between runs. `analyse` is not: deciding
  * whether to continue after seeing the quality gap is repeated testing of
  * accumulating data. See DESIGN.md "Accumulation".
@@ -26,7 +30,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { analyse } from "./analyse.mjs";
-import { armNames } from "./arms.mjs";
+import { armModels, armNames } from "./arms.mjs";
 import { runCell } from "./cell.mjs";
 import {
   gradeableInstances,
@@ -45,13 +49,68 @@ import {
   readRecords,
   writeManifest,
 } from "./store.mjs";
-import { prepareToolchain, readAgentSettings } from "./toolchain.mjs";
+import {
+  assertModelsServed,
+  prepareToolchain,
+  providerEndpointHost,
+  readAgentSettings,
+} from "./toolchain.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STORE = process.env.BENCH_STORE ?? path.join(HERE, "store");
 const AGENT_DIR =
   process.env.BENCH_AGENT_DIR ?? path.join(homedir(), ".pi", "agent");
 const TOOLCHAIN = process.env.BENCH_TOOLCHAIN ?? path.join(HERE, ".toolchain");
+
+/**
+ * A path flag that a trial may write to, which is anywhere but the store.
+ *
+ * A hand-picked cell is not a sample from the drawn order, so nothing it
+ * produces may land where the analysis reads.
+ */
+function outsideStore(name) {
+  const value = flag(name);
+  if (
+    value !== undefined &&
+    path.resolve(value).startsWith(path.resolve(STORE))
+  )
+    throw new Error(`--${name} must not write into the store`);
+  return value;
+}
+
+/**
+ * The one host a cell's container may reach, or undefined to leave it open.
+ *
+ * Confinement is the default because a cell runs an agent as root inside a
+ * third-party image with real credentials copied in; see DESIGN.md "What a
+ * cell exposes". `BENCH_EGRESS=open` turns it off, and says so in the record
+ * of what was run rather than being inferred from a missing flag.
+ *
+ * A provider whose endpoint cannot be read from the catalogue is not guessed
+ * at. Guessing wrong confines the cell away from the provider it needs, and
+ * that failure looks exactly like a model declining the task.
+ */
+async function egressAllowHost(provider) {
+  const mode = process.env.BENCH_EGRESS ?? "allowlist";
+  if (mode === "open") {
+    console.log("egress unconfined (BENCH_EGRESS=open)");
+    return undefined;
+  }
+  if (mode !== "allowlist")
+    throw new Error(`BENCH_EGRESS must be "allowlist" or "open", got: ${mode}`);
+  const host =
+    process.env.BENCH_EGRESS_ALLOW ??
+    (await providerEndpointHost(AGENT_DIR, provider));
+  if (host === undefined) {
+    throw new Error(
+      `cannot tell which host "${provider}" talks to, so the container ` +
+        "cannot be confined to it. Name it in BENCH_EGRESS_ALLOW, or set " +
+        "BENCH_EGRESS=open to run the cell with open egress deliberately.",
+    );
+  }
+  console.log(`egress confined to ${host}`);
+  return host;
+}
 
 /**
  * The per-cell spend ceiling, required rather than optional.
@@ -74,6 +133,23 @@ function requireCap() {
   if (!Number.isFinite(cap) || cap <= 0)
     throw new Error(`--cap must be a positive number of dollars, got: ${raw}`);
   return cap;
+}
+
+/**
+ * How long a cell may run before it is called a timeout, in minutes.
+ *
+ * `runCell` defaults to an hour, which is the right ceiling for a queued cell
+ * bought deliberately and the wrong one for a trial: a first live run that
+ * hangs should say so in ten minutes, not occupy the box for an hour to reach
+ * the same conclusion. Both commands take it; only the trial's default is
+ * short.
+ */
+function settleMs(defaultMinutes) {
+  const raw = flag("settle-minutes");
+  const minutes = raw === undefined ? defaultMinutes : Number(raw);
+  if (!Number.isFinite(minutes) || minutes <= 0)
+    throw new Error(`--settle-minutes must be a positive number, got: ${raw}`);
+  return Math.round(minutes * 60_000);
 }
 
 function flag(name, fallback) {
@@ -166,7 +242,7 @@ async function status() {
  * going to be refused for serving the wrong provider should be refused before
  * it spends a minute proving it can install Pi.
  */
-async function prepareExecution({ manifest } = {}) {
+async function prepareExecution({ manifest, arms = [] } = {}) {
   // The provider is read from the agent directory that actually holds the
   // credentials, rather than assumed: a bench that names the wrong one fails
   // every cell at `set_model` and says nothing about why.
@@ -179,6 +255,11 @@ async function prepareExecution({ manifest } = {}) {
   }
   console.log(`provider ${provider}`);
   if (manifest !== undefined) assertProviderMatches(manifest, provider);
+  const allowHost = await egressAllowHost(provider);
+  // Before the image, not after: a model the provider does not serve fails at
+  // `set_model`, which is minutes and ~14 GB of disk further in.
+  for (const arm of arms)
+    await assertModelsServed(AGENT_DIR, provider, armModels(arm));
 
   const toolchain = await prepareToolchain({
     dir: TOOLCHAIN,
@@ -188,7 +269,7 @@ async function prepareExecution({ manifest } = {}) {
   console.log(
     `pi ${toolchain.piVersion}, pi-worker-graph ${toolchain.packageVersion}`,
   );
-  return { toolchain, provider };
+  return { toolchain, provider, allowHost };
 }
 
 async function run(count) {
@@ -205,7 +286,10 @@ async function run(count) {
     return;
   }
 
-  const { toolchain } = await prepareExecution({ manifest });
+  const { toolchain, allowHost } = await prepareExecution({
+    manifest,
+    arms: [...new Set(queue.map((c) => c.arm))],
+  });
   if (toolchain.packageVersion !== undefined) {
     // The store says which package a cell measured, because a task re-run
     // under a different version is a different measurement.
@@ -226,6 +310,8 @@ async function run(count) {
       packageVersion: toolchain.packageVersion,
       provider,
       capUsd: cap,
+      settleMs: settleMs(60),
+      egressAllowHost: allowHost,
     });
     await appendRecord(STORE, record);
     console.log(
@@ -254,9 +340,11 @@ async function trialCell(taskId, armName) {
   // Checked before anything is started, not after. Every refusal in this
   // function has to land before the first container, because past that point
   // the cell has already been paid for.
-  const out = flag("out");
-  if (out !== undefined && path.resolve(out).startsWith(path.resolve(STORE)))
-    throw new Error("--out must not write into the store");
+  const out = outsideStore("out");
+  // A trial exists to be diagnosed, and the record alone cannot explain a
+  // session that settled without spending anything. The queue does not carry
+  // this: a stored run keeps records, not transcripts.
+  const events = outsideStore("events");
   const capUsd = requireCap();
 
   const { gradeable } = await gradeableInstances();
@@ -274,7 +362,10 @@ async function trialCell(taskId, armName) {
   const manifest = existsSync(path.join(STORE, "manifest.json"))
     ? await readManifest(STORE)
     : undefined;
-  const { toolchain, provider } = await prepareExecution({ manifest });
+  const { toolchain, provider, allowHost } = await prepareExecution({
+    manifest,
+    arms: [armName],
+  });
 
   // Repetition 0 can never be a queue cell -- `enumerateCells` counts from 1 --
   // so even if this record were copied into the store by hand it could not
@@ -300,6 +391,17 @@ async function trialCell(taskId, armName) {
     packageVersion: toolchain.packageVersion,
     provider,
     capUsd,
+    settleMs: settleMs(20),
+    egressAllowHost: allowHost,
+    onEvents:
+      events === undefined
+        ? undefined
+        : async (captured) => {
+            await writeFile(events, `${JSON.stringify(captured, null, 2)}\n`);
+            console.log(
+              `${captured.events.length} events, ${captured.toolCalls.length} tool calls -> ${events}`,
+            );
+          },
   });
 
   if (out !== undefined)

@@ -6,7 +6,11 @@ import path from "node:path";
 import test from "node:test";
 
 import { workerGraphConfig } from "./arms.mjs";
-import { makeAgentDirectory, readAgentSettings } from "./toolchain.mjs";
+import {
+  assertModelsServed,
+  makeAgentDirectory,
+  readAgentSettings,
+} from "./toolchain.mjs";
 
 async function fixtures(run, { auth = true } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "bench-toolchain-"));
@@ -132,4 +136,47 @@ test("the provider is read from the directory that holds the credentials", async
     );
     assert.deepEqual(await readAgentSettings(path.join(source, "nope")), {});
   });
+});
+
+test("an arm whose models the provider does not serve is refused", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-models-"));
+  await writeFile(
+    path.join(dir, "models-store.json"),
+    JSON.stringify({
+      "azure-openai-responses": {
+        models: [{ id: "gpt-5.6-luna" }, { id: "gpt-4o" }],
+      },
+    }),
+  );
+  await assert.rejects(
+    assertModelsServed(dir, "azure-openai-responses", [
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+    ]),
+    /does not serve gpt-5\.6-sol/,
+  );
+  await assert.doesNotReject(
+    assertModelsServed(dir, "azure-openai-responses", ["gpt-5.6-luna"]),
+  );
+});
+
+test("a provider the catalogue does not mention is not judged", async () => {
+  // The cache is evidence about providers it lists and a gap about the rest.
+  // Refusing on a gap would block a provider whose catalogue was never fetched.
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-models-"));
+  await writeFile(
+    path.join(dir, "models-store.json"),
+    JSON.stringify({ "github-copilot": { models: [{ id: "gpt-4o" }] } }),
+  );
+  await assert.doesNotReject(
+    assertModelsServed(dir, "azure-openai-responses", ["gpt-5.6-sol"]),
+  );
+  // Nor is an agent directory with no catalogue at all.
+  await assert.doesNotReject(
+    assertModelsServed(
+      await mkdtemp(path.join(tmpdir(), "bench-empty-")),
+      "x",
+      ["y"],
+    ),
+  );
 });

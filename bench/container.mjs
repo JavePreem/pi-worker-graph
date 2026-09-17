@@ -25,7 +25,7 @@ export const DEFAULT_LIMITS = {
   cpus: process.env.BENCH_CPUS ?? "4",
 };
 
-function run(args, { timeoutMs = 1_800_000, input } = {}) {
+export function run(args, { timeoutMs = 1_800_000, input } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(args[0], args.slice(1), {
       stdio: ["pipe", "pipe", "pipe"],
@@ -117,16 +117,73 @@ export async function awaitHeadroom({
 }
 
 /**
+ * The ProMax images carry their builder's corporate proxy in the image
+ * environment:
+ *
+ *     http_proxy=http://sys-proxy-rd-relay.byted.org:8118
+ *     https_proxy=http://sys-proxy-rd-relay.byted.org:8118
+ *
+ * That host resolves only inside the network the dataset was built on, so
+ * every outbound request from inside one of these containers fails there --
+ * for any provider, with any credentials. What it looks like from outside is
+ * an agent that accepts the prompt, retries three times on "Connection error."
+ * and settles having spent nothing, which reads as a model that declined the
+ * task rather than as a network that was never reachable. Measured on
+ * `angular__angular-64903`: curl exits 5, COULDNT_RESOLVE_PROXY, against both
+ * Azure and Copilot; cleared, both connect.
+ *
+ * Passing each variable empty overrides the image's value. Both cases are
+ * listed because clients disagree about which they read.
+ */
+const PROXY_OVERRIDES = [
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+].flatMap((name) => ["-e", `${name}=`]);
+
+/**
+ * What a cell gives up that it never needed.
+ *
+ * These images are third-party -- a public Docker Hub account, 1.8 GB of
+ * `node_modules` and a warm Bazel cache nobody here built -- and the cell runs
+ * an agent in one as root, with real provider credentials copied in so Pi can
+ * authenticate. The credentials are removed the moment the session closes
+ * (`bench/cell.mjs`), which bounds the window rather than the blast radius;
+ * this bounds the blast radius.
+ *
+ * `no-new-privileges` stops a setuid binary escalating. Dropping all
+ * capabilities leaves a workload that only compiles and runs tests unaffected
+ * -- verified by grading a gold patch under these flags, not assumed, because
+ * Bazel's sandbox uses namespaces and could have needed them. The pid ceiling
+ * is a bound on runaway parallelism rather than a security control.
+ *
+ * Deliberately not attempted: dropping root. The images build and test as
+ * root and changing that is likely to fail in ways that look like task
+ * failures, which is the one class of harness fault this bench cannot afford.
+ */
+const HARDENING = [
+  "--security-opt",
+  "no-new-privileges",
+  "--cap-drop",
+  "ALL",
+  "--pids-limit",
+  "4096",
+];
+
+/**
  * A running container for one instance. `sleep infinity` rather than the
  * image's own entrypoint: the cell drives it through a series of exec calls
  * and needs it to outlive each one.
  */
 export async function startContainer(
   image,
-  { name, limits = DEFAULT_LIMITS } = {},
+  { name, limits = DEFAULT_LIMITS, network, exec = run } = {},
 ) {
-  await run(["docker", "rm", "-f", name], { timeoutMs: 120_000 });
-  const started = await run([
+  await exec(["docker", "rm", "-f", name], { timeoutMs: 120_000 });
+  const started = await exec([
     "docker",
     "run",
     "-d",
@@ -134,6 +191,9 @@ export async function startContainer(
     limits.memory,
     "--cpus",
     limits.cpus,
+    ...PROXY_OVERRIDES,
+    ...HARDENING,
+    ...(network === undefined ? [] : ["--network", network]),
     "--name",
     name,
     image,

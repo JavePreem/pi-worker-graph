@@ -232,15 +232,30 @@ What remains, in order:
    breadth rather than an unrun code path, and it does not block a cell.
 
    What does block one is that **no cell has been run against a provider**, so
-   nothing in the agent-side path -- Pi inside the container, the package
-   loaded from the throwaway agent directory, `/swarm on`, the spend cap -- is
-   verified live. `bench/bench.mjs cell <instance-id> <arm>` runs one chosen
-   cell for exactly this, outside the queue and writing no record. Prove the
-   path on one `solo-luna` cell, the cheapest arm in the design, before buying
-   the twelve. The bench runs on `azure-openai-responses` rather than the
-   agent directory's `github-copilot` default, because the cost claim needs
-   per-token billing against a nameable rate card; `init` records the choice
-   and every later run is refused if it resolves to a different one.
+   nothing on the agent side is verified live.
+   `bench/bench.mjs cell <instance-id> <arm> --cap <usd>` runs one chosen cell
+   for exactly this, outside the queue and writing no record.
+
+   It takes **two** cells, not one. A solo arm gets no `worker-graph.json`
+   and no package tree --
+   `workerGraphConfig` returns undefined when an arm has no machinery
+   (`bench/arms.mjs`), and `makeAgentDirectory` then writes neither
+   (`bench/toolchain.mjs`) -- so there is no `/swarm on` in a `solo-luna` cell
+   to verify. It proves the harness: pull, container, agent directory from real
+   credentials, Pi installed, an RPC session on the arm's model, the settle
+   loop, the spend cap, diff capture, grading, record. That is most of what can
+   break and it costs $0.08-0.31.
+
+   The package path needs a `graph` arm, and the cheapest is `graph-luna` at
+   $1.28-5.11: both graph arms run a `sol` parent and a `sol` reviewer, so the
+   worker is the only difference between them and `graph-luna`'s is `luna`. Run both before
+   `init`: about $1.36-5.42 against $17-67 for the twelve, and if the graph
+   cell fails the twelve would have failed with it.
+
+   The bench runs on `azure-openai-responses` rather than the agent
+   directory's `github-copilot` default, because the cost claim needs per-token
+   billing against a nameable rate card; `init` records the choice and every
+   later run is refused if it resolves to a different one.
 
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and

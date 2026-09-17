@@ -58,6 +58,16 @@ export function armNames() {
   return Object.keys(ARMS);
 }
 
+/**
+ * Every model an arm needs, deduplicated. A solo arm needs one; a graph arm
+ * needs its parent, its workers and its reviewer, which may be two ids or
+ * three.
+ */
+export function armModels(name) {
+  const arm = armConfig(name);
+  return [...new Set([arm.parent, arm.worker, arm.reviewer].filter(Boolean))];
+}
+
 export function armConfig(name) {
   const arm = ARMS[name];
   if (!arm) throw new Error(`unknown arm: ${name}`);

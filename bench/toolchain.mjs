@@ -97,6 +97,65 @@ export async function readAgentSettings(from) {
 }
 
 /**
+ * The host a provider's requests go to, read from the catalogue the cell will
+ * actually run under rather than hard-coded.
+ *
+ * Only providers that declare a `baseUrl` can be confined to one destination,
+ * which is what `bench/egress.mjs` needs. A provider that declares none is not
+ * guessed at: the caller is told, and chooses between naming the host and
+ * running unconfined.
+ */
+export async function providerEndpointHost(agentDir, provider) {
+  let models;
+  try {
+    models = JSON.parse(
+      await readFile(path.join(agentDir, "models.json"), "utf8"),
+    );
+  } catch {
+    return undefined;
+  }
+  const baseUrl = models?.providers?.[provider]?.baseUrl;
+  if (typeof baseUrl !== "string") return undefined;
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Refuse an arm whose models the chosen provider does not serve.
+ *
+ * A bad model id surfaces at `set_model`, which is after the image has been
+ * pulled and the container started -- minutes of work and ~14 GB of disk to
+ * learn something the catalogue on disk already knew. The check is advisory in
+ * one direction only: a provider the cache does not mention at all cannot be
+ * judged, so it passes. A provider that is listed and does not carry the model
+ * is refused, because then the cache is evidence rather than a gap.
+ */
+export async function assertModelsServed(agentDir, provider, models) {
+  let store;
+  try {
+    store = JSON.parse(
+      await readFile(path.join(agentDir, "models-store.json"), "utf8"),
+    );
+  } catch {
+    return;
+  }
+  const served = store?.[provider]?.models;
+  if (!Array.isArray(served)) return;
+  const ids = new Set(served.map((m) => m?.id));
+  const missing = models.filter((m) => !ids.has(m));
+  if (missing.length > 0) {
+    throw new Error(
+      `provider "${provider}" does not serve ${missing.join(", ")}. ` +
+        `Its catalogue in ${agentDir}/models-store.json lists ${ids.size} ` +
+        "models; pick another provider or refresh the catalogue in Pi.",
+    );
+  }
+}
+
+/**
  * The throwaway agent directory a cell runs under: credentials, the model
  * catalogue, and -- for a `graph` arm -- the package itself. Discovered
  * extensions, skills, prompt templates and sessions are deliberately left

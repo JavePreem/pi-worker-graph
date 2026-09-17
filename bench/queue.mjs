@@ -223,6 +223,8 @@ export function makeRecord({
   preconditions,
   diff,
   detail,
+  egress,
+  brokerLog,
 }) {
   if (!CLASSES.includes(cellClass))
     throw new Error(`unknown cell class: ${cellClass}`);
@@ -236,6 +238,13 @@ export function makeRecord({
     preconditions,
     diff,
     detail,
+    // Which host the cell's container was confined to, or "open". A record
+    // that does not say cannot be told apart later from one that was not
+    // confined at all.
+    egress,
+    // Present only when there was a broker and the record is one whose cause
+    // it could settle.
+    ...(brokerLog === undefined ? {} : { brokerLog }),
     harnessVersion: manifest.harnessVersion,
     packageVersion: manifest.packageVersion,
     recordedAt: new Date().toISOString(),

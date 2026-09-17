@@ -212,3 +212,260 @@ test("a prompt the session refuses never becomes a task failure", async () => {
       error instanceof NotAttempted && error.reason === "prompt refused",
   );
 });
+
+test("a settled turn that spent nothing is not attempted, not a loss", async () => {
+  // The failure it guards, seen live on the first trial cell: Pi accepted the
+  // model and the prompt, settled in seconds, and reported zero tokens. The
+  // harness graded the untouched checkout and called it an unresolved task.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      settle: async () => ({
+        outcome: "settled",
+        stats: { cost: 0, tokens: { input: 0, output: 0, total: 0 } },
+      }),
+      grade: async () => {
+        throw new Error("a cell that never ran must not be graded");
+      },
+    }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "no-agent-turn");
+  assert.equal(record.costUsd, 0);
+});
+
+test("absent telemetry is not read as a spend of zero", async () => {
+  // Unknown and zero are different claims; only zero is evidence the agent
+  // never ran, and the runtime keeps them apart for the same reason.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      settle: async () => ({ outcome: "settled", stats: undefined }),
+    }),
+  });
+  assert.notEqual(record.outcome, "no-agent-turn");
+});
+
+test("a trial is handed the session transcript before the client closes", async () => {
+  let captured;
+  await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    onEvents: async (c) => {
+      captured = c;
+    },
+    deps: deps({
+      openAgentSession: async () =>
+        fakeClient({ events: [{ type: "e" }], toolCalls: [{ name: "t" }] }),
+    }),
+  });
+  assert.deepEqual(captured.events, [{ type: "e" }]);
+  assert.deepEqual(captured.toolCalls, [{ name: "t" }]);
+  // No broker on an unconfined cell, so nothing to say about its relay.
+  assert.equal(captured.brokerLog, undefined);
+});
+
+test("the credentials are removed from the container before grading runs", async () => {
+  // auth.json is real and the image is someone else's. Grading is the largest
+  // quantity of third-party code the cell runs, and it runs as root.
+  const commands = [];
+  const container = {
+    ...fakeContainer(),
+    exec: async (script) => {
+      commands.push(script);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      start: async () => container,
+      grade: async () => {
+        commands.push("GRADE");
+        return { resolved: true, outcome: "resolved", states: {} };
+      },
+    }),
+  });
+  const scrubbed = commands.findIndex((c) => c.includes("rm -rf"));
+  const graded = commands.indexOf("GRADE");
+  assert.ok(scrubbed !== -1, "agent directory was never removed");
+  assert.ok(scrubbed < graded, "credentials were still present during grading");
+});
+
+test("a cell that fails mid-flight still removes the credentials", async () => {
+  const commands = [];
+  const container = {
+    ...fakeContainer(),
+    exec: async (script) => {
+      commands.push(script);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      start: async () => container,
+      settle: async () => {
+        throw new Error("provider exploded");
+      },
+    }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.ok(commands.some((c) => c.includes("rm -rf")));
+});
+
+test("a confined cell's container is put on the broker's network", async () => {
+  // The only wiring of the two, and it is what makes confinement real rather
+  // than merely started.
+  let network;
+  await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    egressAllowHost: "provider.example",
+    deps: deps({
+      startBroker: async () => ({
+        network: "cell_net",
+        logs: async () => "",
+        stop: async () => {},
+      }),
+      start: async (_image, options) => {
+        network = options?.network;
+        return fakeContainer();
+      },
+    }),
+  });
+  assert.equal(network, "cell_net");
+});
+
+test("an unconfined cell starts no broker and names no network", async () => {
+  let started = false;
+  let network = "unset";
+  await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      startBroker: async () => {
+        started = true;
+        return { network: "n", logs: async () => "", stop: async () => {} };
+      },
+      start: async (_image, options) => {
+        network = options?.network;
+        return fakeContainer();
+      },
+    }),
+  });
+  assert.equal(started, false);
+  assert.equal(network, undefined);
+});
+
+test("the broker is torn down after the container that is attached to it", async () => {
+  const order = [];
+  await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    egressAllowHost: "provider.example",
+    deps: deps({
+      startBroker: async () => ({
+        network: "cell_net",
+        logs: async () => "",
+        stop: async () => order.push("broker"),
+      }),
+      start: async () => ({
+        ...fakeContainer(),
+        stop: async () => order.push("container"),
+      }),
+    }),
+  });
+  assert.deepEqual(order, ["container", "broker"]);
+});
+
+test("a trial keeps its measurement when the transcript cannot be written", async () => {
+  // By then the cell has run and been paid for. Losing the usage and the diff
+  // to report that a file could not be written is the wrong trade.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    onEvents: async () => {
+      throw new Error("ENOSPC");
+    },
+    deps: deps(),
+  });
+  assert.equal(record.class, "resolved");
+  assert.equal(record.costUsd, 1.25);
+});
+
+test("a record says which host the cell was confined to, or that it was not", async () => {
+  // A stored cell outlives the console line that announced the mode, and a
+  // run with open egress is not the same measurement as a confined one.
+  const confined = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    egressAllowHost: "provider.example",
+    deps: deps({
+      startBroker: async () => ({
+        network: "n",
+        logs: async () => "relay up",
+        stop: async () => {},
+      }),
+    }),
+  });
+  assert.equal(confined.egress, "provider.example");
+  assert.equal((await run()).egress, "open");
+});
+
+test("a cell that never settled carries the relay's account of why", async () => {
+  // A relay nothing could connect through hangs the agent instead of failing
+  // it, so the timeout record is exactly where that log is needed.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    egressAllowHost: "provider.example",
+    deps: deps({
+      startBroker: async () => ({
+        network: "n",
+        logs: async () => "relay up -> 203.0.113.7",
+        stop: async () => {},
+      }),
+      settle: async () => ({
+        outcome: "timeout",
+        stats: { cost: 0.5, tokens: { total: 4 } },
+      }),
+    }),
+  });
+  assert.equal(record.outcome, "timeout");
+  assert.equal(record.brokerLog, "relay up -> 203.0.113.7");
+});
+
+test("an unconfined cell's record carries no broker log at all", async () => {
+  assert.equal("brokerLog" in (await run()), false);
+});
+
+test("a transcript handler that is not async still cannot lose the cell", async () => {
+  // `onEvents?.(...).catch()` is itself a TypeError when the handler returns
+  // no promise, which the harness would then report as a cell that failed.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    onEvents: () => {
+      throw new Error("sync boom");
+    },
+    deps: deps(),
+  });
+  assert.equal(record.class, "resolved");
+});

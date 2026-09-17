@@ -731,6 +731,103 @@ Still to build:
   gold patch that does not grade as resolved is a harness fault rather than a
   model one.
 
+## What a cell exposes
+
+A cell copies real provider credentials into a container built by someone else
+and runs an agent in it as root. That is the security shape of this design, and
+it is worth stating rather than discovering.
+
+`auth.json` has to be inside the container, because Pi authenticates from the
+agent directory and Pi runs where the checkout is. The image is a public Docker
+Hub artifact carrying 1.8 GB of `node_modules` and a warm Bazel cache nobody
+here built, and grading executes a large quantity of that code. An agent driven
+by a model runs arbitrary `bash` in the same filesystem.
+
+Five things bound it, and none of them makes the credentials safe:
+
+- **The container can reach one host.** It runs on an `--internal` Docker
+  network, which has no route off the machine, and a broker container attached
+  to both that network and an ordinary one carries the provider's hostname as a
+  network alias. The confined container resolves the provider to the broker,
+  and the broker pipes bytes to the address it pinned before that alias
+  existed. Everything else fails at DNS. Measured from inside a cell's own
+  container: the provider answers 200 with the certificate validating, and
+  `example.com`, `api.github.com` and the npm registry all fail to resolve.
+  The relay never terminates TLS, so the handshake is end to end against the
+  real hostname -- nothing in the path can read the traffic, which is also why
+  nothing in the path has to be trusted with it. `BENCH_EGRESS=open` turns it
+  off deliberately; a provider whose endpoint cannot be read from the
+  catalogue is refused rather than guessed at, because confining a cell away
+  from the provider it needs looks exactly like a model declining the task.
+
+- **The credentials leave as soon as Pi is done.** The agent directory is
+  removed from the container the moment the session closes, before `test_patch`
+  is applied and before Bazel runs. That is a window, not a blast radius.
+- **The container gives up what it never needed**: `no-new-privileges`, all
+  capabilities dropped, a pid ceiling. Verified by grading a gold patch under
+  the flags rather than assumed.
+- **Nothing of the host is reachable**: no bind mounts, no Docker socket, not
+  privileged, not host networking, memory and CPUs capped.
+- **No interception is possible in the image as shipped**: no custom CA in the
+  trust bundle, `NODE_EXTRA_CA_CERTS` unset, the npm registry is the public
+  one. So the inherited proxy, had it resolved, would have seen CONNECT
+  hostnames and not payloads.
+
+**Confinement assumes the provider needs one host, and that is unverified.**
+It holds for `azure-openai-responses` under key auth, which is the configured
+arm. It would not hold for a provider that exchanges a token somewhere else
+first -- `github-copilot` at `api.github.com`, or Azure under AAD at
+`login.microsoftonline.com` -- and the symptom would be a cell that settles
+having spent nothing, which is the failure this design is least able to
+tolerate. Two things make it visible rather than silent: such a cell is classed
+`not-attempted`, never scored, and every record whose cause the relay could
+settle -- spent nothing, did not settle, or failed as harness -- carries the
+broker's log, alongside the host the cell was confined to or `open`. One
+`relay up` with no `connect` line means the confinement was pointed at the
+wrong host or an insufficient one. A `connect` line means traffic reached the
+provider and the fault is elsewhere. Settle it by reading that log on the first
+trial rather than by reasoning about it.
+
+A second residual: the relay pins the addresses it resolved at the start of the
+cell, and a cell may run for an hour against an endpoint with a short TTL.
+Every address the host resolves is carried, and a connection that cannot reach
+one tries the next, so a withdrawn address is survivable and a wholesale
+renumbering mid-cell is not. Low probability, accepted rather than fixed.
+
+The failover was measured rather than reasoned about, because the first
+version of it did not work: two Docker containers standing in for the
+endpoint, one dead and one live, a relay given both, and a client through it.
+An index that advanced twice per retry re-dialled the address that had just
+failed, which with the two addresses a real endpoint usually has meant no
+failover at all. Worse, a retry could fire after the client had been piped to
+a dead upstream -- its handshake already consumed, so the replacement
+connection received nothing and the cell hung until its settle window expired
+rather than failing one request. The guard is now "never connected" and the
+index advances once.
+
+Grading was checked against the confinement rather than assumed compatible
+with it: a Bazel test target builds and runs to a pass on the internal network,
+because the image's cache is warm enough to need no fetches.
+
+Running the agent in a separate container from the checkout was considered and
+rejected. The state an agent needs spans `/testbed` and `/root/.cache/bazel`,
+about 5 GB, and the agent container would need the same toolchain anyway to
+build and test -- which in practice means the same image, buying nothing. An
+agent that cannot run tests is measuring a different task. And the split would
+not remove untrusted code execution, only separate it from the credentials,
+which the egress confinement does more cheaply and without touching what is
+measured.
+
+**The mitigation that actually matters is not in this repository.** Point
+`BENCH_AGENT_DIR` at a directory holding a scoped, rotatable key that reaches
+the two arm models and nothing else. Running the bench with credentials you
+would mind losing is the risk; everything above only bounds it.
+
+Note also that clearing the inherited proxy is what gave these containers
+working egress at all. Before it they could reach nothing, which was
+containment by accident rather than by design, and the bench cannot run that
+way -- but it did mean the exposure described here arrived with that fix.
+
 ## Threats to validity
 
 **A refactoring benchmark is the best case for fan-out.** ProMax selects for
@@ -942,6 +1039,24 @@ five. How much of that was pulling is not recorded -- the selftest writes only
 a total per instance -- but validating the same five spent 57% of its time on
 pulls, and the selftest does the same pull with half the test runs.
 
+**The images carry their builder's proxy, and it silently disables every
+provider.** The ProMax containers set `http_proxy` and `https_proxy` to
+`sys-proxy-rd-relay.byted.org:8118` in the image environment. That host
+resolves only inside the network the dataset was built on, so every outbound
+request from inside one fails -- `curl` exits 5, `COULDNT_RESOLVE_PROXY`,
+against Azure and Copilot alike. Measured on `angular__angular-64903`; cleared,
+both connect.
+
+What it looks like from outside is the dangerous part. Pi accepts `set_model`,
+which only checks the local catalogue, accepts the prompt, retries three times
+on `Connection error.`, and settles. The session looks clean, the checkout is
+untouched, and the arm is recorded as having failed the task. The first live
+cell of this bench did exactly that and was graded `not-resolved` at a cost of
+$0.00. `startContainer` now passes each proxy variable empty to override the
+image, and a cell that settles on zero tokens is classed `not-attempted`
+rather than scored -- two independent guards, because either alone would have
+let this through.
+
 Budget disk as well as tokens — an image is 2.5 GB compressed and ~14 GB
 unpacked, so a cell holds that much while it runs, and `BENCH_RMI=1` drops each
 image after its instance. Results are written per instance, so a resumed run
@@ -976,11 +1091,15 @@ BENCH_RMI=1 node bench/grade-selftest.mjs
 #    manifest records it, and every later run is checked against it.
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --seed 1234
 
-# 4. Prove the agent-side path on one chosen cell before buying twelve drawn
-#    ones: Pi in the container, the package from a throwaway agent directory,
-#    `/swarm on`, the spend cap. `solo-luna` is the cheapest arm in the design.
-#    Writes no record -- a hand-picked cell is not a sample from the order.
+# 4. Prove the agent side on two chosen cells before buying twelve drawn ones.
+#    Neither writes a record: a hand-picked cell is not a sample from the order.
+#    The solo cell proves the harness -- pull, container, agent directory, Pi,
+#    the session, the settle loop, the cap, the diff, the grade. It cannot
+#    prove the package: a solo arm is given no worker-graph.json and no package
+#    tree, so there is no `/swarm on` in it. That needs a graph arm, and
+#    graph-luna is the cheapest one.
 BENCH_RMI=1 node bench/bench.mjs cell angular__angular-64903 solo-luna --cap 2
+BENCH_RMI=1 node bench/bench.mjs cell angular__angular-64903 graph-luna --cap 8
 
 # 5. Work the queue, a few cells at a time.
 BENCH_RMI=1 node bench/bench.mjs run 12 --cap 5

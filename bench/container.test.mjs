@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { awaitHeadroom } from "./container.mjs";
+import { awaitHeadroom, startContainer } from "./container.mjs";
 
 test("headroom the host already has is not waited for", async () => {
   let waited = false;
@@ -36,4 +36,40 @@ test("a host that keeps the memory busy is polled until the deadline", async () 
     seen.slice(0, -1).every((giveUp) => giveUp === false),
     true,
   );
+});
+
+test("the image's inherited proxy is cleared, or nothing can reach a provider", async () => {
+  // The ProMax images carry their builder's internal proxy. Left in place it
+  // fails every outbound request from inside the container, and the agent
+  // settles having spent nothing -- indistinguishable, in the record, from a
+  // model that simply did not do the work.
+  let argv;
+  await startContainer("img", {
+    name: "c",
+    exec: async (args) => {
+      argv = args;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const joined = argv.join(" ");
+  for (const name of ["http_proxy", "https_proxy", "HTTPS_PROXY", "no_proxy"]) {
+    assert.ok(joined.includes(`-e ${name}=`), `${name} not cleared`);
+  }
+});
+
+test("a container gives up the privileges a compile-and-test workload never needs", async () => {
+  // The image is third-party and the cell runs an agent in it as root with
+  // real credentials copied in. This is the blast radius, not the window.
+  let argv;
+  await startContainer("img", {
+    name: "c",
+    exec: async (args) => {
+      argv = args;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const joined = argv.join(" ");
+  assert.ok(joined.includes("--security-opt no-new-privileges"));
+  assert.ok(joined.includes("--cap-drop ALL"));
+  assert.ok(joined.includes("--pids-limit"));
 });
