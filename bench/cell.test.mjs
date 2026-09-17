@@ -469,3 +469,159 @@ test("a transcript handler that is not async still cannot lose the cell", async 
   });
   assert.equal(record.class, "resolved");
 });
+
+test("a runaway diff is bounded, and says what it dropped", async () => {
+  // Whatever the agent writes lands in the record and then in an append-only
+  // store that keeps it for good. One generated file would otherwise be
+  // permanent.
+  const huge = `${"x".repeat(3 * 1024 * 1024)}\n`;
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      start: async () => ({
+        ...fakeContainer(),
+        exec: async () => ({ code: 0, stdout: huge, stderr: "" }),
+      }),
+    }),
+  });
+  assert.ok(record.diff.length < huge.length);
+  assert.match(record.diff, /diff truncated by the harness: 3145729 bytes/);
+});
+
+test("a record says which provider served it", async () => {
+  // A queued cell's provider is in the manifest; a trial has none, so without
+  // this a saved trial record cannot say what it measured against.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "solo-luna", repetition: 1 },
+    manifest,
+    provider: "azure-openai-responses",
+    deps: deps(),
+  });
+  assert.equal(record.provider, "azure-openai-responses");
+});
+
+const STARTUP = "Pi worker process failed to start";
+
+/**
+ * A `worker_graph` result in the shape the tool really returns: one answer for
+ * the whole graph, with a status line per node and every node's review as JSON
+ * (`finalText` in `src/orchestrator.ts`). The tests below turn on the
+ * difference between one node failing and all of them, so the fixture has to
+ * carry the per-node structure rather than a blob with the diagnostic in it.
+ */
+function graphResult(nodes) {
+  return [
+    `Worker graph finished. Run ID: x`,
+    ...nodes.map((n) => `${n.taskId}: ${n.status}`),
+    "<worker_graph_reports_json>",
+    JSON.stringify(nodes),
+    "</worker_graph_reports_json>",
+  ].join("\n");
+}
+
+test("a graph arm whose workers never started is not scored", async () => {
+  // Seen live: four worker_graph calls, every one "Pi worker process failed to
+  // start", no diff, every graph one task. Indistinguishable in the record
+  // from a model that declined to fan out, and the opposite conclusion.
+  const failed = graphResult([
+    { taskId: "investigate", status: "failed", diagnostics: STARTUP },
+  ]);
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "graph-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      openAgentSession: async () =>
+        fakeClient({
+          toolCalls: [
+            { toolName: "worker_graph", text: failed },
+            { toolName: "worker_graph", text: failed },
+          ],
+        }),
+      grade: async () => {
+        throw new Error("a cell whose workers never ran must not be graded");
+      },
+    }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "workers-never-started");
+  // The spend still happened and is still recorded.
+  assert.equal(record.costUsd, 1.25);
+});
+
+test("one worker failing to start does not discard the other three", async () => {
+  // The result is one blob for the whole graph, so a substring match on the
+  // startup diagnostic is true the moment any single node fails. Three workers
+  // ran here and the diff resolves the instance; that is a measurement, not a
+  // broken harness.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "graph-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      openAgentSession: async () =>
+        fakeClient({
+          toolCalls: [
+            {
+              toolName: "worker_graph",
+              text: graphResult([
+                { taskId: "a", status: "failed", diagnostics: STARTUP },
+                { taskId: "b", status: "succeeded" },
+                { taskId: "c", status: "succeeded" },
+                { taskId: "d", status: "succeeded" },
+              ]),
+            },
+          ],
+        }),
+    }),
+  });
+  assert.equal(record.class, "resolved");
+});
+
+test("a graph blocked behind a worker that never started is not scored", async () => {
+  // The root fails at startup and its dependants are never dispatched, so they
+  // carry no diagnostic of their own. No worker ran all the same.
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "graph-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      openAgentSession: async () =>
+        fakeClient({
+          toolCalls: [
+            {
+              toolName: "worker_graph",
+              text: graphResult([
+                { taskId: "a", status: "failed", diagnostics: STARTUP },
+                { taskId: "b", status: "blocked" },
+              ]),
+            },
+          ],
+        }),
+      grade: async () => {
+        throw new Error("a cell whose workers never ran must not be graded");
+      },
+    }),
+  });
+  assert.equal(record.outcome, "workers-never-started");
+});
+
+test("a graph arm whose workers ran is scored normally", async () => {
+  const record = await runCell({
+    instance,
+    cell: { task: "i1", arm: "graph-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      openAgentSession: async () =>
+        fakeClient({
+          toolCalls: [
+            { toolName: "worker_graph", text: "implement: succeeded" },
+          ],
+        }),
+    }),
+  });
+  assert.equal(record.class, "resolved");
+});

@@ -225,6 +225,7 @@ export function makeRecord({
   detail,
   egress,
   brokerLog,
+  provider,
 }) {
   if (!CLASSES.includes(cellClass))
     throw new Error(`unknown cell class: ${cellClass}`);
@@ -245,6 +246,9 @@ export function makeRecord({
     // Present only when there was a broker and the record is one whose cause
     // it could settle.
     ...(brokerLog === undefined ? {} : { brokerLog }),
+    // A queued cell's provider is in the manifest; a trial has no manifest,
+    // so without this nothing in a trial's record says what served it.
+    ...(provider === undefined ? {} : { provider }),
     harnessVersion: manifest.harnessVersion,
     packageVersion: manifest.packageVersion,
     recordedAt: new Date().toISOString(),

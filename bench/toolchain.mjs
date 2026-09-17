@@ -14,12 +14,14 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,6 +30,19 @@ import path from "node:path";
 export const CONTAINER_TOOLCHAIN = "/opt/pi-bench-tools";
 export const CONTAINER_AGENT_DIR = "/opt/pi-bench-agent";
 export const CONTAINER_PI = `${CONTAINER_TOOLCHAIN}/node_modules/.bin/pi`;
+
+/**
+ * The PATH Pi runs under, and therefore the one its worker subprocesses
+ * inherit.
+ *
+ * Pi is started with no shell at all (`docker exec -i ... ${CONTAINER_PI}`),
+ * so nothing sources `/etc/profile` and the image's own `ENV PATH` is whatever
+ * it happens to be. Naming it here makes the environment the workers get the
+ * same thing this file checks, rather than two environments that agree by
+ * luck; `/usr/local/bin` is first because that is where the link below goes.
+ */
+export const CONTAINER_PATH =
+  "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -77,6 +92,10 @@ export async function prepareToolchain({
     await readFile(path.join(dir, "package-lock.json"), "utf8"),
   );
   const versionOf = (name) => lock.packages?.[`node_modules/${name}`]?.version;
+  // The tree is `docker cp`'d into every container, where it is owned by a
+  // uid nothing runs as. Same reason as the agent directory below, and the
+  // failure is worse: an unreadable `pi` kills the cell before it starts.
+  await widenToForeignUid(dir);
   return {
     dir,
     piVersion: versionOf("@earendil-works/pi-coding-agent"),
@@ -237,7 +256,57 @@ export async function makeAgentDirectory({
     )}\n`,
   );
 
+  await widenToForeignUid(dir);
+  // The one mode that has to be narrow, and the one `mkdtemp` already gives.
+  // Set again so the invariant holds by construction rather than by trust.
+  await chmod(dir, 0o700);
   return { dir, dispose: () => rm(dir, { recursive: true, force: true }) };
+}
+
+/**
+ * Make everything under a copied-in directory usable by a uid that does not own
+ * it, which sounds wrong for credentials and is not.
+ *
+ * `docker cp` preserves the host UID, and the container runs as root with
+ * every capability dropped -- including CAP_DAC_OVERRIDE, the one that lets
+ * root ignore file permissions, and CAP_CHOWN, the one that would let it take
+ * ownership instead. A mode of 0600 owned by the host user is therefore
+ * unreadable *by Pi itself*, which surfaces as "Model not found" and an
+ * unauthenticated session rather than as a permission error. What restricts
+ * access is the directory: 0700 here, and 0700 again in the container once the
+ * copy has landed. The modes inside only have to let the process that needs
+ * them in.
+ *
+ * Write, not just read, because Pi writes back into its own agent directory: a
+ * catalogue refresh rewrites `models-store.json`, and an OAuth arm rewrites
+ * `auth.json` when the token is refreshed. Left at 0644 those rewrites fail
+ * with EACCES, and the arm dies in the same quiet way. Executability is
+ * carried across rather than granted, because the toolchain tree's `.bin`
+ * entries have to stay runnable and nothing else has any business being so.
+ *
+ * Symlinks are left alone: a mode on a symlink means nothing on Linux and
+ * `chmod` would follow it, possibly out of the tree. The entries a
+ * `node_modules/.bin` points at are inside the tree and are reached by walking
+ * it.
+ *
+ * Done as a pass at the end rather than as a mode on each write, because a
+ * mode handed to `writeFile` or `mkdir` is masked by the process umask: under
+ * `umask 077` the files come out 0600 however they were asked for, and the
+ * failure that follows is the silent one above. `cp` and `npm install`
+ * likewise carry their own modes across. `chmod` ignores the umask.
+ */
+async function widenToForeignUid(dir) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      await chmod(full, 0o777);
+      await widenToForeignUid(full);
+    } else if (entry.isFile()) {
+      const { mode } = await stat(full);
+      await chmod(full, mode & 0o111 ? 0o777 : 0o666);
+    }
+  }
 }
 
 /** Put the prepared toolchain and agent directory inside a running container. */
@@ -251,12 +320,49 @@ export async function installInContainer(
   await container.copyIn(`${toolchainDir}/.`, CONTAINER_TOOLCHAIN);
   await container.copyIn(`${agentDir}/.`, CONTAINER_AGENT_DIR);
   await container.exec(`chmod 700 ${CONTAINER_AGENT_DIR}`);
+
+  // `pi` has to be on PATH, or a `graph` arm spawns no workers.
+  //
+  // The package identifies Pi positively, by resolving Pi's package from its
+  // own location (`src/pi-subprocess.ts`). Here it cannot: Pi is installed in
+  // one tree and the package in another, because Pi loads a package from the
+  // agent directory's npm tree and that is where a real install puts it. The
+  // resolution therefore falls through to spawning a bare `pi`, and the
+  // image's PATH does not carry this toolchain. Every worker then fails to
+  // start, the orchestrator is told only that, and the cell records the arm
+  // as having failed the task.
+  //
+  // A real install does not have this gap -- Pi is either a bundled binary,
+  // which the package recognises, or an npm install that is already on PATH.
+  // The link is what makes the container resemble that rather than a defect
+  // being worked around.
+  await container.exec(`ln -sf ${CONTAINER_PI} /usr/local/bin/pi`);
+
+  // Run the binary before asking whether it is on PATH, so a toolchain that
+  // did not survive the copy is named as what it is. The link resolves through
+  // the same tree, so a missing or unexecutable `pi` would otherwise surface
+  // first as a dangling symlink and be reported as a PATH problem.
   const check = await container.exec(`${CONTAINER_PI} --version`, {
     timeoutMs: 120_000,
   });
   if (check.code !== 0) {
     throw new Error(
       `pi will not run in the container: ${check.stderr.slice(-400)}`,
+    );
+  }
+
+  // Checked under the PATH Pi is actually started with, not the shell's.
+  // `container.exec` runs `bash -lc`, and a login shell sources
+  // `/etc/profile`, which sets a PATH of its own; Pi is started with no shell
+  // and hands its own environment to every worker it spawns. Verifying the
+  // login shell's PATH would pass on an image whose workers still find no
+  // `pi`, which is the one failure this check exists to make impossible.
+  const onPath = await container.exec(
+    `env -i PATH=${CONTAINER_PATH} sh -c 'command -v pi'`,
+  );
+  if (onPath.code !== 0) {
+    throw new Error(
+      "pi is not on PATH in the container; a graph arm would spawn no workers",
     );
   }
   return check.stdout.trim();

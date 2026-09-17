@@ -122,46 +122,79 @@ export function costPerResolved(manifest, records) {
 }
 
 /**
- * How much of a `graph` cell's spend went to workers rather than to the parent
- * and the reviewer. This is the ratio that caps every cost claim: if the
- * parent and reviewer dominate, the saving cheap workers can buy is whatever
- * is left, however cheap they are.
+ * How much of a `graph` cell's spend went to its worker graphs rather than to
+ * the orchestrator. This is the ratio that caps every cost claim: if the
+ * expensive side dominates, the saving cheap workers can buy is whatever is
+ * left, however cheap they are.
+ *
+ * **It is not the worker share, and cannot be.** The tool reports one cost per
+ * node, and a node's accounting sums every round of its work-review-repair
+ * cycle into a single attempt (D20). The reviewer runs `sol` while the worker
+ * runs `luna`, so each node's figure is a blend of the two. Measured on the
+ * first live `graph-luna` cell, the implied prices were $1.12/M input and
+ * $8.10/M output -- between `luna`'s $0.20/$1.20 and `sol`'s $4.00/$20.00, and
+ * matching neither. Separating them needs per-role accounting the package does
+ * not expose, or an arm configured without review to calibrate against.
  *
  * Returns null when the tool's accounting could not be read. Unknown and zero
- * are kept apart on purpose -- a cell whose worker spend is unreadable is not
- * a cell whose workers were free.
+ * are kept apart on purpose -- a cell whose node spend is unreadable is not a
+ * cell whose workers were free.
  */
+const REPORTS_BLOCK =
+  /<worker_graph_reports_json>\s*(\[[\s\S]*?\])\s*<\/worker_graph_reports_json>/;
+
+/**
+ * The reports the tool returned, from result text that is prose wrapping a
+ * tagged JSON block rather than a JSON document.
+ *
+ * An earlier version parsed the whole text as JSON and looked for `nodes` or
+ * `reviews` on it. Neither is what the tool emits, so every real cell came
+ * back unreadable -- safely, but the metric never worked. A bare array is
+ * still accepted, because that is what a caller supplying its own results
+ * would most likely pass.
+ */
+export function parseWorkerReports(text) {
+  if (typeof text !== "string") return [];
+  const block = REPORTS_BLOCK.exec(text);
+  const json = block === null ? text : block[1];
+  try {
+    const parsed = JSON.parse(json);
+    if (Array.isArray(parsed)) return parsed;
+    const nodes = parsed?.nodes ?? parsed?.reviews;
+    return Array.isArray(nodes) ? nodes : [];
+  } catch {
+    return [];
+  }
+}
+
 export function spendSplit(record) {
   const texts = record.detail?.workerGraphResults;
   if (!Array.isArray(texts) || texts.length === 0) return null;
-  let workerCost = 0;
+  let nodeCost = 0;
   let read = false;
   for (const text of texts) {
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      continue;
-    }
-    const nodes = parsed?.nodes ?? parsed?.reviews ?? [];
-    if (!Array.isArray(nodes)) continue;
-    for (const node of nodes) {
+    for (const node of parseWorkerReports(text)) {
       const cost = node?.usage?.cost?.total;
       if (typeof cost === "number") {
-        workerCost += cost;
+        nodeCost += cost;
         read = true;
       }
     }
   }
   if (!read) return null;
   const total = record.costUsd;
+  const share =
+    typeof total === "number" && total > 0 ? nodeCost / total : null;
   return {
-    workerCostUsd: Number(workerCost.toFixed(4)),
+    nodeCostUsd: Number(nodeCost.toFixed(4)),
     totalCostUsd: total,
-    workerShare:
-      typeof total === "number" && total > 0
-        ? Number((workerCost / total).toFixed(4))
-        : null,
+    // Worker and reviewer together: see above.
+    nodeShare: share === null ? null : Number(share.toFixed(4)),
+    // A share above 1 is arithmetically impossible and means the two sides
+    // disagree, so it is surfaced rather than averaged into a headline. Seen
+    // on the first live cell: nodes summed to $2.05 against a session total of
+    // $1.39, while the token counts reconciled exactly.
+    inconsistent: share !== null && share > 1,
   };
 }
 
@@ -178,15 +211,24 @@ export function spendSplitReport(manifest, records) {
       // Named rather than averaged away: a cell whose accounting could not be
       // read is reported as unreadable, not as one with no worker spend.
       unreadable: own.length - splits.length,
-      meanWorkerShare:
-        splits.length === 0
+      // Cells whose two sides disagree are counted, not averaged in: a share
+      // above 1 is arithmetically impossible and means the accounting is
+      // wrong somewhere, which is a finding rather than a data point.
+      inconsistent: splits.filter((s) => s.inconsistent).length,
+      // Worker and reviewer together. `spendSplit` explains why they cannot
+      // be separated from what the tool reports.
+      meanNodeShare: (() => {
+        const usable = splits.filter(
+          (s) => !s.inconsistent && s.nodeShare !== null,
+        );
+        return usable.length === 0
           ? null
           : Number(
               (
-                splits.reduce((t, s) => t + (s.workerShare ?? 0), 0) /
-                splits.length
+                usable.reduce((t, s) => t + s.nodeShare, 0) / usable.length
               ).toFixed(4),
-            ),
+            );
+      })(),
     };
   }
   return out;

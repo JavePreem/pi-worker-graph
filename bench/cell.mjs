@@ -23,10 +23,60 @@ import { makeRecord } from "./queue.mjs";
 import { openPi } from "./rpc-client.mjs";
 import {
   CONTAINER_AGENT_DIR,
+  CONTAINER_PATH,
   CONTAINER_PI,
   installInContainer,
   makeAgentDirectory,
 } from "./toolchain.mjs";
+
+/**
+ * The package's own diagnostic for a worker subprocess that never started, one
+ * of a closed allowlist it is willing to surface (`src/execution-failure.ts`).
+ * Matched as a string because it crosses the tool boundary as result text.
+ */
+const WORKER_STARTUP_FAILURE = "Pi worker process failed to start";
+
+/**
+ * Whether one `worker_graph` result is a graph in which no worker ever ran.
+ *
+ * The tool answers once for the whole graph, not once per node: a status line
+ * per task and then every node's review as JSON (`finalText` in
+ * `src/orchestrator.ts`). A substring match over that blob is therefore true
+ * as soon as *one* node fails to start, which would throw away a cell where
+ * the other three ran and resolved the instance. The question is per node.
+ *
+ * A node counts as never having run when it carries the startup diagnostic,
+ * and also when it is `blocked` -- a node whose dependency failed to start is
+ * never dispatched, so it has no record and no diagnostic of its own. At least
+ * one node has to carry the diagnostic, or nothing here is evidence of a
+ * broken harness.
+ */
+function noWorkerStarted(text) {
+  const block =
+    /<worker_graph_reports_json>([\s\S]*?)<\/worker_graph_reports_json>/.exec(
+      text,
+    );
+  if (block === null) {
+    // A result shape this harness does not know how to read, which means the
+    // package moved under it. Fall back to the blunt match, but only where no
+    // node reports success, so the fallback cannot discard a cell that worked.
+    return text.includes(WORKER_STARTUP_FAILURE) && !/: succeeded$/m.test(text);
+  }
+  let reviews;
+  try {
+    reviews = JSON.parse(block[1]);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(reviews) || reviews.length === 0) return false;
+  return (
+    reviews.some((r) => r?.diagnostics === WORKER_STARTUP_FAILURE) &&
+    reviews.every(
+      (r) =>
+        r?.diagnostics === WORKER_STARTUP_FAILURE || r?.status === "blocked",
+    )
+  );
+}
 
 export class NotAttempted extends Error {
   constructor(reason, detail) {
@@ -95,6 +145,13 @@ async function openAgent(container, { arm, provider }) {
       TESTBED,
       "-e",
       `PI_CODING_AGENT_DIR=${CONTAINER_AGENT_DIR}`,
+      // Pi runs with no shell, so nothing here sources a profile and the PATH
+      // is whatever the image declared. A worker is spawned as a bare `pi`
+      // (see `installInContainer`), so an image that does not carry
+      // `/usr/local/bin` would spawn none. Named rather than inherited, so the
+      // environment the workers get is the one the toolchain check verified.
+      "-e",
+      `PATH=${CONTAINER_PATH}`,
       container.name,
       CONTAINER_PI,
       "--mode",
@@ -151,6 +208,18 @@ async function scrubAgentDirectory(container) {
   await container.exec(`rm -rf ${CONTAINER_AGENT_DIR}`, { timeoutMs: 60_000 });
 }
 
+/**
+ * The largest diff a record will carry.
+ *
+ * An agent is free to write whatever it likes into the checkout, and whatever
+ * it writes lands here: in memory, in the record, and then in an append-only
+ * store that keeps it for good. One cell that generates a file rather than
+ * editing one would otherwise be permanent. The cap is generous against real
+ * refactors -- the gold patches in this pool run to tens of kilobytes -- and
+ * the overflow says what it dropped rather than ending mid-hunk in silence.
+ */
+const MAX_DIFF_BYTES = 2 * 1024 * 1024;
+
 /** What the agent left in the checkout, before any test patch is applied. */
 async function captureDiff(container) {
   // `git add -N` first, so a file the agent created appears in the diff. A
@@ -160,7 +229,16 @@ async function captureDiff(container) {
     `cd ${TESTBED} && git add -A -N && git diff`,
     { timeoutMs: 300_000 },
   );
-  return result.code === 0 ? result.stdout : "";
+  if (result.code !== 0) return "";
+  const diff = Buffer.from(result.stdout, "utf8");
+  if (diff.length <= MAX_DIFF_BYTES) return result.stdout;
+  // Back off the cut to a character boundary while the first dropped byte is
+  // a UTF-8 continuation byte, so the kept text ends in a whole character
+  // rather than in a replacement char standing for half of one.
+  let end = MAX_DIFF_BYTES;
+  while (end > 0 && (diff[end] & 0xc0) === 0x80) end -= 1;
+  const note = `[diff truncated by the harness: ${diff.length} bytes captured, ${end} kept]`;
+  return `${diff.subarray(0, end).toString("utf8")}\n${note}\n`;
 }
 
 export async function runCell({
@@ -296,6 +374,7 @@ export async function runCell({
         cellClass: "not-attempted",
         outcome,
         manifest,
+        provider,
         usage: stats?.tokens,
         costUsd: stats?.cost,
         diff,
@@ -321,6 +400,7 @@ export async function runCell({
         cellClass: "not-attempted",
         outcome: "no-agent-turn",
         manifest,
+        provider,
         usage: stats.tokens,
         costUsd: stats.cost,
         diff,
@@ -341,6 +421,42 @@ export async function runCell({
       events: client.events,
       toolCalls: client.toolCalls,
     });
+
+    // A graph arm whose workers never started is not evidence about the task.
+    //
+    // It reaches the record looking exactly like a model that declined to fan
+    // out: every graph one task, nothing resolved, no diff. The two call for
+    // opposite responses -- one is a finding about the prompt surface, the
+    // other is a broken harness -- and only the tool's own diagnostics tell
+    // them apart. `analyse` deliberately reports a degenerate cell rather than
+    // dropping it, so a cell that got here by fault would be counted as a loss
+    // against the arm.
+    const results = client.toolCalls
+      .filter((c) => c.toolName === "worker_graph")
+      .map((c) => c.text ?? "");
+    const startupFailures = results.filter(noWorkerStarted).length;
+    if (results.length > 0 && startupFailures === results.length) {
+      return makeRecord({
+        cell,
+        cellClass: "not-attempted",
+        outcome: "workers-never-started",
+        manifest,
+        provider,
+        usage: stats?.tokens,
+        costUsd: stats?.cost,
+        preconditions,
+        diff,
+        egress,
+        detail: {
+          why:
+            `all ${results.length} worker_graph calls failed with ` +
+            `"${WORKER_STARTUP_FAILURE}", so no worker ran and the cell says ` +
+            "nothing about the task or about the model's decomposition",
+          workerGraphResults: results,
+        },
+      });
+    }
+
     const graded = await grade(container, {
       testPatch: instance.row.test_patch,
       targets: instance.targets,
@@ -361,6 +477,7 @@ export async function runCell({
       cellClass,
       outcome: graded.outcome,
       manifest,
+      provider,
       usage: stats?.tokens,
       costUsd: stats?.cost,
       preconditions,
@@ -389,6 +506,7 @@ export async function runCell({
       cellClass: "not-attempted",
       outcome: error.reason,
       manifest,
+      provider,
       egress,
       // The broker outlives this catch -- the `finally` below is what stops
       // it -- so a harness fault that was really a confinement fault can

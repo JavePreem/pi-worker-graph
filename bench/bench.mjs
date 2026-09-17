@@ -70,11 +70,17 @@ const TOOLCHAIN = process.env.BENCH_TOOLCHAIN ?? path.join(HERE, ".toolchain");
  */
 function outsideStore(name) {
   const value = flag(name);
-  if (
-    value !== undefined &&
-    path.resolve(value).startsWith(path.resolve(STORE))
-  )
+  if (value === undefined) return undefined;
+  if (path.resolve(value).startsWith(path.resolve(STORE)))
     throw new Error(`--${name} must not write into the store`);
+  // Checked now rather than discovered at the end. A failed write is swallowed
+  // where it happens, because by then the cell has been paid for and losing
+  // the measurement to report a bad path would be the worse trade -- but that
+  // means a directory that does not exist costs the whole transcript in
+  // silence, and the transcript is the reason the flag exists.
+  const parent = path.dirname(path.resolve(value));
+  if (!existsSync(parent))
+    throw new Error(`--${name}: ${parent} does not exist`);
   return value;
 }
 

@@ -764,8 +764,24 @@ Five things bound it, and none of them makes the credentials safe:
   removed from the container the moment the session closes, before `test_patch`
   is applied and before Bazel runs. That is a window, not a blast radius.
 - **The container gives up what it never needed**: `no-new-privileges`, all
-  capabilities dropped, a pid ceiling. Verified by grading a gold patch under
-  the flags rather than assumed.
+  capabilities dropped, a pid ceiling. Both halves were verified under the
+  flags rather than assumed, and it took both. Grading a gold patch proved
+  Bazel does not need the capabilities; that says nothing about the agent,
+  because grading never reads the agent directory. Dropping `CAP_DAC_OVERRIDE`
+  is what stops root ignoring file permissions, `docker cp` preserves the host
+  UID, and the carried credentials were written `0600` -- so the container's
+  own root could not read its `auth.json` or its model catalogue. Pi reported
+  that as `Model not found`, not as a permission error. The files are now
+  `0666`, `0777` where they were already executable, and the directory is the
+  restriction, `0700` on both sides, so no capability had to be given back.
+  Write and not only read, because Pi rewrites `auth.json` on a token refresh
+  and `models-store.json` on a catalogue refresh, and `CAP_CHOWN` is dropped
+  with the rest, so nothing in the container can take ownership instead. The
+  toolchain tree is widened the same way and for the same reason: it is
+  installed under the host umask and copied in whole, so under `umask 077` Pi's
+  own binary arrives unreadable. The general lesson is the one this bench
+  keeps relearning: a harness fault reaches the record wearing the costume of
+  a model that could not do the task.
 - **Nothing of the host is reachable**: no bind mounts, no Docker socket, not
   privileged, not host networking, memory and CPUs capped.
 - **No interception is possible in the image as shipped**: no custom CA in the
@@ -773,10 +789,11 @@ Five things bound it, and none of them makes the credentials safe:
   one. So the inherited proxy, had it resolved, would have seen CONNECT
   hostnames and not payloads.
 
-**Confinement assumes the provider needs one host, and that is unverified.**
-It holds for `azure-openai-responses` under key auth, which is the configured
-arm. It would not hold for a provider that exchanges a token somewhere else
-first -- `github-copilot` at `api.github.com`, or Azure under AAD at
+**Confinement assumes the provider needs one host. Measured, for the arm that
+runs here: it does.** A `solo-luna` cell on `azure-openai-responses` under key
+auth completed 21 turns and 20 tool calls with its container able to reach
+nothing else, and the broker logged three connections and no failures. It would
+not hold for a provider that exchanges a token somewhere else first -- `github-copilot` at `api.github.com`, or Azure under AAD at
 `login.microsoftonline.com` -- and the symptom would be a cell that settles
 having spent nothing, which is the failure this design is least able to
 tolerate. Two things make it visible rather than silent: such a cell is classed
@@ -785,8 +802,10 @@ settle -- spent nothing, did not settle, or failed as harness -- carries the
 broker's log, alongside the host the cell was confined to or `open`. One
 `relay up` with no `connect` line means the confinement was pointed at the
 wrong host or an insufficient one. A `connect` line means traffic reached the
-provider and the fault is elsewhere. Settle it by reading that log on the first
-trial rather than by reasoning about it.
+provider and the fault is elsewhere. That distinction earned its place on the
+first live trial: a cell failed at `set_model` showing `relay up` and no
+`connect`, which ruled out the network in one reading and sent the search to
+the container's filesystem, where the fault actually was.
 
 A second residual: the relay pins the addresses it resolved at the start of the
 cell, and a cell may run for an hour against an endpoint with a short TTL.
@@ -1056,6 +1075,83 @@ $0.00. `startContainer` now passes each proxy variable empty to override the
 image, and a cell that settles on zero tokens is classed `not-attempted`
 rather than scored -- two independent guards, because either alone would have
 let this through.
+
+**The first live cell cost a twentieth of its estimate, because of caching.**
+`solo-luna` on `angular__angular-64903`, confined, graded: 21 turns, 20 tool
+calls, a 2,438-byte diff over two files, unresolved on a target that still
+failed to build. 190s of wall clock and **$0.016** against the $0.08-$0.31 this
+document estimates for that arm.
+
+The reason is in the token split, and it is the whole finding:
+
+| | tokens | price /M | cost |
+| --- | --- | --- | --- |
+| input | 63 | $0.20 | $0.00001 |
+| output | 4,508 | $1.20 | $0.00541 |
+| cache read | 261,823 | $0.02 | $0.00524 |
+| cache write | 21,227 | $0.25 | $0.00531 |
+| **total** | **287,621** | | **$0.01597** |
+
+Ninety-one percent of the tokens were cache reads at a tenth of the input
+price. Every estimate in **Budget case** is computed from input and output
+prices alone and is therefore too high, perhaps by a large factor.
+
+Three cautions before anything is resized on this. It is one instance, on the
+cheapest arm, at one repetition. The `graph` arms pay orchestration overhead
+that caching does not erase, and their parent re-reads a repository across
+worker turns in a way a solo arm does not, so their cache behaviour may differ
+in either direction. And a cache hit rate measured on a task the agent failed
+in 21 turns is not obviously the rate on one it solves in sixty.
+
+What this does settle is that the twelve-cell spend split is cheap enough to
+buy without further deliberation, which is the decision it was blocking.
+
+**The first `graph-luna` cell: $1.39, 20 minutes, and the fan-out did not
+happen.** Four `worker_graph` calls, every one a single-task graph, on a real
+ProMax instance with workers that genuinely ran -- `recon` 11 turns,
+`implement-fieldtree-enumeration` 70, `repair-fieldtree-enumeration` 71,
+`final-proxy-invariant-repair` 17, two of them reviewed. The checkout gained
+14,211 bytes across four files and the target still failed to build.
+
+`graphSizes: [1,1,1,1]` is now a finding rather than an artefact. The first
+suite died of exactly this -- see **Why the first suite could not answer it** --
+and the package has since shipped its own fan-out guidance in the tool's
+prompt. On this instance it was not enough. That is the evidence open decision
+4 was waiting for, and one instance is not enough to settle it: the task may
+genuinely be one worker's worth of work.
+
+**The first spend split: 73.65% of the cell went to node work, 26.35% to the
+orchestrator.** It is one cell, and it is not the number the design asked for.
+Read **Start with the spend split** with the limitation below.
+
+**A node's cost is a blend of worker and reviewer, and cannot be separated.**
+The tool reports one cost per node, and a node sums every round of its
+work-review-repair cycle into one attempt (D20). The reviewer runs `sol` and
+the worker `luna`, so the figure is a mixture: measured implied prices were
+$1.12/M input and $8.10/M output, against `luna` at $0.20/$1.20 and `sol` at
+$4.00/$20.00. Neither matches, and four cost equations cannot resolve eight
+unknowns. Separating them needs per-role accounting the package does not
+expose, or the no-review arm this document already names as the first thing to
+add when there is budget. **That arm has been promoted by this measurement**:
+without it, "the saving was eaten by the reviewer" cannot be told from "the
+saving was eaten by the parent".
+
+**The metric had never run.** `spendSplit` called `JSON.parse` on the whole
+result text and looked for `nodes` or `reviews`. The tool emits prose wrapping
+a `<worker_graph_reports_json>` block holding a bare array, so every real cell
+returned unreadable -- safely, and therefore silently. It was found by running
+one cell and would otherwise have been found after twelve. The parser now reads
+the real shape, and the first thing it parses in its test is the text captured
+from that cell.
+
+One caution recorded because it was nearly published as a finding: the reported
+cost object carries `total` beside its components, so summing the object's
+values double-counts exactly. A 73.65% share read as 147% that way, which
+looked like the two sides disagreeing. A share above 1 is now surfaced as
+`inconsistent` rather than averaged into a headline, and the token counts --
+which reconciled exactly, 2,971,372 in nodes plus 245,073 in the parent
+against a session total of 3,216,445 -- are what confirmed the accounting was
+sound.
 
 Budget disk as well as tokens — an image is 2.5 GB compressed and ~14 GB
 unpacked, so a cell holds that much while it runs, and `BENCH_RMI=1` drops each

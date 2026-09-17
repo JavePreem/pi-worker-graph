@@ -231,20 +231,47 @@ What remains, in order:
    single-target instances of a shape already proven, so what is left there is
    breadth rather than an unrun code path, and it does not block a cell.
 
-   What does block one is that **no cell has been run against a provider**, so
-   nothing on the agent side is verified live.
-   `bench/bench.mjs cell <instance-id> <arm> --cap <usd>` runs one chosen cell
-   for exactly this, outside the queue and writing no record.
+   **The harness path is proven live.** A `solo-luna` cell ran end to end on
+   `azure-openai-responses` through `bench/bench.mjs cell <id> <arm> --cap
+   <usd>`, which runs one chosen cell outside the queue and writes no record:
+   Pi installed from the throwaway agent directory inside a container confined
+   to the provider's endpoint, 21 turns, 20 tool calls, a two-file diff, graded
+   unresolved on a target that still failed to build, credentials scrubbed
+   before grading, nothing left behind. 190s and **$0.016** -- a twentieth of
+   the $0.08-0.31 estimated for that arm, because 91% of its tokens were cache
+   reads priced at a tenth of input. `bench/DESIGN.md` carries the split and
+   the reasons not to generalise from one cell.
 
-   It takes **two** cells, not one. A solo arm gets no `worker-graph.json`
-   and no package tree --
+   Running it found two harness faults, each of which would have been recorded
+   as the cheap model failing the task. The ProMax images carry their builder's
+   unreachable proxy, which silently disables every provider. And
+   `--cap-drop ALL` removes `CAP_DAC_OVERRIDE`, so the container's own root
+   could not read the `0600` credentials `docker cp` left owned by the host
+   UID; Pi reported that as `Model not found`.
+
+   **The package path is proven too.** A `graph-luna` cell ran end to end:
+   four `worker_graph` calls, workers that did 169 turns between them, two
+   reviewed nodes, a four-file diff, graded unresolved. $1.39 and 20 minutes.
+   Getting there took two fixes -- `pi` was not on PATH in the container, so
+   every worker failed to spawn, and a cell whose workers never start is now
+   classed `not-attempted` rather than scored as the arm failing the task.
+
+   Three findings came out of it, in `bench/DESIGN.md` under **Measured**. The
+   orchestrator never fanned out: every graph held one task, which is what
+   killed the first fixture suite and is now evidence for open decision 4.
+   The spend split ran for the first time at 73.65% node share -- and it had
+   never worked before, because the parser expected a JSON document where the
+   tool emits prose wrapping a tagged block. And a node's cost blends worker
+   with reviewer and cannot be separated, which promotes the no-review arm
+   from an extension to the thing needed to attribute the saving at all.
+
+   It takes **two** cells, not one, and the package is what the second buys.
+   A solo arm gets no `worker-graph.json` and no package tree --
    `workerGraphConfig` returns undefined when an arm has no machinery
    (`bench/arms.mjs`), and `makeAgentDirectory` then writes neither
    (`bench/toolchain.mjs`) -- so there is no `/swarm on` in a `solo-luna` cell
-   to verify. It proves the harness: pull, container, agent directory from real
-   credentials, Pi installed, an RPC session on the arm's model, the settle
-   loop, the spend cap, diff capture, grading, record. That is most of what can
-   break and it costs $0.08-0.31.
+   to verify. `/swarm on`, the worker profiles, the subprocess workers and the
+   review cycle remain covered only by the automated suites against fakes.
 
    The package path needs a `graph` arm, and the cheapest is `graph-luna` at
    $1.28-5.11: both graph arms run a `sol` parent and a `sol` reviewer, so the
