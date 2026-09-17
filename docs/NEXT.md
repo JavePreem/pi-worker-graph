@@ -223,14 +223,24 @@ What remains, in order:
    difference on those three unattributable. `bench/bench.mjs init` therefore
    needs no `--partial-pool`.
 
-   Two things then stand between the harness and the first cell.
-   `bench/grade-selftest.mjs` has proven the grading path on one instance --
-   `angular__angular-64903`, gold patch in, resolved out, 327s, no provider
-   spend -- and the other 22 are unchecked. And no cell has been run against a
-   provider, so nothing in the agent-side path -- Pi inside the container, the
-   package loaded from the throwaway agent directory, `/swarm on`, the spend
-   cap -- is verified live. Prove that path on one `solo-luna` cell, the
-   cheapest arm in the design, before buying the twelve.
+   The grading path is no longer the open question.
+   `bench/grade-selftest.mjs` has proven it on 6 of 23 instances, all resolved
+   at no provider spend, and the five after the first were picked to cover
+   every multi-target shape in the pool -- 54 of its 78 targets, and the first
+   exercise `resolveTier1`'s regression branch has had. The other 17 are
+   single-target instances of a shape already proven, so what is left there is
+   breadth rather than an unrun code path, and it does not block a cell.
+
+   What does block one is that **no cell has been run against a provider**, so
+   nothing in the agent-side path -- Pi inside the container, the package
+   loaded from the throwaway agent directory, `/swarm on`, the spend cap -- is
+   verified live. `bench/bench.mjs cell <instance-id> <arm>` runs one chosen
+   cell for exactly this, outside the queue and writing no record. Prove the
+   path on one `solo-luna` cell, the cheapest arm in the design, before buying
+   the twelve. The bench runs on `azure-openai-responses` rather than the
+   agent directory's `github-copilot` default, because the cost claim needs
+   per-token billing against a nameable rate card; `init` records the choice
+   and every later run is refused if it resolves to a different one.
 
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and

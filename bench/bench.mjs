@@ -1,29 +1,44 @@
 #!/usr/bin/env node
 /**
- * The bench, as three commands over one store.
+ * The bench, as commands over one store.
  *
- *   init      draw the task order and record it, once
- *   status    spend, projected spend, complete tasks, preconditions
- *   run N     execute the next N pending cells
- *   analyse   the reading, asked for deliberately
+ *   init            draw the task order and record it, once
+ *   status          spend, projected spend, complete tasks, preconditions
+ *   run N --cap U   execute the next N pending cells, each capped at $U
+ *   analyse         the reading, asked for deliberately
+ *   cell <id> <arm> --cap U   one named cell, outside queue and store
  *
  * `status` is what may be consulted between runs. `analyse` is not: deciding
  * whether to continue after seeing the quality gap is repeated testing of
  * accumulating data. See DESIGN.md "Accumulation".
+ *
+ * `cell` exists because the first live cell has to be chosen rather than
+ * drawn. Nothing in the agent-side path -- Pi in the container, the package
+ * from a throwaway agent directory, `/swarm on`, the spend cap -- is proven
+ * until one runs, and the queue would sell the dearest arm first. It writes no
+ * record: a cell chosen by hand is not a measurement, and the analysis pairs
+ * across arms on a fixed order it must not see hand-picked entries in.
  */
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { analyse } from "./analyse.mjs";
+import { armNames } from "./arms.mjs";
 import { runCell } from "./cell.mjs";
 import {
   gradeableInstances,
   loadExclusions,
   loadInstances,
 } from "./dataset.mjs";
-import { createManifest, pendingCells, statusReport } from "./queue.mjs";
+import {
+  assertProviderMatches,
+  createManifest,
+  pendingCells,
+  statusReport,
+} from "./queue.mjs";
 import {
   appendRecord,
   readManifest,
@@ -37,6 +52,29 @@ const STORE = process.env.BENCH_STORE ?? path.join(HERE, "store");
 const AGENT_DIR =
   process.env.BENCH_AGENT_DIR ?? path.join(homedir(), ".pi", "agent");
 const TOOLCHAIN = process.env.BENCH_TOOLCHAIN ?? path.join(HERE, ".toolchain");
+
+/**
+ * The per-cell spend ceiling, required rather than optional.
+ *
+ * `capUsd` undefined means no ceiling (`bench/cell.mjs`), and the package
+ * under test has no budget of its own -- `docs/NEXT.md` defers that
+ * deliberately, on the grounds that the operator watching a run is the
+ * enforcement. That makes this flag the only ceiling there is, and a ceiling
+ * you can remove by forgetting it is not one. A cell that needs no limit can
+ * say so by naming a large number.
+ */
+function requireCap() {
+  const raw = flag("cap");
+  if (raw === undefined)
+    throw new Error(
+      "--cap <usd> is required: it is the only spend ceiling a cell has, " +
+        "because the package under test has no budget of its own.",
+    );
+  const cap = Number(raw);
+  if (!Number.isFinite(cap) || cap <= 0)
+    throw new Error(`--cap must be a positive number of dollars, got: ${raw}`);
+  return cap;
+}
 
 function flag(name, fallback) {
   const index = process.argv.indexOf(`--${name}`);
@@ -119,33 +157,16 @@ async function status() {
   console.log(JSON.stringify(statusReport(manifest, records), null, 2));
 }
 
-async function run(count) {
-  if (!Number.isInteger(count) || count < 1)
-    throw new Error("run needs a positive cell count");
-  const manifest = await readManifest(STORE);
-  const records = await readRecords(STORE);
-  const { gradeable } = await gradeableInstances();
-  const byId = new Map(gradeable.map((i) => [i.id, i]));
-  const queue = pendingCells(manifest, records).slice(0, count);
-  if (queue.length === 0) {
-    console.log("nothing pending");
-    return;
-  }
-
-  const toolchain = await prepareToolchain({
-    dir: TOOLCHAIN,
-    piSpec: flag("pi", "@earendil-works/pi-coding-agent@0.85.1"),
-    packageSpec: flag("package-spec", "pi-worker-graph@latest"),
-  });
-  console.log(
-    `pi ${toolchain.piVersion}, pi-worker-graph ${toolchain.packageVersion}`,
-  );
-  if (toolchain.packageVersion !== undefined) {
-    // The store says which package a cell measured, because a task re-run
-    // under a different version is a different measurement.
-    manifest.packageVersion = `pi-worker-graph@${toolchain.packageVersion}`;
-  }
-
+/**
+ * Everything a cell needs before a container is started, shared by `run` and
+ * `cell` so the one-off trial is equipped exactly as a queued cell is.
+ *
+ * The provider is settled first and the toolchain installed second, because
+ * `prepareToolchain` fetches from the registry on every call. A run that is
+ * going to be refused for serving the wrong provider should be refused before
+ * it spends a minute proving it can install Pi.
+ */
+async function prepareExecution({ manifest } = {}) {
   // The provider is read from the agent directory that actually holds the
   // credentials, rather than assumed: a bench that names the wrong one fails
   // every cell at `set_model` and says nothing about why.
@@ -157,8 +178,40 @@ async function run(count) {
     );
   }
   console.log(`provider ${provider}`);
+  if (manifest !== undefined) assertProviderMatches(manifest, provider);
 
-  const cap = flag("cap") === undefined ? undefined : Number(flag("cap"));
+  const toolchain = await prepareToolchain({
+    dir: TOOLCHAIN,
+    piSpec: flag("pi", "@earendil-works/pi-coding-agent@0.85.1"),
+    packageSpec: flag("package-spec", "pi-worker-graph@latest"),
+  });
+  console.log(
+    `pi ${toolchain.piVersion}, pi-worker-graph ${toolchain.packageVersion}`,
+  );
+  return { toolchain, provider };
+}
+
+async function run(count) {
+  if (!Number.isInteger(count) || count < 1)
+    throw new Error("run needs a positive cell count");
+  const cap = requireCap();
+  const manifest = await readManifest(STORE);
+  const records = await readRecords(STORE);
+  const { gradeable } = await gradeableInstances();
+  const byId = new Map(gradeable.map((i) => [i.id, i]));
+  const queue = pendingCells(manifest, records).slice(0, count);
+  if (queue.length === 0) {
+    console.log("nothing pending");
+    return;
+  }
+
+  const { toolchain } = await prepareExecution({ manifest });
+  if (toolchain.packageVersion !== undefined) {
+    // The store says which package a cell measured, because a task re-run
+    // under a different version is a different measurement.
+    manifest.packageVersion = `pi-worker-graph@${toolchain.packageVersion}`;
+  }
+
   for (const [index, cell] of queue.entries()) {
     console.log(
       `\n[${index + 1}/${queue.length}] ${cell.task} ${cell.arm} r${cell.repetition}`,
@@ -181,11 +234,89 @@ async function run(count) {
   }
 }
 
+/**
+ * One named cell, outside the queue.
+ *
+ * It refuses to write to the store. A hand-picked cell is not a sample from
+ * the drawn order, and the analysis pairs across arms on that order; letting
+ * one in would put a chosen task where a drawn one belongs. The record is
+ * printed instead, and `--out` writes it somewhere that is not the store.
+ */
+async function trialCell(taskId, armName) {
+  if (!taskId || !armName) {
+    throw new Error(
+      `usage: bench.mjs cell <instance-id> <arm>, arm one of ${armNames().join(", ")}`,
+    );
+  }
+  if (!armNames().includes(armName)) {
+    throw new Error(`unknown arm: ${armName}; one of ${armNames().join(", ")}`);
+  }
+  // Checked before anything is started, not after. Every refusal in this
+  // function has to land before the first container, because past that point
+  // the cell has already been paid for.
+  const out = flag("out");
+  if (out !== undefined && path.resolve(out).startsWith(path.resolve(STORE)))
+    throw new Error("--out must not write into the store");
+  const capUsd = requireCap();
+
+  const { gradeable } = await gradeableInstances();
+  const instance = gradeable.find((i) => i.id === taskId);
+  if (!instance) {
+    throw new Error(
+      `${taskId} is not a gradeable instance. ` +
+        `Pick one of: ${gradeable.map((i) => i.id).join(", ")}`,
+    );
+  }
+
+  // A trial is held to the store's provider when there is a store, so that a
+  // path proven on one rate card is not then bought on another. Before `init`
+  // there is nothing to check against and the printed line is the only record.
+  const manifest = existsSync(path.join(STORE, "manifest.json"))
+    ? await readManifest(STORE)
+    : undefined;
+  const { toolchain, provider } = await prepareExecution({ manifest });
+
+  // Repetition 0 can never be a queue cell -- `enumerateCells` counts from 1 --
+  // so even if this record were copied into the store by hand it could not
+  // settle a drawn cell or be picked up as one.
+  const cell = { task: taskId, arm: armName, repetition: 0 };
+  console.log(`\n${taskId} ${armName} (trial, not recorded)`);
+  const record = await runCell({
+    instance,
+    cell,
+    // Not a stored manifest: a trial has no drawn order behind it. Only the
+    // two version fields a record carries are needed, and they are the ones
+    // that say what was actually exercised.
+    manifest: {
+      harnessVersion: await harnessVersion(),
+      packageVersion:
+        toolchain.packageVersion === undefined
+          ? "pi-worker-graph@unknown"
+          : `pi-worker-graph@${toolchain.packageVersion}`,
+    },
+    agentDirectorySource: AGENT_DIR,
+    toolchainDir: toolchain.dir,
+    packageTree: toolchain.packageTree,
+    packageVersion: toolchain.packageVersion,
+    provider,
+    capUsd,
+  });
+
+  if (out !== undefined)
+    await writeFile(out, `${JSON.stringify(record, null, 2)}\n`);
+  console.log(JSON.stringify(record, null, 2));
+  console.log(
+    `\n=> ${record.class} (${record.outcome}) $${record.costUsd ?? "?"}` +
+      `${out === undefined ? "" : ` -> ${out}`}`,
+  );
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === "init") return init();
   if (command === "status") return status();
   if (command === "run") return run(Number(process.argv[3]));
+  if (command === "cell") return trialCell(process.argv[3], process.argv[4]);
   if (command === "analyse") {
     const manifest = await readManifest(STORE);
     console.log(
@@ -193,7 +324,9 @@ async function main() {
     );
     return;
   }
-  console.log("usage: bench.mjs init|status|run <count>|analyse");
+  console.log(
+    "usage: bench.mjs init|status|run <count>|analyse|cell <instance-id> <arm>",
+  );
   process.exitCode = 1;
 }
 

@@ -97,6 +97,25 @@ export function enumerateCells(manifest) {
   return cells;
 }
 
+/**
+ * Refuse a run served by a different provider than the manifest recorded.
+ *
+ * `BENCH_PROVIDER` is an environment variable, so forgetting it on the second
+ * sitting silently falls back to the agent directory's default. Cells would
+ * then be measured against two rate cards inside one paired analysis, and
+ * nothing in a record says which one served it beyond this field. The pairing
+ * is the basis of every figure here, so the mismatch fails closed.
+ */
+export function assertProviderMatches(manifest, provider) {
+  if (manifest.provider === undefined || manifest.provider === provider) return;
+  throw new Error(
+    `this store was drawn against provider "${manifest.provider}" but the ` +
+      `run resolves to "${provider}". Set BENCH_PROVIDER=${manifest.provider}, ` +
+      "or start a separate store: cells served by two providers cannot be " +
+      "paired against each other.",
+  );
+}
+
 export function cellKey({ task, arm, repetition }) {
   return JSON.stringify([task, arm, repetition]);
 }

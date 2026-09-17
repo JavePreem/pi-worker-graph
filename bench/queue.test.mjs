@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ARMS,
+  assertProviderMatches,
   completeTasks,
   createManifest,
   enumerateCells,
@@ -177,4 +178,20 @@ test("a mixed-version store reports as mixed", () => {
     settled(other, cells[1]),
   ]);
   assert.deepEqual(status.versions, ["h1/p1", "h1/p2"]);
+});
+
+test("a run served by another provider than the manifest drew is refused", () => {
+  // Forgetting BENCH_PROVIDER on the second sitting is the realistic way in:
+  // it falls back to the agent directory's default and pairs cells measured
+  // against two rate cards.
+  const manifest = { provider: "azure-openai-responses" };
+  assert.throws(
+    () => assertProviderMatches(manifest, "github-copilot"),
+    /was drawn against provider "azure-openai-responses"/,
+  );
+  assert.doesNotThrow(() =>
+    assertProviderMatches(manifest, "azure-openai-responses"),
+  );
+  // A manifest drawn before the field existed cannot be checked against.
+  assert.doesNotThrow(() => assertProviderMatches({}, "anything"));
 });

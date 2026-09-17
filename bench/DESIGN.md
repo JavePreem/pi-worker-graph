@@ -916,11 +916,31 @@ path on its own.
 Removing an entry from `bench/excluded-instances.json` is how this is
 revisited; the sweep picks the instance up again on its next run.
 
-The grading path is proven end to end on one instance:
-`bench/grade-selftest.mjs` ran `angular__angular-64903` with the gold patch
-standing in for the agent and graded it **resolved in 327s**, applying
-`test_patch` afterwards and reading Bazel's exit code. It cost no provider
-spend. The other 22 are unchecked.
+**The grading path is proven on 6 of 23 instances, including every complex
+shape in the pool.** `bench/grade-selftest.mjs` runs a cell with the gold patch
+standing in for the agent -- `test_patch` applied afterwards, Bazel's exit code
+read -- and all six graded as resolved, at no provider spend:
+
+| instance | targets | regression targets | grade |
+| --- | --- | --- | --- |
+| `angular__angular-64903` | 1 | 0 | resolved, 327s |
+| `c_0362665` | 11 | 11 | resolved, 546s |
+| `c_5e0dcf1` | 11 | 11 | resolved, 626s |
+| `c_9f44b41` | 12 | 11 | resolved, 695s |
+| `c_c089d21` | 11 | 11 | resolved, 582s |
+| `c_e3dcf52` | 8 | 8 | resolved, 552s |
+
+The five after the first were chosen rather than taken in order, because the
+first proved only the pool's simplest shape -- one target, no regression set --
+and `resolveTier1`'s regression branch had therefore never run. These five hold
+every multi-target instance in the pool, 54 of its 78 targets and 52 of its
+68 regression targets. The branch now runs clean five times.
+
+The remaining 17 are single-target instances of the shape already proven, so
+what is left is breadth rather than a new code path. 50m of wall clock for the
+five. How much of that was pulling is not recorded -- the selftest writes only
+a total per instance -- but validating the same five spent 57% of its time on
+pulls, and the selftest does the same pull with half the test runs.
 
 Budget disk as well as tokens — an image is 2.5 GB compressed and ~14 GB
 unpacked, so a cell holds that much while it runs, and `BENCH_RMI=1` drops each
@@ -952,19 +972,52 @@ BENCH_RMI=1 node bench/grade-selftest.mjs
 
 # 3. Draw the task order, once. Refused while instances are still unvalidated;
 #    the excluded ones count as accounted for, so this needs no flag.
-node bench/bench.mjs init --seed 1234
+#    BENCH_PROVIDER is set here deliberately rather than inherited: the
+#    manifest records it, and every later run is checked against it.
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --seed 1234
 
-# 4. Work the queue, a few cells at a time.
+# 4. Prove the agent-side path on one chosen cell before buying twelve drawn
+#    ones: Pi in the container, the package from a throwaway agent directory,
+#    `/swarm on`, the spend cap. `solo-luna` is the cheapest arm in the design.
+#    Writes no record -- a hand-picked cell is not a sample from the order.
+BENCH_RMI=1 node bench/bench.mjs cell angular__angular-64903 solo-luna --cap 2
+
+# 5. Work the queue, a few cells at a time.
 BENCH_RMI=1 node bench/bench.mjs run 12 --cap 5
 node bench/bench.mjs status
 node bench/bench.mjs analyse
 ```
 
 `status` is what may be consulted between runs; `analyse` is the quality gap
-and has to be asked for. Environment: `BENCH_RMI=1` drops each image after its
-instance, `BENCH_MEM` and `BENCH_CPUS` cap the container, `BENCH_PROVIDER`
-names the provider serving the arm models, `BENCH_AGENT_DIR` is the real agent
-directory credentials are copied from, and `BENCH_STORE` is the store.
+and has to be asked for. `cell` is outside the queue and outside the store: it
+is how the first live cell gets chosen rather than drawn, and it refuses to
+write anywhere the analysis reads.
+
+**`--cap` is required on anything that can spend.** An absent cap means no
+ceiling at all, and the package under test has no budget of its own -- that is
+deferred deliberately, on the grounds that the operator watching a run is the
+enforcement. So this flag is the only ceiling there is, and a ceiling that
+disappears when you forget it is not one. A cell that genuinely needs no limit
+says so by naming a large number.
+
+**The provider is part of the measurement, not of the environment.** Both
+`github-copilot` and `azure-openai-responses` are authenticated on the
+development box and both catalogues carry `gpt-5.6-sol` and `gpt-5.6-luna`, so
+the choice is live. The bench runs on `azure-openai-responses` because it bills
+per token against a rate card the write-up can name, and this experiment's
+primary claim is cost; Copilot bills on request quotas, so its token counts
+would be priced from the catalogue rather than from what the account was
+charged. `BENCH_PROVIDER` is therefore set explicitly at `init`, recorded in
+the manifest, and enforced on every later run -- forgetting it on a second
+sitting would otherwise fall back to the agent directory's default and pair
+cells measured against two rate cards. A `cell` trial is held to the store's
+provider too when a store exists, so a path proven on one rate card is not then
+bought on another.
+
+Environment: `BENCH_RMI=1` drops each image after its instance, `BENCH_MEM` and
+`BENCH_CPUS` cap the container, `BENCH_PROVIDER` names the provider serving the
+arm models, `BENCH_AGENT_DIR` is the real agent directory credentials are
+copied from, and `BENCH_STORE` is the store.
 
 ## Sources
 
