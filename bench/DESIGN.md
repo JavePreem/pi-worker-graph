@@ -149,6 +149,13 @@ spend, so the difference between those two configurations is most of the
 difference between a 15% saving and a 40% one. It stays out of the first pass
 on cost grounds, but it is the first thing to add when there is budget.
 
+**Both `graph` arms run the same parent, which is what makes fan-out cheap to
+measure.** The parent decides the decomposition and it is `sol` in both, so
+whether the orchestrator fans out is identical across them and `graph-luna`
+answers it at roughly half the price. `graph-sol` earns its cost for the
+machinery screen, which is a different question; it should not be bought for
+this one.
+
 `graph-sol` is the dearest arm in the design — every token on `sol` plus the
 orchestration overhead on top, roughly 1.8x `solo-sol`. It is not there to be
 economical. It is the control that makes the other arms interpretable, and its

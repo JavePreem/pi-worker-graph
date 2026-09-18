@@ -284,6 +284,21 @@ What remains, in order:
    billing against a nameable rate card; `init` records the choice and every
    later run is refused if it resolves to a different one.
 
+   **Buy fan-out before the spend split.** The one live `graph-luna` cell
+   produced `graphSizes: [1,1,1,1]`, and a graph that never decomposes cannot
+   be cheaper at any worker price, so the economics question is moot until
+   that is settled. Three `graph-luna` cells on instances whose gold patches
+   span 12 to 21 files -- `c_768a09d`, `c_b8f2a50`, `c_b29e646` -- cost about
+   $4-5 and answer it; the instance already run has a 3-file patch, which is
+   honestly one worker's work and therefore weak evidence either way. Use
+   `graph-luna` rather than `graph-sol`: both arms share a `sol` parent, so the
+   decomposition behaviour is the same and the cheaper arm measures it.
+
+   The spend split also needs the no-review arm now, not later. A node's cost
+   fuses the `sol` reviewer with the `luna` worker, so without a
+   review-free arm to compare against, "the saving was eaten by the reviewer"
+   cannot be told from "eaten by the parent".
+
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and
    is cheap because it is a ratio taken inside one run. Two of the four open
