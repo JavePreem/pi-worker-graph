@@ -20,6 +20,10 @@ adapter. Automated tests remain provider-free:
   failed, timed-out, or aborted attempt as well as a succeeded one, summed per
   run through `/swarm usage` and `readRunUsage()`, and attributed per task in
   the parent-facing result;
+- a reviewed node's attempt naming the reviewer's share of its own figures,
+  so a `sol` reviewer beside a `luna` worker is attributable rather than
+  fused, absent rather than zeroed when no reviewer ran, and summed into a
+  run's total the same way the totals are;
 - accounting that keeps zero and unknown apart: absent or unusable telemetry
   leaves an attempt unaccounted rather than free, a run total is only summed
   from outputs that agree with node state, and a task that never ran is
@@ -294,10 +298,12 @@ What remains, in order:
    `graph-luna` rather than `graph-sol`: both arms share a `sol` parent, so the
    decomposition behaviour is the same and the cheaper arm measures it.
 
-   The spend split also needs the no-review arm now, not later. A node's cost
-   fuses the `sol` reviewer with the `luna` worker, so without a
-   review-free arm to compare against, "the saving was eaten by the reviewer"
-   cannot be told from "eaten by the parent".
+   The attribution the spend split needed is now in the package rather than in
+   a fifth arm. A node's cost fused the `sol` reviewer with the `luna` worker,
+   which is unrecoverable from outside; the review cycle keeps the reviewer's
+   rounds in their own accumulator and reports them as `usage.review`, and
+   `spendSplit` reads it as `reviewShare`. The arms stay 2x2 and `init` draws
+   four.
 
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and

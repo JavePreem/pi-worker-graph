@@ -6,7 +6,7 @@
  * reported by an executor, which is why every field is bounded and validated
  * rather than trusted: usage reaches persisted run state.
  */
-export interface TaskUsage {
+export interface TaskUsageTotals {
   readonly turns: number;
   readonly input: number;
   readonly output: number;
@@ -20,6 +20,23 @@ export interface TaskUsage {
     readonly cacheWrite: number;
     readonly total: number;
   };
+}
+
+export interface TaskUsage extends TaskUsageTotals {
+  /**
+   * The part of the figures above that reviewer rounds spent, when the
+   * attempt was a review cycle. A reviewed node runs a worker and a reviewer
+   * on different profiles but reports one attempt, so without this the two
+   * are fused and a node's cost cannot be attributed to either.
+   *
+   * Absent means no review spend, not unknown spend: a cycle that cannot
+   * account for one of its rounds withholds the attempt's usage entirely, so
+   * a usage that is present has every round in it.
+   *
+   * It is a share of the total rather than something beside it — never add it
+   * to the fields above.
+   */
+  readonly review?: TaskUsageTotals;
 }
 
 export const TASK_USAGE_LIMITS = Object.freeze({
@@ -42,7 +59,10 @@ const COST_FIELDS = [
   "cacheWrite",
   "total",
 ] as const;
-const USAGE_FIELDS = new Set<string>(["turns", ...TOKEN_FIELDS, "cost"]);
+const TOTALS_FIELDS = new Set<string>(["turns", ...TOKEN_FIELDS, "cost"]);
+// The nested review share is parsed against `TOTALS_FIELDS`, which has no
+// `review` in it, so the shape cannot nest a second time.
+const USAGE_FIELDS = new Set<string>([...TOTALS_FIELDS, "review"]);
 const COST_FIELD_NAMES = new Set<string>(COST_FIELDS);
 
 function fail(): never {
@@ -93,6 +113,16 @@ function bounded(value: unknown, maximum: number, integer: boolean): number {
 export function parseTaskUsage(value: unknown): TaskUsage | undefined {
   if (value === undefined) return undefined;
   const usage = plainFields(value, USAGE_FIELDS);
+  const review = dataField(usage, "review");
+  const totals = parseTotals(usage);
+  return Object.freeze(
+    review === undefined
+      ? totals
+      : { ...totals, review: parseTotals(plainFields(review, TOTALS_FIELDS)) },
+  );
+}
+
+function parseTotals(usage: object): TaskUsageTotals {
   const cost = plainFields(dataField(usage, "cost"), COST_FIELD_NAMES);
   const tokens = TOKEN_FIELDS.map((field) =>
     bounded(dataField(usage, field), TASK_USAGE_LIMITS.maxTokens, true),

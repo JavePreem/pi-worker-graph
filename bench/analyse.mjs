@@ -167,10 +167,19 @@ export function parseWorkerReports(text) {
   }
 }
 
+/**
+ * Floating-point slack for comparing two sums of the same reported figures.
+ * A share that equals its whole is legitimate -- every node reviewed, and the
+ * reviewer spending all of it -- and must not be called inconsistent because
+ * the two additions rounded apart in the last bit.
+ */
+const COST_EPSILON = 1e-9;
+
 export function spendSplit(record) {
   const texts = record.detail?.workerGraphResults;
   if (!Array.isArray(texts) || texts.length === 0) return null;
   let nodeCost = 0;
+  let reviewCost = 0;
   let read = false;
   for (const text of texts) {
     for (const node of parseWorkerReports(text)) {
@@ -179,23 +188,51 @@ export function spendSplit(record) {
         nodeCost += cost;
         read = true;
       }
+      // A share of the cost above, not something beside it. The package
+      // reports it because a node runs a worker and a reviewer on different
+      // profiles and settles them into one attempt; a node with no reviewer
+      // reports no share and contributes nothing here.
+      const review = node?.usage?.review?.cost?.total;
+      if (typeof review === "number") reviewCost += review;
     }
   }
   if (!read) return null;
   const total = record.costUsd;
   const share =
     typeof total === "number" && total > 0 ? nodeCost / total : null;
+  const review =
+    typeof total === "number" && total > 0 ? reviewCost / total : null;
   return {
     nodeCostUsd: Number(nodeCost.toFixed(4)),
+    reviewCostUsd: Number(reviewCost.toFixed(4)),
     totalCostUsd: total,
-    // Worker and reviewer together: see above.
+    // Worker and reviewer together.
     nodeShare: share === null ? null : Number(share.toFixed(4)),
+    // The reviewer's part of that, as a share of the same session total, so
+    // the two are directly comparable. This is what tells "the saving was
+    // eaten by the reviewer" from "eaten by the parent": subtract it from
+    // nodeShare and what is left is the workers.
+    reviewShare: review === null ? null : Number(review.toFixed(4)),
     // A share above 1 is arithmetically impossible and means the two sides
     // disagree, so it is surfaced rather than averaged into a headline. Seen
     // on the first live cell: nodes summed to $2.05 against a session total of
     // $1.39, while the token counts reconciled exactly.
-    inconsistent: share !== null && share > 1,
+    //
+    // A reviewer share above the node share is impossible for the same kind of
+    // reason -- it is a part of the node cost, not something beside it -- and
+    // is caught here rather than left to average quietly into the review
+    // headline, which is the one number this metric exists to produce.
+    inconsistent:
+      (share !== null && share > 1) || reviewCost > nodeCost + COST_EPSILON,
   };
+}
+
+function meanShare(splits, field) {
+  const usable = splits.filter((s) => !s.inconsistent && s[field] !== null);
+  if (usable.length === 0) return null;
+  return Number(
+    (usable.reduce((t, s) => t + s[field], 0) / usable.length).toFixed(4),
+  );
 }
 
 export function spendSplitReport(manifest, records) {
@@ -215,20 +252,11 @@ export function spendSplitReport(manifest, records) {
       // above 1 is arithmetically impossible and means the accounting is
       // wrong somewhere, which is a finding rather than a data point.
       inconsistent: splits.filter((s) => s.inconsistent).length,
-      // Worker and reviewer together. `spendSplit` explains why they cannot
-      // be separated from what the tool reports.
-      meanNodeShare: (() => {
-        const usable = splits.filter(
-          (s) => !s.inconsistent && s.nodeShare !== null,
-        );
-        return usable.length === 0
-          ? null
-          : Number(
-              (
-                usable.reduce((t, s) => t + s.nodeShare, 0) / usable.length
-              ).toFixed(4),
-            );
-      })(),
+      // Worker and reviewer together, then the reviewer's part of it. Both
+      // are averaged over the same cells so the difference between them is
+      // the workers' share.
+      meanNodeShare: meanShare(splits, "nodeShare"),
+      meanReviewShare: meanShare(splits, "reviewShare"),
     };
   }
   return out;

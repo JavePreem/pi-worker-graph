@@ -143,11 +143,24 @@ tasks to establish than a large one, and the ratio here is small. See
 **The spend split is the first thing to measure**, because it caps the saving
 before any quality question is worth asking. See **Start with the spend split**.
 
-**Splitting the `graph` arms into with-review and without-review is no longer
-only an extension.** The reviewer is a large share of the remaining expensive
-spend, so the difference between those two configurations is most of the
-difference between a 15% saving and a 40% one. It stays out of the first pass
-on cost grounds, but it is the first thing to add when there is budget.
+**The reviewer's share is measured inside the arm, not by a fifth arm.** The
+reviewer is a large share of the remaining expensive spend, so telling it from
+the parent's share is most of the difference between a 15% saving and a 40%
+one. The first live `graph-luna` cell could not: a node reports one attempt
+however many rounds it ran, so a `sol` reviewer and a `luna` worker arrived
+fused, and from outside the package that is four cost equations in eight
+unknowns. The package now reports the reviewer's share of each node's own
+figures (`usage.review`), the spend split reads it as `reviewShare` beside
+`nodeShare`, and the difference between them is the workers'. A
+with-review/without-review pair would have answered the same question by adding
+a factor to a 2x2 design and buying a fifth arm's cells; this answers it inside
+the arms already drawn, at no provider spend.
+
+Splitting the `graph` arms into with-review and without-review remains an
+extension, and now only for the question it is actually the right instrument
+for: whether review is worth its cost at all, which is open decision 2. That is
+a separate question from attribution and is not a prerequisite for the spend
+split.
 
 **Both `graph` arms run the same parent, which is what makes fan-out cheap to
 measure.** The parent decides the decomposition and it is `sol` in both, so
@@ -321,8 +334,11 @@ Secondary:
 - **Wall clock**, prompt accepted to settled.
 - **Blast radius** — files changed outside the gold patch's file set.
 - **Spend split** — orchestrator tokens against worker tokens, for each `graph`
-  arm. This is what says whether the saving came from cheap workers or was eaten
-  by the parent reading their reports.
+  arm, with the reviewer's share broken out of the node side. This is what says
+  whether the saving came from cheap workers or was eaten by the parent reading
+  their reports — and, because a reviewed node runs a `sol` reviewer beside a
+  `luna` worker, which of those two ate it. Reported as `nodeShare` and
+  `reviewShare` of the same session total; their difference is the workers'.
 
 Cost capture is already solved and needs no new instrumentation: the
 `worker_graph` tool reports worker usage back through Pi's tool-usage channel,
@@ -909,8 +925,9 @@ is uninformative and must be reported as such rather than quietly used anyway.
    cheap. The cost is the known one: the thinker reads all the work anyway, so
    review spend may erase part of the saving. That is now a result to measure
    rather than a decision to make, and the **spend split** metric is what
-   reports it — if reviewer tokens dominate the `graph` arms, the saving was
-   eaten by the parent.
+   reports it — its `reviewShare` is the reviewer's own part of the node side,
+   so "the saving was eaten by the reviewer" is now directly readable rather
+   than inferred from a blended figure.
 
    The reviewer profile takes `sol` as its model and read-only tools: `read`,
    `grep`, `find`, `ls`. Model and tools are independent, so this keeps the
@@ -1131,17 +1148,22 @@ genuinely be one worker's worth of work.
 orchestrator.** It is one cell, and it is not the number the design asked for.
 Read **Start with the spend split** with the limitation below.
 
-**A node's cost is a blend of worker and reviewer, and cannot be separated.**
-The tool reports one cost per node, and a node sums every round of its
+**A node's cost was a blend of worker and reviewer. Fixed in the package.**
+The tool reported one cost per node, and a node sums every round of its
 work-review-repair cycle into one attempt (D20). The reviewer runs `sol` and
-the worker `luna`, so the figure is a mixture: measured implied prices were
+the worker `luna`, so the figure was a mixture: measured implied prices were
 $1.12/M input and $8.10/M output, against `luna` at $0.20/$1.20 and `sol` at
 $4.00/$20.00. Neither matches, and four cost equations cannot resolve eight
-unknowns. Separating them needs per-role accounting the package does not
-expose, or the no-review arm this document already names as the first thing to
-add when there is budget. **That arm has been promoted by this measurement**:
-without it, "the saving was eaten by the reviewer" cannot be told from "the
-saving was eaten by the parent".
+unknowns.
+
+It is irreducible from the bench and trivial in the adapter, which runs the
+rounds and therefore knows which of them was a review. The review cycle now
+keeps a second accumulator and reports it as `usage.review`, a share of the
+node's own figures; `spendSplit` reads it as `reviewShare` beside `nodeShare`.
+The alternative on the table was a fifth, review-free arm, which would have
+answered the same question by adding a factor to the 2x2 and buying another
+arm's worth of cells. This measurement is what promoted the arm, and the
+package change is what demoted it again.
 
 **The metric had never run.** `spendSplit` called `JSON.parse` on the whole
 result text and looked for `nodes` or `reviews`. The tool emits prose wrapping

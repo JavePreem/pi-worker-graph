@@ -115,5 +115,5 @@ export {
   sendRunMessage,
   writeNodeState,
 } from "./store.js";
-export type { TaskUsage } from "./usage.js";
+export type { TaskUsage, TaskUsageTotals } from "./usage.js";
 export { parseTaskUsage, TASK_USAGE_LIMITS } from "./usage.js";

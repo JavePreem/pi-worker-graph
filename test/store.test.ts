@@ -2109,6 +2109,10 @@ test("rejects usage that is malformed, negative, or out of range", async (t) => 
     { ...USAGE, cost: { ...USAGE.cost, total: Number.NaN } },
     { ...USAGE, unexpected: 1 },
     { ...USAGE, cost: undefined },
+    { ...USAGE, review: { ...USAGE, review: USAGE } },
+    { ...USAGE, review: { ...USAGE, unexpected: 1 } },
+    { ...USAGE, review: { ...USAGE, input: -1 } },
+    { ...USAGE, review: "reviewer" },
     (() => {
       const { turns: _turns, ...missing } = USAGE;
       return missing;
@@ -2195,6 +2199,44 @@ test("sums a run's spend and names the tasks it cannot account for", async (t) =
       ["never-ran", "not_started", undefined],
     ],
   );
+});
+
+test("a run's spend carries the reviewer's share of it", async (t) => {
+  const root = await temporaryStateRoot(t);
+  const { manifest, ownership } = await ownedRun(t, root, {
+    tasks: [{ id: "reviewed" }, { id: "also-reviewed" }, { id: "unreviewed" }],
+  });
+  const reviewed = {
+    ...USAGE,
+    totalTokens: 1_000,
+    review: { ...USAGE, totalTokens: 400 },
+  };
+  for (const taskId of ["reviewed", "also-reviewed"]) {
+    await publishNodeOutput(
+      root,
+      manifest.runId,
+      { taskId, status: "failed", usage: reviewed },
+      ownership,
+    );
+  }
+  // No reviewer ran on this one, so it contributes to the run's total and
+  // nothing to its review share.
+  await publishNodeOutput(
+    root,
+    manifest.runId,
+    {
+      taskId: "unreviewed",
+      status: "failed",
+      usage: { ...USAGE, totalTokens: 500 },
+    },
+    ownership,
+  );
+
+  const usage = await readRunUsage(root, manifest.runId);
+  assert.equal(usage.total.totalTokens, 2_500);
+  assert.equal(usage.total.review?.totalTokens, 800);
+  // The share is part of the total, never something beside it.
+  assert.ok((usage.total.review?.totalTokens ?? 0) < usage.total.totalTokens);
 });
 
 test("reports rather than absorbs a run whose output state disagrees", async (t) => {

@@ -1484,6 +1484,61 @@ test("a reviewed node reports what every round spent, not just the last", async 
   assert.equal(settled.usage?.input, 40);
 });
 
+test("a reviewed node reports the reviewer's share apart from the worker's", async () => {
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Fix it"),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    [
+      { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
+      { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+      { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
+      { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+    ],
+  );
+  const settled = await result;
+  // Work and repair run on the worker profile, the two reviews on the
+  // reviewer's. One fused figure cannot say which of them spent what, which is
+  // the whole reason the share is carried.
+  assert.equal(settled.usage?.totalTokens, 220);
+  assert.equal(settled.usage?.review?.totalTokens, 200);
+  assert.equal(settled.usage?.review?.turns, 2, "two review rounds");
+});
+
+test("a node that ran no reviewer carries no review share at all", async () => {
+  const { result } = await runFakeCycle(
+    [nodeOutput("Done")],
+    { assignment: "Implement the requested change", profile: "writer" },
+    { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
+  );
+  const settled = await result;
+  // Absent rather than zeroed: "spent nothing on review" is one shape, so a
+  // reader never has to tell a zeroed share from a missing one.
+  assert.equal(settled.usage?.totalTokens, 10);
+  assert.equal(settled.usage?.review, undefined);
+});
+
+test("a cycle that fails mid-review still attributes what the reviewer spent", async () => {
+  const { result } = await runFakeCycle(
+    [nodeOutput("First attempt"), rejection("Fix it")],
+    reviewedPayload(1),
+    [
+      { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
+      { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+    ],
+  );
+  // Out of rounds with the work still refused, so the node fails on the
+  // reviewer's report. The spend is real either way and stays attributed.
+  const settled = await result;
+  assert.equal(settled.output.blockers.length, 1);
+  assert.equal(settled.usage?.totalTokens, 110);
+  assert.equal(settled.usage?.review?.totalTokens, 100);
+});
+
 test("a thorough review is repaired rather than failed for its length", async () => {
   const { result, prompts } = await runFakeCycle(
     [

@@ -124,6 +124,71 @@ test("a readable spend split is the share that left the expensive model", () => 
   assert.equal(split.inconsistent, false);
 });
 
+test("the reviewer's share is split out of the node share, not added to it", () => {
+  const text = JSON.stringify({
+    nodes: [
+      { usage: { cost: { total: 0.2 }, review: { cost: { total: 0.15 } } } },
+      // No reviewer ran on this node, so it carries no share and contributes
+      // nothing to the reviewer's total.
+      { usage: { cost: { total: 0.1 } } },
+    ],
+  });
+  const split = spendSplit({
+    costUsd: 1.5,
+    detail: { workerGraphResults: [text] },
+  });
+  assert.equal(split.nodeCostUsd, 0.3);
+  assert.equal(split.reviewCostUsd, 0.15);
+  assert.equal(split.nodeShare, 0.2);
+  assert.equal(split.reviewShare, 0.1);
+  // What is left is the workers': the question the split exists to answer.
+  assert.equal(Number((split.nodeShare - split.reviewShare).toFixed(4)), 0.1);
+});
+
+test("a reviewer share above the node share is a finding, not a data point", () => {
+  const text = JSON.stringify({
+    nodes: [
+      // Impossible: the share cannot exceed the cost it is a share of.
+      { usage: { cost: { total: 0.2 }, review: { cost: { total: 0.3 } } } },
+    ],
+  });
+  const split = spendSplit({
+    costUsd: 1.5,
+    detail: { workerGraphResults: [text] },
+  });
+  assert.equal(split.inconsistent, true);
+  const report = analyse(manifest, [
+    {
+      cell: { instanceId: "i", arm: "graph-luna" },
+      class: "not-resolved",
+      costUsd: 1.5,
+      detail: { workerGraphResults: [text] },
+    },
+  ]).spendSplit;
+  assert.equal(report["graph-luna"].inconsistent, 1);
+  // Counted, never averaged into either headline.
+  assert.equal(report["graph-luna"].meanNodeShare, null);
+  assert.equal(report["graph-luna"].meanReviewShare, null);
+});
+
+test("a reviewer that spent the whole node cost is not called inconsistent", () => {
+  const text = JSON.stringify({
+    nodes: [
+      {
+        usage: { cost: { total: 0.1 + 0.2 }, review: { cost: { total: 0.3 } } },
+      },
+    ],
+  });
+  const split = spendSplit({
+    costUsd: 1,
+    detail: { workerGraphResults: [text] },
+  });
+  // 0.1 + 0.2 is 0.30000000000000004; the two sums must not round apart into
+  // a finding.
+  assert.equal(split.inconsistent, false);
+  assert.equal(split.reviewShare, 0.3);
+});
+
 test("the spend-split report names unreadable cells rather than averaging them away", () => {
   const records = fullStore(() => true).map((r) => ({ ...r, costUsd: 1 }));
   const report = analyse(manifest, records).spendSplit;

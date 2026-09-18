@@ -1269,6 +1269,9 @@ test("reports what a retained run spent, and what it cannot account for", async 
   assert.ok(reported?.message.includes("1000 token(s) over 2 turn(s)"));
   assert.ok(reported?.message.includes("estimated cost 0.0300"));
   assert.ok(reported?.message.includes("worker"));
+  // No reviewer ran on this run, so the operator is told nothing about review
+  // rather than told it cost zero.
+  assert.ok(!reported?.message.includes("reviewers spent"), reported?.message);
   // A task that published nothing is named, never folded in as free work.
   assert.ok(
     reported?.message.includes("recorded no usage: silent"),
@@ -1277,6 +1280,62 @@ test("reports what a retained run spent, and what it cannot account for", async 
 
   await session.swarm("usage 00000000-0000-4000-8000-000000000000");
   assert.equal(session.notifications.at(-1)?.type, "error");
+});
+
+test("names the reviewers' share of what a run spent", async (t) => {
+  const session = await storeSession(t);
+  const stateRoot = session.stateRoot;
+  const manifest = await createRun(
+    stateRoot,
+    normalizeGraph({ tasks: [{ id: "reviewed" }] }),
+  );
+  const ownership = await acquireRunOwnership(stateRoot, manifest.runId);
+  const totals = {
+    turns: 2,
+    input: 900,
+    output: 100,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 1_000,
+    cost: {
+      input: 0.01,
+      output: 0.02,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0.03,
+    },
+  };
+  await publishNodeOutput(
+    stateRoot,
+    manifest.runId,
+    {
+      taskId: "reviewed",
+      status: "failed",
+      usage: {
+        ...totals,
+        review: {
+          ...totals,
+          turns: 1,
+          totalTokens: 400,
+          cost: { ...totals.cost, total: 0.012 },
+        },
+      },
+    },
+    ownership,
+  );
+  await releaseRunOwnership(stateRoot, ownership);
+
+  await session.swarm(`usage ${manifest.runId}`);
+  const reported = session.notifications.at(-1);
+
+  assert.equal(reported?.type, "info");
+  // Part of the run's total, so the operator can see which side of a reviewed
+  // node the spend went to rather than only what the node cost.
+  assert.ok(reported?.message.includes("1000 token(s)"), reported?.message);
+  assert.ok(
+    reported?.message.includes("of which reviewers spent 400 token(s), 0.0120"),
+    reported?.message,
+  );
 });
 
 const WRITER_PROFILE = {

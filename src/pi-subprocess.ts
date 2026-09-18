@@ -1418,10 +1418,36 @@ async function runPiReviewCycle(
   // as a node that cost less than it did, so the total is withheld instead.
   let running = EMPTY_USAGE;
   let accounted = true;
-  const spend = (round: TaskUsage | undefined): void => {
+  // The reviewer's share of that total, kept apart because the two run on
+  // different profiles and a node that reports one fused figure cannot say
+  // which of them spent it. It needs no accounting flag of its own: the one
+  // above covers every round, so whenever a total is reported at all this
+  // share has every review round in it.
+  let reviewRunning = EMPTY_USAGE;
+  // Stated rather than derived from the accumulator. Reading `reviewRunning`
+  // for a zero would make this depend on a reported round always carrying at
+  // least one turn, which is true of the per-process accumulator today and is
+  // not this function's invariant to rely on.
+  let reviewed = false;
+  const spend = (round: TaskUsage | undefined, review: boolean): void => {
     if (round === undefined) accounted = false;
-    else running = addUsage(running, round);
+    else {
+      running = addUsage(running, round);
+      if (review) {
+        reviewRunning = addUsage(reviewRunning, round);
+        reviewed = true;
+      }
+    }
   };
+  // Absent rather than zeroed when no reviewer ran, so "this node spent
+  // nothing on review" is one shape and not two.
+  const withReview = (usage: TaskUsage): TaskUsage =>
+    reviewed
+      ? Object.freeze({
+          ...immutableUsage(usage),
+          review: immutableUsage(reviewRunning),
+        })
+      : immutableUsage(usage);
   /**
    * The node's one terminal progress event, emitted when no further round will
    * run.
@@ -1441,7 +1467,7 @@ async function runPiReviewCycle(
       taskId: input.taskId,
       phase: "finished" as const,
       status,
-      usage: immutableUsage(running),
+      usage: withReview(running),
     });
     try {
       options.onProgress(progress);
@@ -1466,29 +1492,33 @@ async function runPiReviewCycle(
     notify(round.output.blockers.length > 0 ? "failed" : "succeeded");
     return {
       ...rest,
-      ...(usage === undefined ? {} : { usage: immutableUsage(usage) }),
+      ...(usage === undefined ? {} : { usage: withReview(usage) }),
     };
   };
   const total = (): TaskUsage | undefined => (accounted ? running : undefined);
-  const failed = (error: unknown): never => {
-    // Counted before the node's terminal event is emitted, so the event carries
-    // the failed round's spend rather than the total as it stood before it.
-    if (error instanceof TaskExecutionFailure) spend(error.usage);
-    // A round cut short by the parent's signal is a cancelled node, not a
-    // failed one. The runner records the cancellation as `aborted`, and an
-    // unreviewed worker reports it that way too, so a reviewed node that said
-    // `failed` here would disagree with both.
-    notify(input.signal.aborted ? "aborted" : "failed");
-    if (error instanceof TaskExecutionFailure) {
-      const usage = total();
-      throw new TaskExecutionFailure(
-        error.code,
-        error.taskId,
-        usage === undefined ? undefined : immutableUsage(usage),
-      );
-    }
-    throw error;
-  };
+  // Curried on whether the round that threw was a review one, so a cycle that
+  // fails mid-review still attributes the spend it had already made.
+  const failed =
+    (review: boolean) =>
+    (error: unknown): never => {
+      // Counted before the node's terminal event is emitted, so the event carries
+      // the failed round's spend rather than the total as it stood before it.
+      if (error instanceof TaskExecutionFailure) spend(error.usage, review);
+      // A round cut short by the parent's signal is a cancelled node, not a
+      // failed one. The runner records the cancellation as `aborted`, and an
+      // unreviewed worker reports it that way too, so a reviewed node that said
+      // `failed` here would disagree with both.
+      notify(input.signal.aborted ? "aborted" : "failed");
+      if (error instanceof TaskExecutionFailure) {
+        const usage = total();
+        throw new TaskExecutionFailure(
+          error.code,
+          error.taskId,
+          usage === undefined ? undefined : withReview(usage),
+        );
+      }
+      throw error;
+    };
 
   // The work round runs without its own review policy: a worker is told what to
   // build, never that something will check it.
@@ -1496,8 +1526,8 @@ async function runPiReviewCycle(
     withPayload(input, stripReview(payload)),
     roundProgress(options, running, true),
     dependencies,
-  ).catch(failed);
-  spend(work.usage);
+  ).catch(failed(false));
+  spend(work.usage, false);
 
   // Unbounded on purpose: the body returns on the final round, and a policy is
   // parsed with `maxRounds >= 1`, so the loop always ends through a return. A
@@ -1507,8 +1537,8 @@ async function runPiReviewCycle(
       withPayload(input, reviewPayload(payload, policy, round)),
       roundProgress(options, running, false),
       dependencies,
-    ).catch(failed);
-    spend(review.usage);
+    ).catch(failed(true));
+    spend(review.usage, true);
 
     const findings = reviewFindings(review.output);
     if (findings === undefined) {
@@ -1538,8 +1568,8 @@ async function runPiReviewCycle(
       withPayload(input, repair),
       roundProgress(options, running, false),
       dependencies,
-    ).catch(failed);
-    spend(work.usage);
+    ).catch(failed(false));
+    spend(work.usage, false);
   }
 }
 

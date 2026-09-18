@@ -21,7 +21,7 @@ import {
   parseNodeDiagnostics,
   parseNodeOutput,
 } from "./output.js";
-import type { TaskUsage } from "./usage.js";
+import type { TaskUsage, TaskUsageTotals } from "./usage.js";
 import { parseTaskUsage } from "./usage.js";
 
 export type { JsonValue } from "./json.js";
@@ -2871,7 +2871,10 @@ export interface RunUsage {
   readonly tasks: readonly RunTaskUsage[];
 }
 
-function addUsage(total: TaskUsage, usage: TaskUsage): TaskUsage {
+function addTotals(
+  total: TaskUsageTotals,
+  usage: TaskUsageTotals,
+): TaskUsageTotals {
   return {
     turns: total.turns + usage.turns,
     input: total.input + usage.input,
@@ -2887,6 +2890,23 @@ function addUsage(total: TaskUsage, usage: TaskUsage): TaskUsage {
       total: total.cost.total + usage.cost.total,
     },
   };
+}
+
+/**
+ * The review share sums exactly, and needs no unknown case of its own. An
+ * attempt that could not account for one of its rounds reports no usage at
+ * all and is named in `unaccounted` instead, so every attempt counted here
+ * has its review rounds in it — an attempt with no share simply had none.
+ */
+function addUsage(total: TaskUsage, usage: TaskUsage): TaskUsage {
+  const summed = addTotals(total, usage);
+  const review =
+    usage.review === undefined
+      ? total.review
+      : total.review === undefined
+        ? usage.review
+        : addTotals(total.review, usage.review);
+  return review === undefined ? summed : { ...summed, review };
 }
 
 /**

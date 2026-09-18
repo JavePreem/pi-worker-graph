@@ -502,6 +502,17 @@ its least-accounted round. If any round records nothing usable, the node is
 reported as unaccounted rather than as the total of the rounds that did report,
 which would read as a node that cost less than it did.
 
+Because a node's worker and its reviewer normally run on different profiles,
+that one attempt also names the reviewer's share of its own figures, under
+`usage.review`. Without it a reviewed node reports one blended number and there
+is no way to tell an expensive worker from an expensive reviewer. It is a share
+of the totals beside it, never something to add to them, and a node that ran no
+reviewer carries no share at all rather than a zeroed one. It needs no separate
+unaccounted case: a cycle that cannot account for one of its rounds reports no
+usage for the attempt at all, so wherever a total is present the share within
+it is complete. `readRunUsage()` sums it the same way it sums the totals, and
+`/swarm usage` names it on the run line when a reviewer ran.
+
 The runtime bounds tasks, concurrency, payload, output, context, and runtime,
 but does not yet enforce a token or cost ceiling.
 

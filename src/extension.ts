@@ -379,6 +379,14 @@ function runUsageText(usage: RunUsage): string {
     `Run ${usage.runId} spent ${usage.total.totalTokens} token(s) over ${usage.total.turns} turn(s)`,
     `  input ${usage.total.input}  output ${usage.total.output}  cache read ${usage.total.cacheRead}  cache write ${usage.total.cacheWrite}`,
     `  estimated cost ${money(usage.total.cost.total)} (Pi's pricing of the reported tokens)`,
+    // Part of the figures above, not an addition to them. Printed only when a
+    // reviewer actually ran, so an unreviewed run says nothing about review
+    // rather than saying zero.
+    ...(usage.total.review === undefined
+      ? []
+      : [
+          `  of which reviewers spent ${usage.total.review.totalTokens} token(s), ${money(usage.total.review.cost.total)}`,
+        ]),
     ...usage.tasks.map((task) =>
       [
         `  ${task.taskId}`,
