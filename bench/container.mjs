@@ -253,5 +253,41 @@ export async function applyPatch(container, diff, { label }) {
   const result = await container.exec(`cd ${TESTBED} && git apply ${file}`, {
     timeoutMs: 300_000,
   });
-  return { applied: result.code === 0, detail: result.stderr.slice(-400) };
+  return {
+    applied: result.code === 0,
+    detail: firstChars(result.stderr, MAX_APPLY_CHARS),
+    conflicted: conflictedFiles(result.stderr),
+  };
+}
+
+/** How much of `git apply`'s complaint is kept with a cell, for good. */
+const MAX_APPLY_CHARS = 4000;
+
+/**
+ * The head of a message rather than its tail. `git apply` reports in patch
+ * order, so keeping the last few hundred characters drops the files it refused
+ * first and can start mid-word -- which is how a conflict once arrived naming
+ * three files and explaining none of them.
+ *
+ * The cut backs off a lone surrogate, so the kept text ends in a whole
+ * character rather than in half of one. Same reason the diff capture does it,
+ * and a path this one can reach: a refused file may be named in any script.
+ */
+function firstChars(text, limit) {
+  if (text.length <= limit) return text;
+  let end = limit;
+  const lead = text.charCodeAt(end - 1);
+  if (lead >= 0xd800 && lead <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}\n[truncated by the harness: ${text.length} characters]`;
+}
+
+/**
+ * The files `git apply` refused, parsed from its own output, so the record
+ * carries the list rather than a prose blob a reader has to mine. Every
+ * refused file gets this line; the accompanying `patch failed:` line is the
+ * same file with a line number, so one form is the whole set.
+ */
+export function conflictedFiles(stderr = "") {
+  const found = stderr.matchAll(/^error: (.+): patch does not apply$/gm);
+  return [...new Set([...found].map((m) => m[1]))];
 }

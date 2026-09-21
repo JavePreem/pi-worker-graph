@@ -56,6 +56,7 @@ export function createManifest({
   harnessVersion,
   packageVersion,
   provider,
+  promptFingerprint,
 }) {
   if (!taskIds?.length) throw new Error("a manifest needs at least one task");
   if (!Number.isInteger(seed))
@@ -75,6 +76,11 @@ export function createManifest({
     // with another. Omitted rather than left undefined, so a manifest survives
     // its own JSON round trip unchanged.
     ...(provider === undefined ? {} : { provider }),
+    // The prompt is part of the treatment every arm receives, and it is not
+    // carried by any version number: the harness version moves with the
+    // package, so a reworded preamble would otherwise be invisible in the
+    // store. Cells asked different questions cannot be pooled.
+    ...(promptFingerprint === undefined ? {} : { promptFingerprint }),
   };
 }
 
@@ -113,6 +119,24 @@ export function assertProviderMatches(manifest, provider) {
       `run resolves to "${provider}". Set BENCH_PROVIDER=${manifest.provider}, ` +
       "or start a separate store: cells served by two providers cannot be " +
       "paired against each other.",
+  );
+}
+
+/**
+ * Refuse a run whose prompt is not the one the order was drawn under. Same
+ * rule as the provider, and for the same reason: it is a property of the
+ * measurement rather than of the environment it happens to run in.
+ */
+export function assertPromptMatches(manifest, fingerprint) {
+  if (
+    manifest.promptFingerprint === undefined ||
+    manifest.promptFingerprint === fingerprint
+  )
+    return;
+  throw new Error(
+    `this store was drawn under prompt ${manifest.promptFingerprint} but the ` +
+      `harness now sends ${fingerprint}. Restore the prompt, or start a ` +
+      "separate store: cells asked different questions cannot be paired.",
   );
 }
 

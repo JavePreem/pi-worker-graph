@@ -12,6 +12,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -29,7 +30,33 @@ import path from "node:path";
 
 export const CONTAINER_TOOLCHAIN = "/opt/pi-bench-tools";
 export const CONTAINER_AGENT_DIR = "/opt/pi-bench-agent";
-export const CONTAINER_PI = `${CONTAINER_TOOLCHAIN}/node_modules/.bin/pi`;
+
+/**
+ * The Node the toolchain carries, and the entry point it runs.
+ *
+ * Seven of the fifteen instance images probed ship Node 18 or 20, and Pi
+ * 0.85.1 imports `globSync`, which needs 22: in those images Pi does not
+ * start, so the cell is not attempted and the instance is lost. The toolchain
+ * already carries Pi rather than taking it from the image, so it carries a
+ * Node too.
+ *
+ * It is deliberately **not** put on PATH. The agent builds with the image's
+ * own Bazel and Node, and those images were built against the Node they ship;
+ * swapping it underneath the build would trade a startup failure for build
+ * failures that look like task failures. Only Pi runs under the carried Node,
+ * through the shim below, so a worker spawned as a bare `pi` gets it while
+ * everything else in the container is untouched.
+ */
+export const CONTAINER_NODE = `${CONTAINER_TOOLCHAIN}/node/bin/node`;
+export const CONTAINER_PI_ENTRY = `${CONTAINER_TOOLCHAIN}/node_modules/.bin/pi`;
+export const CONTAINER_PI = "/usr/local/bin/pi";
+
+/**
+ * The Node the toolchain fetches. Pinned rather than tracking latest, because
+ * a cell records what it ran under and two cells run under different Nodes is
+ * two measurements. It is the floor the package's own `engines` declares.
+ */
+export const NODE_VERSION = "22.19.0";
 
 /**
  * The PATH Pi runs under, and therefore the one its worker subprocesses
@@ -64,6 +91,66 @@ function run(command, args, options = {}) {
 }
 
 /**
+ * Put a Node of a known version in the toolchain, for Pi to run under inside
+ * the container. Downloaded once per toolchain directory and reused, because
+ * the directory outlives a cell.
+ *
+ * The official linux-x64 build, rather than the host's own binary: the host is
+ * whatever the development box runs and the images are not, so copying a
+ * binary out of one glibc into another is the kind of thing that works until
+ * it does not.
+ */
+export async function ensureNode({
+  dir,
+  version = NODE_VERSION,
+  fetchImpl = fetch,
+  extract = (archive, into) =>
+    run("tar", ["-xJf", archive, "-C", into, "--strip-components=1"]),
+}) {
+  const target = path.join(dir, "node");
+  const stamp = path.join(target, ".version");
+  if (existsSync(stamp) && (await readFile(stamp, "utf8")).trim() === version) {
+    return version;
+  }
+  const name = `node-v${version}-linux-x64`;
+  const base = `https://nodejs.org/dist/v${version}`;
+  const response = await fetchImpl(`${base}/${name}.tar.xz`);
+  if (!response.ok) {
+    throw new Error(`fetching ${name}.tar.xz: ${response.status}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  // Checked against the release's own manifest before anything is unpacked.
+  // This binary runs Pi inside every container, with the cell's credentials
+  // in the same filesystem, so taking it on the strength of TLS alone is a
+  // larger trust than this harness needs to make.
+  const sums = await fetchImpl(`${base}/SHASUMS256.txt`);
+  if (!sums.ok) {
+    throw new Error(`fetching SHASUMS256.txt: ${sums.status}`);
+  }
+  const expected = /^(\w{64})\s+\S*?node-v[\d.]+-linux-x64\.tar\.xz$/m.exec(
+    await sums.text(),
+  )?.[1];
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (expected === undefined || expected !== actual) {
+    throw new Error(
+      `${name}.tar.xz does not match the release manifest: expected ` +
+        `${expected ?? "no entry"}, got ${actual}`,
+    );
+  }
+  await rm(target, { recursive: true, force: true });
+  await mkdir(target, { recursive: true });
+  const archive = path.join(dir, `${name}.tar.xz`);
+  await writeFile(archive, bytes);
+  const extracted = await extract(archive, target);
+  await rm(archive, { force: true });
+  if (extracted?.code !== undefined && extracted.code !== 0) {
+    throw new Error(`unpacking ${name}: ${extracted.stderr?.slice(-300)}`);
+  }
+  await writeFile(stamp, `${version}\n`);
+  return version;
+}
+
+/**
  * Install Pi and the package into a host directory, once per harness run.
  * `packageSpec` is an npm spec: a published version for a real measurement, a
  * `.tgz` path when testing an unreleased build. Which one it was is recorded
@@ -76,6 +163,9 @@ export async function prepareToolchain({
   packageSpec,
   install = (cwd, specs) =>
     run("npm", ["install", "--no-audit", "--no-fund", ...specs], { cwd }),
+  // Injected for the same reason `install` is: an automated test reaches no
+  // network, and a 40 MB download in a unit test is a test of nodejs.org.
+  ensure = ensureNode,
 }) {
   await mkdir(dir, { recursive: true });
   if (!existsSync(path.join(dir, "package.json"))) {
@@ -84,6 +174,7 @@ export async function prepareToolchain({
       `${JSON.stringify({ name: "pi-bench-toolchain", private: true, version: "0.0.0" }, null, 2)}\n`,
     );
   }
+  const nodeVersion = await ensure({ dir });
   const result = await install(dir, [piSpec, packageSpec]);
   if (result.code !== 0) {
     throw new Error(`toolchain install failed: ${result.stderr.slice(-600)}`);
@@ -98,6 +189,7 @@ export async function prepareToolchain({
   await widenToForeignUid(dir);
   return {
     dir,
+    nodeVersion,
     piVersion: versionOf("@earendil-works/pi-coding-agent"),
     packageVersion: versionOf("pi-worker-graph"),
     // Copied into each cell's agent directory rather than referenced, so one
@@ -336,15 +428,22 @@ export async function installInContainer(
   // which the package recognises, or an npm install that is already on PATH.
   // The link is what makes the container resemble that rather than a defect
   // being worked around.
-  await container.exec(`ln -sf ${CONTAINER_PI} /usr/local/bin/pi`);
+  // A shim rather than a symlink, so the carried Node is used for Pi and for
+  // nothing else. `#!/usr/bin/env node` in Pi's own entry would otherwise pick
+  // up whatever the image ships, which on seven of the images probed is too
+  // old to run it at all.
+  await container.exec(
+    `printf '#!/bin/sh\\nexec ${CONTAINER_NODE} ${CONTAINER_PI_ENTRY} "$@"\\n' > ${CONTAINER_PI} && chmod 755 ${CONTAINER_PI}`,
+  );
 
-  // Run the binary before asking whether it is on PATH, so a toolchain that
-  // did not survive the copy is named as what it is. The link resolves through
-  // the same tree, so a missing or unexecutable `pi` would otherwise surface
-  // first as a dangling symlink and be reported as a PATH problem.
-  const check = await container.exec(`${CONTAINER_PI} --version`, {
-    timeoutMs: 120_000,
-  });
+  // Run it before asking whether it is on PATH, so a toolchain that did not
+  // survive the copy is named as what it is: the shim resolves through the
+  // same tree, so a missing Node or an unexecutable `pi` would otherwise
+  // surface as a PATH problem and be reported as the wrong fault.
+  const check = await container.exec(
+    `env -i PATH=${CONTAINER_PATH} ${CONTAINER_PI} --version`,
+    { timeoutMs: 120_000 },
+  );
   if (check.code !== 0) {
     throw new Error(
       `pi will not run in the container: ${check.stderr.slice(-400)}`,

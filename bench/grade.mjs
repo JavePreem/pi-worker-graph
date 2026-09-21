@@ -93,7 +93,16 @@ export async function runTarget(
       " --nocache_test_results --jobs=3 --local_ram_resources=3072 --test_output=summary",
     { timeoutMs },
   );
-  return { ...classifyTargetRun(result), tail: result.stdout.slice(-600) };
+  // Both streams, because they answer different questions. Bazel's summary is
+  // on stdout; the compiler diagnostic that explains `build failed` is on
+  // stderr, and keeping only stdout left a failed cell unable to say what did
+  // not compile -- which is the difference between a model that could not do
+  // the task and one that never built its own edit.
+  return {
+    ...classifyTargetRun(result),
+    tail: result.stdout.slice(-600),
+    ...(result.stderr ? { errorTail: result.stderr.slice(-1200) } : {}),
+  };
 }
 
 /**
@@ -116,6 +125,9 @@ export async function gradeTier1(
       resolved: false,
       outcome: "test-patch-conflict",
       detail: applied.detail,
+      // Named, so the claim "the agent edited the tests" can be checked
+      // against the diff instead of taken on the outcome's word.
+      conflicted: applied.conflicted ?? [],
       states: {},
     };
   }

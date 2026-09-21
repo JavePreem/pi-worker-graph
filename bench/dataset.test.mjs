@@ -108,12 +108,28 @@ test("an exclusions file that is an array is refused", async () => {
   await assert.rejects(gradeableInstances(options), /id -> reason/);
 });
 
-test("the shipped exclusions name the three ant-design instances", async () => {
+test("the shipped exclusions name the ant-design three and the rig", async () => {
   const excluded = await loadExclusions();
   assert.deepEqual([...excluded.keys()].sort(), [
+    "angular__angular-64903",
     "ant-design__ant-design-52470",
     "ant-design__ant-design-53739",
     "ant-design__ant-design-54813",
   ]);
-  for (const reason of excluded.values()) assert.match(reason, /Bazel/);
+  for (const [id, reason] of excluded) {
+    assert.match(reason, id.startsWith("ant-design") ? /Bazel/ : /development/);
+  }
+});
+
+test("the development instance stays runnable as a trial", async () => {
+  // Excluded from the drawn order, because the harness is tuned against it,
+  // and still gradeable -- otherwise there is nothing cheap to tune on.
+  const { gradeable, excludedGradeable } = await gradeableInstances();
+  const rig = excludedGradeable.find((i) => i.id === "angular__angular-64903");
+  assert.ok(rig, "the rig is still joined to its dataset row");
+  assert.match(rig.excludedFor, /development instance/);
+  assert.equal(
+    gradeable.some((i) => i.id === "angular__angular-64903"),
+    false,
+  );
 });

@@ -150,6 +150,12 @@ const workerGraphSchema = Type.Object(
       Type.Integer({
         minimum: 1,
         maximum: RUN_GRAPH_LIMITS.maxTaskRuntimeMs,
+        description:
+          `How long one task may take, in milliseconds. Defaults to ` +
+          `${RUN_GRAPH_LIMITS.defaultTaskRuntimeMs}. It covers the whole ` +
+          "node: the worker, and on a reviewed node every review and repair " +
+          "round as well. Raise it for work that has to run a slow build or " +
+          "test suite, which would otherwise time out with nothing to show.",
       }),
     ),
   },
@@ -714,6 +720,7 @@ export function registerWorkerGraphOrchestratorTool(
       "Point review.profile at a read-only profile, and set maxRounds to the number of review passes the task is worth — two is usually enough, and every extra round costs another worker.",
       "A node whose reviewer still has findings when its rounds run out fails, and its dependents are blocked, so do not attach a review policy you are unwilling to have fail the graph.",
       "Reviewed nodes need no separate validation task for the same work: the review is that check, and its cost is already counted in the node's usage.",
+      "One taskTimeoutMs covers a whole node, including every review and repair round, so raise it above the default when a task must run a slow build or test suite; a task that times out reports nothing and blocks its dependents.",
     ],
     parameters: workerGraphSchema,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {

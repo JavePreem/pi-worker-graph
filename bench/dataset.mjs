@@ -148,15 +148,25 @@ export async function gradeableInstances({
   // a stale record cannot quietly put one back in the pool.
   const gradeable = validated.filter((entry) => !excluded.has(entry.id));
   for (const [id, reason] of excluded) dropped.push({ id, reason });
+  const join = (entry) => {
+    const row = instances.get(entry.id);
+    if (!row)
+      throw new Error(
+        `validated instance absent from the dataset: ${entry.id}`,
+      );
+    return { ...entry, row };
+  };
   return {
     dropped,
-    gradeable: gradeable.map((entry) => {
-      const row = instances.get(entry.id);
-      if (!row)
-        throw new Error(
-          `validated instance absent from the dataset: ${entry.id}`,
-        );
-      return { ...entry, row };
-    }),
+    gradeable: gradeable.map(join),
+    // Excluded, but the harness can still grade them. A trial may name one --
+    // that is how an instance can be a development rig without also being a
+    // measurement -- while nothing can draw one into the order.
+    excludedGradeable: validated
+      .filter((entry) => excluded.has(entry.id))
+      .map((entry) => ({
+        ...join(entry),
+        excludedFor: excluded.get(entry.id),
+      })),
   };
 }

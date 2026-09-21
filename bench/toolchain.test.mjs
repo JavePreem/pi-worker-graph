@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   mkdir,
@@ -15,9 +16,13 @@ import test from "node:test";
 import { workerGraphConfig } from "./arms.mjs";
 import {
   assertModelsServed,
+  CONTAINER_NODE,
   CONTAINER_PATH,
+  CONTAINER_PI_ENTRY,
+  ensureNode,
   installInContainer,
   makeAgentDirectory,
+  NODE_VERSION,
   prepareToolchain,
   readAgentSettings,
 } from "./toolchain.mjs";
@@ -252,6 +257,7 @@ test("the toolchain tree is readable by the container's root too", async () => {
       dir,
       piSpec: "@earendil-works/pi-coding-agent@0.85.1",
       packageSpec: "pi-worker-graph@0.1.0",
+      ensure: async () => "22.19.0",
       install: async (cwd) => {
         await mkdir(path.join(cwd, "node_modules", ".bin"), {
           recursive: true,
@@ -339,4 +345,107 @@ test("pi is put on PATH, or a graph arm spawns no workers", async () => {
   // And run before it, so a toolchain that did not survive the copy is named
   // as that rather than as a PATH problem by way of a dangling symlink.
   assert.ok(ran !== -1 && ran < checked, "the binary was checked after PATH");
+});
+
+test("Pi runs under the carried Node, and nothing else does", async () => {
+  // Seven of fifteen instance images ship a Node too old to start Pi. The
+  // toolchain carries one -- and keeps it off PATH, because the agent builds
+  // with the image's Bazel and Node, and swapping those underneath the build
+  // would turn a startup failure into build failures that look like the task
+  // being failed.
+  const commands = [];
+  await installInContainer(
+    {
+      exec: async (script) => {
+        commands.push(script);
+        return { code: 0, stdout: "pi 0.85.1", stderr: "" };
+      },
+      copyIn: async () => {},
+    },
+    { toolchainDir: "/t", agentDir: "/a" },
+  );
+  const shim = commands.find((c) => c.includes("/usr/local/bin/pi"));
+  assert.ok(shim.includes(CONTAINER_NODE), "the shim does not use our Node");
+  assert.ok(shim.includes(CONTAINER_PI_ENTRY), "the shim runs no Pi");
+  assert.equal(
+    CONTAINER_PATH.includes("pi-bench-tools"),
+    false,
+    "the carried Node is on PATH, where the image's build would find it",
+  );
+});
+
+/** A release whose manifest matches the bytes it serves. */
+function fakeRelease(body = "node bytes", { sum } = {}) {
+  const bytes = Buffer.from(body);
+  const digest = sum ?? createHash("sha256").update(bytes).digest("hex");
+  let downloads = 0;
+  return {
+    get downloads() {
+      return downloads;
+    },
+    fetchImpl: async (url) => {
+      if (url.endsWith("SHASUMS256.txt")) {
+        return {
+          ok: true,
+          text: async () =>
+            `${"0".repeat(64)}  node-v0.0.0-darwin-x64.tar.gz\n` +
+            `${digest}  node-v22.19.0-linux-x64.tar.xz\n`,
+        };
+      }
+      downloads += 1;
+      return { ok: true, arrayBuffer: async () => bytes };
+    },
+  };
+}
+
+test("the carried Node is fetched once and then reused", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-node-"));
+  try {
+    const release = fakeRelease();
+    const options = {
+      dir,
+      fetchImpl: release.fetchImpl,
+      extract: async () => ({ code: 0 }),
+    };
+    assert.equal(await ensureNode(options), NODE_VERSION);
+    assert.equal(await ensureNode(options), NODE_VERSION);
+    assert.equal(release.downloads, 1);
+    // A different version is a different toolchain, not a cache hit.
+    await ensureNode({ ...options, version: "22.20.0" });
+    assert.equal(release.downloads, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Node that does not match its release manifest is refused", async () => {
+  // It runs Pi inside every container, beside the cell's credentials. TLS
+  // alone is a larger trust than this harness needs to make.
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-node-"));
+  try {
+    const release = fakeRelease("node bytes", { sum: "a".repeat(64) });
+    await assert.rejects(
+      ensureNode({
+        dir,
+        fetchImpl: release.fetchImpl,
+        extract: async () => ({ code: 0 }),
+      }),
+      /does not match the release manifest/,
+    );
+    assert.equal(existsSync(path.join(dir, "node", ".version")), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Node that cannot be fetched fails the toolchain, not a cell", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-node-"));
+  try {
+    await assert.rejects(
+      ensureNode({ dir, fetchImpl: async () => ({ ok: false, status: 404 }) }),
+      /404/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -58,7 +58,12 @@ adapter. Automated tests remain provider-free:
 - process-group cancellation with forced termination fallback and post-exit
   collection of orphaned grandchildren;
 - sanitized executor failures, cancellation, and task timeouts;
-- task, dependency, concurrency, payload, output, and context limits;
+- task, dependency, concurrency, payload, output, and context limits, with a
+  per-task runtime ceiling of 30 minutes kept apart from the 10-minute default
+  a caller gets when it asks for nothing, so a slow-building repository can be
+  given more time by an orchestrator that may only lower what it is handed, and
+  named in the tool's schema and guidelines because one timeout covers a whole
+  node -- the worker and every review and repair round on it;
 - bounded, redacted worker progress projection and aggregate usage accounting;
 - a strict global `worker-graph.json` profile configuration;
 - a default state root beneath Pi's agent directory, with checkout-local roots
@@ -288,15 +293,75 @@ What remains, in order:
    billing against a nameable rate card; `init` records the choice and every
    later run is refused if it resolves to a different one.
 
-   **Buy fan-out before the spend split.** The one live `graph-luna` cell
-   produced `graphSizes: [1,1,1,1]`, and a graph that never decomposes cannot
-   be cheaper at any worker price, so the economics question is moot until
-   that is settled. Three `graph-luna` cells on instances whose gold patches
-   span 12 to 21 files -- `c_768a09d`, `c_b8f2a50`, `c_b29e646` -- cost about
-   $4-5 and answer it; the instance already run has a 3-file patch, which is
-   honestly one worker's work and therefore weak evidence either way. Use
-   `graph-luna` rather than `graph-sol`: both arms share a `sol` parent, so the
-   decomposition behaviour is the same and the cheaper arm measures it.
+   **Fan-out was bought, and it half-answered.** Three `graph-luna` trials ran
+   on 2026-09-21, on the three largest gold patches in the pool, $5.86 for the
+   three; `bench/DESIGN.md` **Fan-out, measured** carries the table. One cell
+   decomposed -- eight `worker_graph` calls, two of them three-task graphs --
+   and met its preconditions. One took five tasks one at a time and failed on
+   "no graph had more than one task". The third never reached a provider: that
+   image's Node predates an API Pi imports, so Pi would not start, and the cell
+   was classed `not-attempted`.
+
+   So a graph does decompose, at roughly one cell in two on the shapes most
+   likely to provoke it. That is enough to stop the economics question being
+   moot and not enough to buy twelve cells on: half the treatment cells would
+   carry no treatment. Open decision 4 -- whether the `graph` arms get extra
+   orchestrator guidance on fan-out -- is now the thing in front of `init`, and
+   it is a decision rather than another purchase.
+
+   Three things the run turned up, before the queue is opened:
+
+   - **The reviewer took 72.6% and 84.5% of node spend.** Read from the
+     `usage.review` the package now reports. A `luna` worker under a `sol`
+     reviewer may not be a cheap arm at all, which is the headline the spend
+     split exists to produce and is now visible on two cells.
+   - **Neither graded cell ran a target**; both stopped at
+     `test-patch-conflict`. Part is the documented reading -- the agent edited
+     a test file the patch touches -- and part is unexplained, and cannot be
+     read back because `applyPatch` keeps only the last 400 bytes of stderr
+     (`bench/container.mjs:256`). Widen that before buying a graded cell.
+   - **Workers are hitting the 10-minute task ceiling** (`src/run.ts:62`), 3 of
+     17 tasks across the two cells, and an arm cannot raise it.
+
+   All three are addressed. The failing targets' Bazel output and the files
+   `git apply` refused are now kept with the cell rather than dropped
+   (`bench/cell.mjs`, `bench/container.mjs`); the runtime ceiling and its
+   default are separate figures, 30 minutes and 10; and every arm now gets a
+   fixed preamble naming the checkout, the build command, and the rule that
+   existing test files are off-limits -- `bench/DESIGN.md` **The prompt every
+   arm gets**, with its hash in the manifest so a reworded run cannot be pooled
+   with this one.
+
+   Both `solo` arms then ran on the rig under that preamble, and both now build
+   and verify before finishing -- the failure mode where an agent shipped an
+   uncompiled edit is closed. Neither resolved: `solo-luna` at $0.018 and
+   `solo-sol` at $0.375 made the same semantic choice on the same line, and the
+   graded test wanted the other one. `bench/DESIGN.md` **The rig, and what the
+   preamble bought**, and the matching threat to validity: a hidden test can
+   encode a convention the problem statement does not, which no prompting fixes
+   and which caps the resolve rate for every arm.
+
+   **Seven images could not run Pi, and now can.** A `node --version` probe per
+   image, at no provider spend, was stopped at 15 of 23 for host memory, and 7
+   of those 15 carry Node 18 or 20 -- below what Pi 0.85.1 needs, so a cell on
+   them was not attempted at all. The toolchain now carries a pinned Node and
+   runs Pi under it through a shim, deliberately off PATH so the image's own
+   Node still serves the Bazel build. Proven live on the worst case:
+   `bench/DESIGN.md` **Not every image can run Pi**. The pool stays at 22.
+
+   What is left, in order:
+
+   1. `graph-luna` on the rig, confirming the package path under the preamble
+      and buying a third `reviewShare` reading.
+   2. Settle open decision 4, freeze the preamble, then `init`.
+   3. Finish the image probe when the box is idle. It is bookkeeping now rather
+      than a gate -- worth having so the write-up can say the pool was swept,
+      not worth blocking on.
+
+   The precondition that stood before those cells still stands, and is now
+   sharper: a pilot in which every arm scores zero discriminates nothing and
+   costs $17-67 to learn it. Two cells have not produced a resolve, and one of
+   them was the strong arm.
 
    The attribution the spend split needed is now in the package rather than in
    a fifth arm. A node's cost fused the `sol` reviewer with the `luna` worker,
@@ -308,9 +373,10 @@ What remains, in order:
    Then the first three tasks across all four arms, an estimated $17 to $67,
    for the spend split. It caps the saving the whole experiment can report and
    is cheap because it is a ratio taken inside one run. Two of the four open
-   decisions are still unsettled -- whether a third review round buys anything,
-   and whether the `graph` arms get extra orchestrator guidance on fan-out --
-   and neither blocks the harness.
+   decisions are still unsettled. Whether a third review round buys anything
+   does not block the harness. Whether the `graph` arms get extra orchestrator
+   guidance on fan-out now does: at one decomposing cell in two, it decides
+   what a `graph` cell is before any of them are drawn.
 
    The pool is 23 instances, not the 28 the statistical design's tables are
    computed at, so every figure in that section is optimistic by five. The

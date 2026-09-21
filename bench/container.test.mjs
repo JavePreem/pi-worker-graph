@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { awaitHeadroom, startContainer } from "./container.mjs";
+import {
+  awaitHeadroom,
+  conflictedFiles,
+  startContainer,
+} from "./container.mjs";
 
 test("headroom the host already has is not waited for", async () => {
   let waited = false;
@@ -72,4 +76,22 @@ test("a container gives up the privileges a compile-and-test workload never need
   assert.ok(joined.includes("--security-opt no-new-privileges"));
   assert.ok(joined.includes("--cap-drop ALL"));
   assert.ok(joined.includes("--pids-limit"));
+});
+
+test("every file git apply refused is named once", () => {
+  const stderr = [
+    "error: patch failed: packages/compiler/test/a_spec.ts:8",
+    "error: packages/compiler/test/a_spec.ts: patch does not apply",
+    "error: patch failed: packages/compiler/test/b_spec.ts:2203",
+    "error: packages/compiler/test/b_spec.ts: patch does not apply",
+  ].join("\n");
+  assert.deepEqual(conflictedFiles(stderr), [
+    "packages/compiler/test/a_spec.ts",
+    "packages/compiler/test/b_spec.ts",
+  ]);
+});
+
+test("output that names no refused file yields no files", () => {
+  assert.deepEqual(conflictedFiles("error: cannot read /tmp/x.diff"), []);
+  assert.deepEqual(conflictedFiles(), []);
 });

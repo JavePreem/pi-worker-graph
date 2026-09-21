@@ -244,6 +244,41 @@ Both are more localized than ProMax. Filter on gold-patch file count (≥3) to
 keep the multi-file stratum intact, and record which pool each instance came
 from so the strata can be reported apart.
 
+## The prompt every arm gets
+
+The dataset's `problem_statement` is a bug report. On its own it tells an agent
+nothing about where the checkout is, whether it may build, what the build
+command is, or that the graded tests arrive afterwards. The first live cells
+failed on exactly those gaps: one agent edited a file the test patch touches,
+which voids the grade before a target runs, and another shipped an edit that
+never compiled. Neither is a fact about the model.
+
+So a fixed preamble precedes every statement (`PROMPT_PREAMBLE`,
+`bench/cell.mjs`). It names the checkout, states that existing test files are
+off-limits and why, states that the change must compile, gives the Bazel
+command and warns that it is slow, and asks for verification before finishing.
+
+It is a harness constant, not arm configuration. Every arm receives the same
+bytes. It says nothing about decomposition, delegation or worker counts --
+that is open decision 4 and belongs to the arms -- and nothing
+instance-specific. Its SHA-256 prefix is recorded in the manifest and checked
+on every later run (`assertPromptMatches`), because a reworded preamble is a
+different question asked, and cells asked different questions cannot be paired.
+
+### The development instance
+
+`angular__angular-64903` is now excluded from the drawn pool and kept runnable
+as a trial. It is the cheapest loop in the subset by a wide margin -- one
+target, no regression targets, 41s to grade, and a `solo-luna` cell on it cost
+$0.016 in 190s -- which makes it the place to tune a preamble. An instance
+tuned against cannot also be measured, so it leaves the order.
+
+**The pool is therefore 22.** Every n=23 figure under **Statistical design** is
+optimistic by one instance, in the same way the n=28 figures were optimistic by
+five. The conclusions do not change; they get slightly worse again. The
+alternative was to tune on an instance that stays in the order, which is
+training on the test set, and it would have to be disclosed as such.
+
 ## Grading
 
 Two tiers. The judge never decides whether the work succeeded.
@@ -722,9 +757,10 @@ Built, and covered by `npm run test:bench` against fakes:
   whole host. The agent runs *inside* the container rather than on the host:
   the checkout only exists in the image, and `pi-worker-graph` spawns its
   workers in the target checkout, so a worker that cannot reach the checkout is
-  not the package under test. Pi and the package are installed once into a host
-  directory and copied in (`bench/toolchain.mjs`), which keeps a registry fetch
-  out of the measurement and a 14 GB image layer off the disk budget.
+  not the package under test. Pi, the package and a pinned Node are installed
+  once into a host directory and copied in (`bench/toolchain.mjs`), which keeps
+  a registry fetch out of the measurement and does not depend on the Node the
+  image happens to ship -- see **Not every image can run Pi**.
 - **Grading** (`bench/grade.mjs`). `test_patch` is applied only after the agent
   has finished. The target set is read from `validate-results.json` rather than
   derived per trial, and every target's outcome comes from Bazel's exit code
@@ -738,6 +774,9 @@ Built, and covered by `npm run test:bench` against fakes:
   for.
 - **Preconditions** (`bench/preconditions.mjs`), evaluated from the tool's own
   arguments. Arguments the stream did not carry are unknown, never satisfied.
+- **The prompt every arm gets** (`bench/cell.mjs`), with its hash in the
+  manifest and checked on every later run, so a reworded preamble cannot be
+  pooled with cells drawn under the old one. See **The prompt every arm gets**.
 - **Paired analysis and spend split** (`bench/analyse.mjs`): exact McNemar over
   discordant pairs, cost per resolved instance, and the worker share of a
   `graph` cell's spend, reported as unreadable rather than as zero when the
@@ -748,11 +787,10 @@ Still to build:
 - **The Tier-2 judge**, including order swapping, blinding, and identical-pair
   controls. It is only worth building once the spend split says a saving is
   there to defend.
-- **The live proof of the grading path.** `bench/grade-selftest.mjs` runs a
-  cell with the gold patch standing in for the agent and expects every
-  gradeable instance to grade as resolved. It costs no provider spend, and a
-  gold patch that does not grade as resolved is a harness fault rather than a
-  model one.
+- **The rest of the grading self-test.** `bench/grade-selftest.mjs` is built and
+  has run on 7 of the 22, covering every multi-target shape; the remaining 15
+  are single-target instances of a shape already proven, so what is left there
+  is breadth rather than an unrun code path.
 
 ## What a cell exposes
 
@@ -914,6 +952,17 @@ write-up has to say exactly that rather than "TypeScript". Widening means the
 top-up pools, not the three that were dropped; three instances would not have
 made it a statement about anything broader.
 
+**A hidden test can encode a convention the statement does not.** Measured on
+the rig: `angular__angular-64903` asks for a field tree to be iterable, and its
+graded test requires an object field to yield `[key, child]` entries while an
+array field yields values. The statement's only iteration example is
+`@for (field of formGroup)` -- values. Both a `luna` and a `sol` agent chose
+values for both, independently, and each commented the choice as deliberate.
+The instance is under-determined rather than hard, and nothing the agent can
+read would settle it. This depresses the resolve rate for every arm equally, so
+the paired comparison survives, but it caps the rate the pilot is powered
+against -- and that rate is still a placeholder.
+
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.
 
@@ -941,7 +990,9 @@ is uninformative and must be reported as such rather than quietly used anyway.
    pilot that measures M1 and discordance and sizes the confirmatory run from
    them. The numbers are pre-registered here so that sizing cannot quietly
    become a choice of margin.
-4. **Whether the `graph` arms get extra orchestrator guidance on fan-out.** The
+4. **Whether the `graph` arms get extra orchestrator guidance on fan-out.**
+   **Now measured, and unsettled: one of two live cells decomposed** -- see
+   **Fan-out, measured**. The
    first suite showed models collapsing independent work into one worker. The
    package ships its own fan-out guidance in the tool's prompt guidelines; any
    strengthening on top of that is arm configuration and must be disclosed,
@@ -1001,14 +1052,15 @@ Grading runtime once the image is local: 9s to 112s per instance.
 The Angular subset is now swept in full: **25 of 25 validated, 23 with a
 fail-to-pass set — 92% yield, 78 targets in total.** The two without are
 `c_4a3d39c` and `c_7118dac`, both patching test helpers the climb cannot
-resolve to a test rule. **The pilot is sized on 23**, which is a real loss of
+resolve to a test rule. **The pilot was sized on 23**, and is now 22 -- see
+**The development instance**. That is a real loss of
 power against the 28 the design was originally sized at rather than a rounding
 error -- the tables in **Statistical design** now carry both, and the n=23
 columns are the ones that apply.
 
 ### Why the ant-design three are out
 
-**Settled: dropped. The pool is 23.** They are recorded in
+**Settled: dropped.** They are recorded in
 `bench/excluded-instances.json`, which both the validation sweep and the pool
 loader read, and deliberately not in `validate-results.json` -- nothing was run
 on them, and that file's warrant is that every row in it was measured.
@@ -1056,10 +1108,10 @@ path on its own.
 Removing an entry from `bench/excluded-instances.json` is how this is
 revisited; the sweep picks the instance up again on its next run.
 
-**The grading path is proven on 6 of 23 instances, including every complex
-shape in the pool.** `bench/grade-selftest.mjs` runs a cell with the gold patch
-standing in for the agent -- `test_patch` applied afterwards, Bazel's exit code
-read -- and all six graded as resolved, at no provider spend:
+**The grading path is proven on 7 instances, including every complex shape in
+the pool.** `bench/grade-selftest.mjs` runs a cell with the gold patch standing
+in for the agent -- `test_patch` applied afterwards, Bazel's exit code read --
+and all seven graded as resolved, at no provider spend:
 
 | instance | targets | regression targets | grade |
 | --- | --- | --- | --- |
@@ -1069,6 +1121,7 @@ read -- and all six graded as resolved, at no provider spend:
 | `c_9f44b41` | 12 | 11 | resolved, 695s |
 | `c_c089d21` | 11 | 11 | resolved, 582s |
 | `c_e3dcf52` | 8 | 8 | resolved, 552s |
+| `c_b8f2a50` | 2 | 3 | resolved, 33s |
 
 The five after the first were chosen rather than taken in order, because the
 first proved only the pool's simplest shape -- one target, no regression set --
@@ -1199,6 +1252,106 @@ below the threshold. So neither is shown to be why a sweep now finishes. The
 likelier difference is that the runs that died shared the box with a test
 suite. Treat the wait as cheap insurance whose value is unmeasured.
 
+### Fan-out, measured
+
+Three `graph-luna` trials, 2026-09-21, on the instances with the largest gold
+patches in the pool, `--cap 8 --settle-minutes 60`, against a tarball packed
+from the working tree rather than the registry, so `usage.review` was present.
+$5.86 for the three. None is a recorded cell.
+
+| instance | preconditions | graph sizes | reviewed nodes | wall clock | spend | grade |
+| --- | --- | --- | --- | --- | --- | --- |
+| `angular__angular-c_768a09d` | met | 1,3,3,1,1,1,1,1 | 4 | 32.6 min | $4.88 | not-resolved |
+| `angular__angular-c_b29e646` | failed | 1,1,1,1,1 | 2 | 20.5 min | $0.98 | not-resolved |
+| `angular__angular-c_b8f2a50` | -- | -- | -- | 4.3 min | $0 | not-attempted |
+
+**Fan-out happens, and it is not reliable.** One of the two cells that ran
+decomposed: eight `worker_graph` calls, two of them three-task graphs, a
+twelve-file diff. The other took five tasks one at a time and failed the
+precondition on "no graph had more than one task". So the first suite's
+collapse is not universal, and `graphSizes` is measuring something real -- but
+at one cell in two, a twelve-cell queue would spend a large part of its budget
+on cells that carry no treatment. That is the case for open decision 4, and it
+is now evidence rather than a worry.
+
+**The reviewer is eating the saving.** Read from `usage.review` on the nodes
+themselves: the `sol` reviewer took **72.6%** of node spend on the first cell
+and **84.5%** on the second, with node spend 90.1% and 81.3% of the cell. A
+`luna` worker under a `sol` reviewer is not a cheap arm; it is a `sol` arm with
+a discount on the smaller half. Measured on two cells and on one instance
+shape, so it sizes the risk rather than settling it -- but it is the first
+direct reading of the thing **Ordering: the package question before the
+economics question** says the whole experiment turns on.
+
+**Workers are timing out at the package's ceiling.** 2 of 12 tasks on the first
+cell and 1 of 5 on the second ended `Task executor timed out`. The graph runner
+defaults a task to `RUN_GRAPH_LIMITS.maxTaskRuntimeMs`, 10 minutes
+(`src/run.ts:62`), and the orchestrator may only lower it, so a bench arm
+cannot raise it. One timed-out task on `c_b29e646` burned $0.47 of worker and
+$0.42 of reviewer for nothing. On patches of this size the ceiling is part of
+what is being measured, and it belongs in the write-up either way.
+
+**Neither graded cell ran a single target.** Both died at
+`test-patch-conflict`: `git apply` of the `test_patch` refused onto what the
+agent left. The first cell's diff does touch a test file the patch touches
+(`packages/compiler/test/expression_parser/parser_spec.ts`), which is the
+documented reading. Three further files are named in the conflict that are
+absent from its diff, and that is **unexplained**: the same `git apply` proved
+clean on the pristine checkout during validation. It cannot be read back,
+because `applyPatch` keeps only the last 400 bytes of stderr
+(`bench/container.mjs:256`) -- the first conflicting files are cut off, and the
+kept text starts mid-word. Widen that before the next graded cell, or the
+queue will produce conflicts nobody can attribute.
+
+**One image will not run Pi at all.** `c_b8f2a50` failed with `an export named
+'globSync'` before any provider call: that image's Node predates the API Pi
+0.85.1 imports, so Pi cannot start. It was classed `not-attempted`, which is
+the harness behaving correctly, but the pool is not uniformly runnable and
+nothing has swept for it. A `node --version` per image costs no provider spend
+and would say how much of the 23 is affected before `init` draws an order over
+all of them.
+
+### The rig, and what the preamble bought
+
+Two `solo` cells on `angular__angular-64903`, 2026-09-21, under the preamble.
+
+| arm | built before finishing | spend | wall | grade |
+| --- | --- | --- | --- | --- |
+| `solo-luna` | yes, 2 test runs | $0.018 | 175s | `build failed` |
+| `solo-sol` | yes, 1 build + 3 test runs | $0.375 | 191s | `build failed` |
+
+**The preamble works.** Neither model built anything on this instance before
+it; both now find the target themselves, run it, and check their own diff.
+That closes the failure mode where an agent shipped an edit that never
+compiled.
+
+**21x the spend bought the identical answer.** Same file, same line, same
+`TS2488`, same semantic choice -- see **Threats to validity** on what the test
+demanded. Not a resolve rate, but the first evidence on this bench that model
+strength is not what separates a pass from a fail here.
+
+### Not every image can run Pi
+
+A `node --version` probe per image, at no provider spend. **Stopped at 15 of
+23 for host memory** -- the failure this file already records under the pull --
+and the partial result is the finding:
+
+**7 of 15 images cannot run Pi at all.** `c_0362665`, `c_1d3b914`, `c_5e0dcf1`,
+`c_6960ec0`, `c_815f1b1`, `c_9f44b41` and `c_b8f2a50` carry Node 18.20.0 to
+20.11.1, and Pi 0.85.1 imports `globSync`, which needs 22. The 8 that pass are
+on 22.14 to 22.22. At that rate the usable pool is near half of 22, not 22, and
+every figure under **Statistical design** is computed at 23.
+
+**Reclaimed, not lost.** The toolchain now carries a pinned Node 22.19.0 and
+`/usr/local/bin/pi` is a shim that runs Pi under it -- not a PATH entry, because
+the agent builds with the image's own Bazel and Node and swapping those would
+turn a startup failure into build failures that look like the task being
+failed. Proven on `c_b8f2a50`, the worst case in the probe: Pi 0.85.1 starts,
+`node --version` on the workers' PATH reads v20.11.1 before and after, Bazel
+still resolves under it, and `grade-selftest` graded the gold patch resolved in
+33s with all five targets passing. The pool stays at 22 and the rest of the
+probe is bookkeeping rather than a gate.
+
 ## Running it
 
 ```bash
@@ -1223,8 +1376,14 @@ BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --seed 1234
 #    prove the package: a solo arm is given no worker-graph.json and no package
 #    tree, so there is no `/swarm on` in it. That needs a graph arm, and
 #    graph-luna is the cheapest one.
-BENCH_RMI=1 node bench/bench.mjs cell angular__angular-64903 solo-luna --cap 2
-BENCH_RMI=1 node bench/bench.mjs cell angular__angular-64903 graph-luna --cap 8
+#    angular__angular-64903 is the development instance: outside the drawn
+#    order, so tuning against it is not training on the test set, and the
+#    cheapest loop in the subset at ~$0.02 and three minutes. Leave BENCH_RMI
+#    unset on it and the image stays local between iterations.
+#    --package-spec takes a `npm pack` tarball when the build under test is
+#    not the published one.
+node bench/bench.mjs cell angular__angular-64903 solo-luna --cap 2
+node bench/bench.mjs cell angular__angular-64903 graph-luna --cap 8
 
 # 5. Work the queue, a few cells at a time.
 BENCH_RMI=1 node bench/bench.mjs run 12 --cap 5
@@ -1261,7 +1420,9 @@ bought on another.
 Environment: `BENCH_RMI=1` drops each image after its instance, `BENCH_MEM` and
 `BENCH_CPUS` cap the container, `BENCH_PROVIDER` names the provider serving the
 arm models, `BENCH_AGENT_DIR` is the real agent directory credentials are
-copied from, and `BENCH_STORE` is the store.
+copied from, `BENCH_STORE` is the store, and `BENCH_TOOLCHAIN` is where Pi, the
+package and the carried Node are installed -- the Node is fetched from
+nodejs.org once per toolchain directory, so the first run there needs network.
 
 ## Sources
 

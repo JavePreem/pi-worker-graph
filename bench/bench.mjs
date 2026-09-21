@@ -31,13 +31,14 @@ import { fileURLToPath } from "node:url";
 
 import { analyse } from "./analyse.mjs";
 import { armModels, armNames } from "./arms.mjs";
-import { runCell } from "./cell.mjs";
+import { promptFingerprint, runCell } from "./cell.mjs";
 import {
   gradeableInstances,
   loadExclusions,
   loadInstances,
 } from "./dataset.mjs";
 import {
+  assertPromptMatches,
   assertProviderMatches,
   createManifest,
   pendingCells,
@@ -219,6 +220,7 @@ async function init() {
     provider:
       process.env.BENCH_PROVIDER ??
       (await readAgentSettings(AGENT_DIR)).defaultProvider,
+    promptFingerprint: promptFingerprint(),
   });
   const paths = await writeManifest(STORE, manifest);
   // Split, because the two are different claims: one is a derivation that came
@@ -260,7 +262,10 @@ async function prepareExecution({ manifest, arms = [] } = {}) {
     );
   }
   console.log(`provider ${provider}`);
-  if (manifest !== undefined) assertProviderMatches(manifest, provider);
+  if (manifest !== undefined) {
+    assertProviderMatches(manifest, provider);
+    assertPromptMatches(manifest, promptFingerprint());
+  }
   const allowHost = await egressAllowHost(provider);
   // Before the image, not after: a model the provider does not serve fails at
   // `set_model`, which is minutes and ~14 GB of disk further in.
@@ -273,7 +278,8 @@ async function prepareExecution({ manifest, arms = [] } = {}) {
     packageSpec: flag("package-spec", "pi-worker-graph@latest"),
   });
   console.log(
-    `pi ${toolchain.piVersion}, pi-worker-graph ${toolchain.packageVersion}`,
+    `pi ${toolchain.piVersion}, pi-worker-graph ${toolchain.packageVersion}, ` +
+      `node ${toolchain.nodeVersion} carried into the container`,
   );
   return { toolchain, provider, allowHost };
 }
@@ -353,14 +359,21 @@ async function trialCell(taskId, armName) {
   const events = outsideStore("events");
   const capUsd = requireCap();
 
-  const { gradeable } = await gradeableInstances();
-  const instance = gradeable.find((i) => i.id === taskId);
+  const { gradeable, excludedGradeable } = await gradeableInstances();
+  const instance =
+    gradeable.find((i) => i.id === taskId) ??
+    excludedGradeable.find((i) => i.id === taskId);
   if (!instance) {
     throw new Error(
       `${taskId} is not a gradeable instance. ` +
         `Pick one of: ${gradeable.map((i) => i.id).join(", ")}`,
     );
   }
+  // A trial may name an excluded instance on purpose: tuning the harness
+  // against an instance that is still in the drawn order is training on the
+  // test set. Said out loud, because the record does not carry it.
+  if (instance.excludedFor !== undefined)
+    console.log(`note: outside the drawn pool -- ${instance.excludedFor}`);
 
   // A trial is held to the store's provider when there is a store, so that a
   // path proven on one rate card is not then bought on another. Before `init`

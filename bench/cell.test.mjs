@@ -79,6 +79,56 @@ test("an instance the agent did not fix is a result, not a harness failure", asy
   assert.equal(record.outcome, "unresolved");
 });
 
+test("a failing target's output survives into the record", async () => {
+  // A cell reporting `fail: build failed` and nothing else cannot say whether
+  // the model could not do the task or never compiled its own edit, and the
+  // container is gone by the time anyone asks.
+  const record = await run({
+    grade: async () => ({
+      resolved: false,
+      outcome: "unresolved",
+      states: {
+        "//a:test": {
+          state: "fail",
+          reason: "build failed",
+          tail: "Executed 0 out of 1 test",
+          errorTail: "ERROR: types.ts(12,3): error TS2339",
+        },
+        "//b:test": { state: "pass", reason: "passed", tail: "all good" },
+      },
+    }),
+  });
+  assert.match(record.detail.targetFailures["//a:test"], /TS2339/);
+  assert.match(record.detail.targetFailures["//a:test"], /Executed 0 out of 1/);
+  assert.equal("//b:test" in record.detail.targetFailures, false);
+});
+
+test("a resolved cell carries no failure text at all", async () => {
+  const record = await run({
+    grade: async () => ({
+      resolved: true,
+      outcome: "resolved",
+      states: { "//a:test": { state: "pass", reason: "passed", tail: "ok" } },
+    }),
+  });
+  assert.equal("targetFailures" in record.detail, false);
+});
+
+test("a test-patch conflict names the files git apply refused", async () => {
+  const record = await run({
+    grade: async () => ({
+      resolved: false,
+      outcome: "test-patch-conflict",
+      detail: "error: a_spec.ts: patch does not apply",
+      conflicted: ["packages/compiler/test/a_spec.ts"],
+      states: {},
+    }),
+  });
+  assert.deepEqual(record.detail.conflictedFiles, [
+    "packages/compiler/test/a_spec.ts",
+  ]);
+});
+
 test("a container that will not start is not attempted", async () => {
   const record = await run({
     start: async () => {

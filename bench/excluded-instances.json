@@ -1,5 +1,6 @@
 {
   "ant-design__ant-design-52470": "ant-design declares no Bazel test rules, so the target derivation does not apply, and its test patch is 13 snapshot files: an exact-output oracle. See DESIGN.md \"Why the ant-design three are out\".",
   "ant-design__ant-design-53739": "ant-design declares no Bazel test rules, so the target derivation does not apply. See DESIGN.md \"Why the ant-design three are out\".",
-  "ant-design__ant-design-54813": "ant-design declares no Bazel test rules, so the target derivation does not apply. See DESIGN.md \"Why the ant-design three are out\"."
+  "ant-design__ant-design-54813": "ant-design declares no Bazel test rules, so the target derivation does not apply. See DESIGN.md \"Why the ant-design three are out\".",
+  "angular__angular-64903": "The harness's development instance. It is the cheapest loop in the pool -- one target, no regression targets, 41s to grade -- so the prompt and the harness are tuned against it, and an instance tuned against cannot also be measured. See DESIGN.md \"The development instance\"."
 }

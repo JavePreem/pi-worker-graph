@@ -667,6 +667,27 @@ test("rejects runtime bounds before creating a run or calling the executor", asy
   await assert.rejects(() => stat(join(stateRoot, "runs")));
 });
 
+test("a task may be given longer than the default, up to the ceiling", async (t) => {
+  // The ceiling and the default are separate figures. Fused, a repository
+  // whose build takes minutes could not be given more time by anyone, because
+  // the orchestrator may only lower the figure it is handed.
+  assert.ok(
+    RUN_GRAPH_LIMITS.defaultTaskRuntimeMs < RUN_GRAPH_LIMITS.maxTaskRuntimeMs,
+  );
+  const stateRoot = await temporaryStateRoot(t);
+  const result = await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task", payload: { work: "x" } }] },
+    workingDirectory: stateRoot,
+    executor: async () => ({ output: nodeOutput() }),
+    taskTimeoutMs: RUN_GRAPH_LIMITS.maxTaskRuntimeMs,
+  });
+  assert.deepEqual(
+    result.nodes.map((node) => [node.taskId, node.status]),
+    [["task", "succeeded"]],
+  );
+});
+
 test("runs adapter-specific validation for the complete graph before creating a run", async (t) => {
   const stateRoot = await temporaryStateRoot(t);
   let calls = 0;

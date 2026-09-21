@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ARMS,
+  assertPromptMatches,
   assertProviderMatches,
   completeTasks,
   createManifest,
@@ -194,4 +195,17 @@ test("a run served by another provider than the manifest drew is refused", () =>
   );
   // A manifest drawn before the field existed cannot be checked against.
   assert.doesNotThrow(() => assertProviderMatches({}, "anything"));
+});
+
+test("a store drawn under one prompt refuses a run under another", () => {
+  const manifest = { promptFingerprint: "aaaaaaaaaaaa" };
+  assert.throws(
+    () => assertPromptMatches(manifest, "bbbbbbbbbbbb"),
+    /cells asked different questions/,
+  );
+  assert.doesNotThrow(() => assertPromptMatches(manifest, "aaaaaaaaaaaa"));
+});
+
+test("a store drawn before prompts were fingerprinted is not refused", () => {
+  assert.doesNotThrow(() => assertPromptMatches({}, "bbbbbbbbbbbb"));
 });

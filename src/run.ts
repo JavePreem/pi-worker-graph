@@ -59,7 +59,16 @@ export const RUN_GRAPH_LIMITS = Object.freeze({
   maxPayloadBytes: 64 * 1024,
   maxOutputBytes: 128 * 1024,
   maxPrerequisiteBytes: 256 * 1024,
-  maxTaskRuntimeMs: 10 * 60 * 1000,
+  /**
+   * The ceiling a caller may ask for, and the default it gets when it asks
+   * for nothing. They are separate because they answer different questions:
+   * how long a worker is allowed to run at most, and how long is sensible
+   * when nobody said. Fused at ten minutes, a task in a repository whose
+   * build takes minutes could not be given more time by anyone, because the
+   * orchestrator may only lower the figure it is given.
+   */
+  maxTaskRuntimeMs: 30 * 60 * 1000,
+  defaultTaskRuntimeMs: 10 * 60 * 1000,
   maxExecutorCleanupMs: 5_000,
   maxRetainedRuns: RUN_STORE_MAX_RUNS,
 });
@@ -731,7 +740,7 @@ export async function runGraph<TPayload>(
   options: RunGraphOptions<TPayload>,
 ): Promise<GraphRunResult> {
   const taskTimeoutMs =
-    options.taskTimeoutMs ?? RUN_GRAPH_LIMITS.maxTaskRuntimeMs;
+    options.taskTimeoutMs ?? RUN_GRAPH_LIMITS.defaultTaskRuntimeMs;
   const maxRetainedRuns = options.maxRetainedRuns ?? RUN_STORE_DEFAULT_MAX_RUNS;
   const issues = validateRun(
     options.graph,
