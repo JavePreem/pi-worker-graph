@@ -16,7 +16,57 @@ shared. Every command takes `--suite <name>`; the store defaults to
 - **`promax`** -- the TypeScript subset of SWE-Bench ProMax, graded by Bazel
   targets. Everything below this section is about it unless it says otherwise.
 - **`polyglot`** -- Aider's polyglot benchmark, bundled. See **The polyglot
-  suite** at the end.
+  suite** at the end. It fails criteria 1 and 2 below and is kept as a cheap
+  harness rig, not as a measurement.
+
+## What a suite must satisfy
+
+The product claim can only show up on tasks in a narrow region, and neither
+suite built so far is in it. A candidate suite qualifies only if its tasks
+meet all of these. Screen them in this order, because the first is the
+cheapest to measure and the one both suites so far have failed or left open.
+
+1. **Beyond luna, within sol.** `solo-luna` fails a task that `solo-sol`
+   resolves, at a rate a pool can measure. A task luna one-shots leaves
+   orchestration no quality to add and only cost to lose. A task sol cannot do
+   leaves nothing to delegate toward. The dividing line is luna, not "a single
+   model": a task sol one-shots and luna does not is exactly the target.
+2. **Large relative to the per-session overhead.** Every Pi session writes
+   about 16k tokens of fixed context to cache (measured on solo cells, the same
+   for both models, independent of the work). At sol's prices that is about
+   $0.08 per session, and a `graph-luna` cell runs a sol parent and a sol
+   reviewer per reviewed node. Workers' share of the work has to be big enough
+   that moving it onto luna saves more than those sessions cost: many turns,
+   many files, long builds. Worker and reviewer session overhead is
+   unmeasured; the package starts them with a narrower context than a solo
+   session, so theirs may be smaller.
+3. **Decomposable.** The work has independent parts, so a parent has a real
+   fan-out to make. On such tasks, a parent that still sends one task per graph
+   is a finding about the parent, not about the task.
+4. **Gradeable against a specification the agent can reach.** A mechanical
+   oracle, with every convention it checks stated in the task or visible in the
+   checkout. Hidden tests that encode unstated conventions grade guessing: see
+   **Why not hidden**.
+5. **Runnable here.** Image size against the disk the development box has
+   free, cost per cell, and harness faults that present as model failures --
+   the inherited proxy and **Not every image can run Pi**, under **Measured**.
+
+**How to screen a candidate.** Build grading first and prove it at no spend
+with the self-test. Then run `solo-luna` and `solo-sol` on a sample of about
+six tasks, as trial cells, before any `init`: that measures criterion 1 for
+roughly the cost of the sol cells, and the same records give criterion 2's
+spend per task. Only a candidate that shows a luna/sol gap earns a `graph-luna`
+cell.
+
+**Where the two suites stand.**
+
+| criterion | `promax` | `polyglot` |
+| --- | --- | --- |
+| 1. beyond luna, within sol | unmeasured: one instance, unresolved for both | fails: 6/6 resolved by both |
+| 2. large vs. session overhead | likely: a `graph-luna` cell cost $1.39 on the easiest instance | fails: `solo-sol` $0.17 a bundle, below a graph cell's inferred fixed cost |
+| 3. decomposable | weak: `graphSizes` all ones on 3 of 4 graph cells | by construction |
+| 4. reachable specification | yes: the problem statement plus the repository | yes, with visible tests |
+| 5. runnable here | marginal: 10-16 GB an image | yes: one 640 MB image |
 
 ## The question
 
@@ -1479,12 +1529,24 @@ first fixture suite never fanned out. A bundle's exercises share nothing, so
 a graph arm always has a real split to make, and `graphSizes` of all ones on
 a bundle is a finding about the parent, not about the task.
 
-**Grading.** Tests are hidden, as in Aider's first attempt: the checkout holds
-each exercise's `.docs/` and stub, never `.meta/` or a test file. At grade time
-the pristine tests are written over whatever is at their paths and run by file
-name -- pytest for Python, Jest for JavaScript with `xtest(` un-skipped, which
-is exactly what Aider's harness changes. Each exercise is a target and the
-task resolves only if all of them pass (`resolveTier1`).
+**Grading.** Tests are visible and read-only: the checkout holds each
+exercise's `.docs/`, stub and tests, never `.meta/`. At grade time the pristine
+tests are written over whatever is at their paths and run by file name --
+pytest for Python, Jest for JavaScript with `xtest(` un-skipped, which is
+exactly what Aider's harness changes. The checkout carries the tests already
+un-skipped, so the suite the agent can run is the one that grades it. Each
+exercise is a target and the task resolves only if all of them pass
+(`resolveTier1`).
+
+**Why not hidden.** Hidden tests, as in Aider's first attempt, were the first
+design, and the first live cell showed what they grade. `solo-luna` on
+`python/affine-cipher+beer-song+book-store` passed affine-cipher and failed
+the other two on conventions only the tests carry: beer-song's `recite`
+returned one string where the tests want a list of lines, and book-store's
+`total` dollars where they want cents. Neither the instructions nor the stub
+says either. Aider's harness recovers from this on its second attempt, which
+shows the test output; a single hidden attempt has no such recovery, so it
+measures format guessing. Visible tests buy that back and cost headroom.
 
 Grading goes further than Aider in one respect: nothing the agent leaves
 behind decides how the tests run. Every file the checkout started with except
@@ -1501,14 +1563,14 @@ grades each bundle with the example solutions standing in for the agent:
 bare stubs grade unresolved, and Jest reports every spec test executed. Pi
 0.85.1 installs and starts in the image.
 
-**Not measured.** Whether it separates `sol` from `luna`. A bundle turns a
-per-exercise pass rate p into roughly p^3, so a strong arm at 0.9 resolves
-about 0.73 of tasks and a weak one at 0.6 about 0.22 -- illustrative numbers,
-not observations. Two solo cells per arm on a couple of bundles would settle
-the bundle size before `init`. `bench/power.py` is sized at ProMax's base rate
-and needs rerunning at this suite's. Exercism solutions are public, so
-contamination is likely; it is common to every arm and so does not bias the
-paired comparison, but it does inflate absolute rates.
+**Measured: saturated for both arms.** `solo-luna` and `solo-sol` on six of
+the 27 bundles, three Python and three JavaScript, two of them 4-exercise
+remainders: 6/6 resolved each, every exercise passing. luna $0.064 in total
+($0.011 a bundle), sol $0.999 ($0.167 a bundle). On pass rate the suite does
+not separate the models, so it fails criterion 1 of **What a suite must
+satisfy**, and its bundles are too small for criterion 2. Records, per-bundle
+tables and the spend breakdown are in `handoff/polyglot-saturation/RESULTS.md`
+(gitignored). Exercism solutions are public, so contamination is likely.
 
 ```bash
 node bench/selftest.mjs --suite polyglot       # builds the image on first use

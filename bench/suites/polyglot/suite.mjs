@@ -1,6 +1,6 @@
 /**
  * The polyglot suite: Aider's polyglot benchmark (Exercism practice
- * exercises), bundled several to a task, graded by each exercise's hidden
+ * exercises), bundled several to a task, graded by each exercise's own
  * tests.
  *
  * Frontier models come close to saturating these exercises one at a time,
@@ -10,10 +10,13 @@
  * fan-out to make, and a cell whose parent does not make it is a finding
  * about the parent rather than about the task.
  *
- * The tests are hidden, as in Aider's first attempt: the checkout carries each
- * exercise's instructions and stub, and the test files arrive only at grade
- * time. The example solutions never enter the container except in the
- * self-test, where they stand in for the agent.
+ * The tests are visible and read-only. Hidden tests were tried first, as in
+ * Aider's first attempt, and graded format guesses: the first live cell's
+ * beer-song returned a string where the tests want a list of lines, and its
+ * book-store dollars where they want cents, and neither the instructions nor
+ * the stub says which. The agent may run the tests; what it leaves in them is
+ * overwritten before grading. The example solutions never enter the container
+ * except in the self-test, where they stand in for the agent.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -57,7 +60,9 @@ const CHECKOUT = path.join(SCRATCH, "polyglot-benchmark");
  */
 const LANGUAGES = {
   python: {
-    about: "Python 3.11, standard library only. Tests run with pytest.",
+    about:
+      "Python 3.11, standard library only. " +
+      "Run an exercise's tests with: python3 -m pytest <test file>",
     // No conftest.py and no ini file the agent may have left: either can skip
     // or deselect every test, and pytest then exits 0 over code that is wrong.
     command: (tests) =>
@@ -68,7 +73,7 @@ const LANGUAGES = {
   javascript: {
     about:
       "JavaScript on Node.js 22, no packages beyond what is installed. " +
-      "Tests run with Jest (/node_modules/.bin/jest).",
+      "Run an exercise's tests with: /node_modules/.bin/jest <spec file>",
     command: (tests) =>
       // By path: a bare argument is a regex over every test path, so a spec
       // the agent left in a subdirectory under the same name would run too.
@@ -84,17 +89,18 @@ export const preamble = `You are working in a checkout at ${TESTBED}. It holds s
 programming exercises, one directory each.
 
 For each exercise:
-- Its instructions are in its .docs/ directory. Read all of them.
+- Its instructions are in its .docs/ directory, and its tests are beside the
+  solution file. The tests are the specification where the instructions are
+  silent, down to return types and units.
 - Implement it in the exercise's existing solution file. Keep the names of the
   existing functions, classes and exports: the tests import them.
 
 How the work is judged:
-- After you finish, each exercise's hidden tests are added to its directory
-  and run. The task is solved only if every exercise passes all of its tests.
-- You may write and run checks of your own, but a hidden test file overwrites
-  any file of the same name.
-- Do not change package.json, babel.config.js or other configuration: the
-  tests run under it as it is.
+- After you finish, every exercise's tests are run. The task is solved only if
+  every exercise passes all of its tests.
+- Do not edit the tests or the configuration (package.json, babel.config.js):
+  both are restored to their original contents before grading, so a change to
+  them is lost and cannot make a test pass.
 
 The task follows.
 
@@ -194,19 +200,36 @@ export async function loadTasks({ root } = {}) {
   return { tasks, dropped: [] };
 }
 
-/** Files of an exercise the agent may see: not `.meta/`, and not the tests. */
-async function visibleFiles(ex, dir = ex.dir, prefix = "") {
+/** Every file of an exercise except `.meta/`, which holds the example. */
+async function exerciseFiles(ex, dir = ex.dir, prefix = "") {
   const out = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const relative = path.posix.join(prefix, entry.name);
-    if (relative === ".meta" || ex.test.includes(relative)) continue;
+    if (relative === ".meta") continue;
     if (entry.isDirectory())
       out.push(
-        ...(await visibleFiles(ex, path.join(dir, entry.name), relative)),
+        ...(await exerciseFiles(ex, path.join(dir, entry.name), relative)),
       );
     else out.push(relative);
   }
   return out.sort();
+}
+
+/**
+ * What an exercise's checkout starts with, as [relative path, contents]: the
+ * tests with Aider's un-skip applied, so the suite the agent runs is the one
+ * that grades it.
+ */
+async function startingFiles(ex, language) {
+  const files = [];
+  for (const relative of await exerciseFiles(ex)) {
+    const text = await readFile(path.join(ex.dir, relative), "utf8");
+    files.push([
+      relative,
+      ex.test.includes(relative) ? language.tests(text) : text,
+    ]);
+  }
+  return files;
 }
 
 async function writeInto(container, ex, relative, contents) {
@@ -219,7 +242,7 @@ async function writeInto(container, ex, relative, contents) {
 }
 
 /**
- * The checkout: each exercise's visible files under `TESTBED/<name>`, and a
+ * The checkout: each exercise's files but `.meta/` under `TESTBED/<name>`, and a
  * baseline commit so the cell's diff is exactly the agent's work.
  *
  * Written through the container rather than copied in, so every file is owned
@@ -228,14 +251,11 @@ async function writeInto(container, ex, relative, contents) {
  * would be unable to edit its own stubs.
  */
 export async function prepare(container, task) {
+  const language = LANGUAGES[task.language];
   const files = [];
   for (const ex of task.exercises) {
-    for (const relative of await visibleFiles(ex)) {
-      files.push([
-        path.posix.join(TESTBED, ex.name, relative),
-        path.join(ex.dir, relative),
-      ]);
-    }
+    for (const [relative, text] of await startingFiles(ex, language))
+      files.push([path.posix.join(TESTBED, ex.name, relative), text]);
   }
   // Every directory in one exec rather than one per file.
   const dirs = [
@@ -245,8 +265,7 @@ export async function prepare(container, task) {
     `mkdir -p ${dirs.map((d) => JSON.stringify(d)).join(" ")}`,
   );
   if (made.code !== 0) throw new Error(`mkdir: ${made.stderr.slice(-400)}`);
-  for (const [target, source] of files)
-    await container.write(target, await readFile(source, "utf8"));
+  for (const [target, text] of files) await container.write(target, text);
   const committed = await container.exec(
     `cd ${TESTBED} && git init -q && git add -A && ` +
       "git -c user.name=bench -c user.email=bench@invalid commit -qm baseline",
@@ -268,14 +287,9 @@ export async function grade(container, task) {
   const language = LANGUAGES[task.language];
   const states = {};
   for (const ex of task.exercises) {
-    for (const relative of await visibleFiles(ex)) {
-      if (ex.solution.includes(relative)) continue;
-      const text = await readFile(path.join(ex.dir, relative), "utf8");
-      await writeInto(container, ex, relative, text);
-    }
-    for (const relative of ex.test) {
-      const text = await readFile(path.join(ex.dir, relative), "utf8");
-      await writeInto(container, ex, relative, language.tests(text));
+    for (const [relative, text] of await startingFiles(ex, language)) {
+      if (!ex.solution.includes(relative))
+        await writeInto(container, ex, relative, text);
     }
     states[ex.name] = await runCommandTarget(
       container,

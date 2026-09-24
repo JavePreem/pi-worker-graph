@@ -224,9 +224,12 @@ What remains, in order:
 
    The harness is suite-agnostic: ProMax lives in `bench/suites/promax/`, and
    a second suite, `polyglot` (Aider's polyglot exercises, three to a task,
-   hidden tests), is built and self-tested 27/27 at no provider spend.
-   `bench/DESIGN.md` **The polyglot suite** says what it is for and what is
-   still unmeasured: whether it separates `sol` from `luna`.
+   visible read-only tests), is built and self-tested 27/27 at no provider
+   spend.
+   It does not separate `sol` from `luna`: 6/6 bundles resolved by both solo
+   arms. The next step is finding a suite that meets `bench/DESIGN.md`
+   **What a suite must satisfy**: luna fails where sol resolves, the work is
+   large against the ~$0.08 per-session sol overhead, and it decomposes.
 
    The Angular subset is swept in full: 25 of 25 validated, 23 with a
    fail-to-pass set. **The pool is settled at 23.** The 3 ant-design instances

@@ -75,16 +75,34 @@ test("a task id names every exercise in its bundle", async () => {
   assert.match(tasks[0].prompt, /\/testbed\/a-ex: implement a_ex\.py/);
 });
 
-test("the checkout carries neither the tests nor the example", async () => {
-  const root = await fixture([["python", "a-ex"]]);
+test("the checkout carries the tests the grade runs, but not the example", async () => {
+  const root = await fixture([["javascript", "d-ex"]]);
   const [task] = (await loadTasks({ root })).tasks;
   const container = fakeContainer();
   await prepare(container, task);
   assert.deepEqual([...container.files.keys()].sort(), [
-    "/testbed/a-ex/.docs/instructions.md",
-    "/testbed/a-ex/a_ex.py",
+    "/testbed/d-ex/.docs/instructions.md",
+    "/testbed/d-ex/d-ex.js",
+    "/testbed/d-ex/d-ex.spec.js",
   ]);
+  // Un-skipped as graded, so a passing local run means a passing grade.
+  assert.equal(
+    container.files.get("/testbed/d-ex/d-ex.spec.js"),
+    "test('a', f); xit('b', f);",
+  );
   assert.match(container.scripts.at(-1), /git init -q && git add -A/);
+});
+
+test("an edited test is overwritten before it is run", async () => {
+  const root = await fixture([["python", "a-ex"]]);
+  const [task] = (await loadTasks({ root })).tasks;
+  const container = fakeContainer();
+  container.files.set("/testbed/a-ex/a_ex_test.py", "assert True");
+  await grade(container, task);
+  assert.equal(
+    container.files.get("/testbed/a-ex/a_ex_test.py"),
+    "xtest('a', f); xit('b', f);",
+  );
 });
 
 test("grading writes the pristine tests and runs them by name", async () => {
