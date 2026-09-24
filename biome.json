@@ -8,7 +8,8 @@
       "!!.test-dist",
       "!!coverage",
       "!!handoff",
-      "!bench/*-results.json"
+      "!bench/suites/*/*-results.json",
+      "!bench/suites/*/image/package-lock.json"
     ]
   },
   "formatter": {

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { workerGraphConfig } from "./arms.mjs";
-import { NotAttempted, runCell, settleWithSpendCap } from "./cell.mjs";
+import {
+  NotAttempted,
+  promptFingerprint,
+  runCell,
+  settleWithSpendCap,
+} from "./cell.mjs";
 import { createManifest } from "./queue.mjs";
 
 const manifest = createManifest({
@@ -12,14 +17,13 @@ const manifest = createManifest({
   packageVersion: "p",
 });
 
-const instance = {
-  id: "i1",
-  targets: ["//a:test"],
-  regressionTargets: [],
-  row: {
-    image_name: "example/image",
-    problem_statement: "fix the thing",
-    test_patch: "diff",
+const task = { id: "i1", image: "example/image", prompt: "fix the thing" };
+
+const suite = {
+  name: "fake",
+  preamble: "preamble\n",
+  grade: async () => {
+    throw new Error("every test names its own grade");
   },
 };
 
@@ -61,7 +65,7 @@ function deps(over = {}) {
 const run = (
   over = {},
   cell = { task: "i1", arm: "solo-sol", repetition: 1 },
-) => runCell({ instance, cell, manifest, deps: deps(over) });
+) => runCell({ suite, task, cell, manifest, deps: deps(over) });
 
 test("a settled and graded cell records the cost it spent", async () => {
   const record = await run();
@@ -268,7 +272,8 @@ test("a settled turn that spent nothing is not attempted, not a loss", async () 
   // model and the prompt, settled in seconds, and reported zero tokens. The
   // harness graded the untouched checkout and called it an unresolved task.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -290,7 +295,8 @@ test("absent telemetry is not read as a spend of zero", async () => {
   // Unknown and zero are different claims; only zero is evidence the agent
   // never ran, and the runtime keeps them apart for the same reason.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -303,7 +309,8 @@ test("absent telemetry is not read as a spend of zero", async () => {
 test("a trial is handed the session transcript before the client closes", async () => {
   let captured;
   await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     onEvents: async (c) => {
@@ -332,7 +339,8 @@ test("the credentials are removed from the container before grading runs", async
     },
   };
   await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -359,7 +367,8 @@ test("a cell that fails mid-flight still removes the credentials", async () => {
     },
   };
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -378,7 +387,8 @@ test("a confined cell's container is put on the broker's network", async () => {
   // than merely started.
   let network;
   await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     egressAllowHost: "provider.example",
@@ -401,7 +411,8 @@ test("an unconfined cell starts no broker and names no network", async () => {
   let started = false;
   let network = "unset";
   await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -422,7 +433,8 @@ test("an unconfined cell starts no broker and names no network", async () => {
 test("the broker is torn down after the container that is attached to it", async () => {
   const order = [];
   await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     egressAllowHost: "provider.example",
@@ -445,7 +457,8 @@ test("a trial keeps its measurement when the transcript cannot be written", asyn
   // By then the cell has run and been paid for. Losing the usage and the diff
   // to report that a file could not be written is the wrong trade.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     onEvents: async () => {
@@ -461,7 +474,8 @@ test("a record says which host the cell was confined to, or that it was not", as
   // A stored cell outlives the console line that announced the mode, and a
   // run with open egress is not the same measurement as a confined one.
   const confined = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     egressAllowHost: "provider.example",
@@ -481,7 +495,8 @@ test("a cell that never settled carries the relay's account of why", async () =>
   // A relay nothing could connect through hangs the agent instead of failing
   // it, so the timeout record is exactly where that log is needed.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     egressAllowHost: "provider.example",
@@ -509,7 +524,8 @@ test("a transcript handler that is not async still cannot lose the cell", async 
   // `onEvents?.(...).catch()` is itself a TypeError when the handler returns
   // no promise, which the harness would then report as a cell that failed.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     onEvents: () => {
@@ -526,7 +542,8 @@ test("a runaway diff is bounded, and says what it dropped", async () => {
   // permanent.
   const huge = `${"x".repeat(3 * 1024 * 1024)}\n`;
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -544,7 +561,8 @@ test("a record says which provider served it", async () => {
   // A queued cell's provider is in the manifest; a trial has none, so without
   // this a saved trial record cannot say what it measured against.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "solo-luna", repetition: 1 },
     manifest,
     provider: "azure-openai-responses",
@@ -580,7 +598,8 @@ test("a graph arm whose workers never started is not scored", async () => {
     { taskId: "investigate", status: "failed", diagnostics: STARTUP },
   ]);
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "graph-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -608,7 +627,8 @@ test("one worker failing to start does not discard the other three", async () =>
   // ran here and the diff resolves the instance; that is a measurement, not a
   // broken harness.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "graph-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -635,7 +655,8 @@ test("a graph blocked behind a worker that never started is not scored", async (
   // The root fails at startup and its dependants are never dispatched, so they
   // carry no diagnostic of their own. No worker ran all the same.
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "graph-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -661,7 +682,8 @@ test("a graph blocked behind a worker that never started is not scored", async (
 
 test("a graph arm whose workers ran is scored normally", async () => {
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell: { task: "i1", arm: "graph-luna", repetition: 1 },
     manifest,
     deps: deps({
@@ -674,4 +696,48 @@ test("a graph arm whose workers ran is scored normally", async () => {
     }),
   });
   assert.equal(record.class, "resolved");
+});
+
+test("the agent is asked the suite's preamble, then the task's prompt", async () => {
+  let prompt;
+  let prepared;
+  await run({
+    prepare: async (_container, t) => {
+      prepared = t.id;
+    },
+    settle: async (_client, options) => {
+      prompt = options.prompt;
+      return { outcome: "settled", stats: { cost: 1, tokens: { total: 10 } } };
+    },
+    grade: async () => ({ resolved: true, outcome: "resolved", states: {} }),
+  });
+  assert.equal(prepared, "i1");
+  assert.equal(prompt, "preamble\nfix the thing");
+});
+
+test("a grade that throws is a harness outcome that keeps the spend", async () => {
+  // A grade runs over whatever the agent left, and a suite that writes its
+  // tests into that checkout can fail to. The cell has been paid for by then.
+  const record = await run({
+    grade: async () => {
+      throw new Error("write /testbed/a/a_test.py: Is a directory");
+    },
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "harness");
+  assert.equal(record.costUsd, 1.25);
+  assert.match(record.detail.gradeDetail, /Is a directory/);
+});
+
+test("the fingerprint moves with any drawn task's prompt, not with their order", () => {
+  const a = { id: "a", prompt: "one" };
+  const b = { id: "b", prompt: "two" };
+  const base = promptFingerprint(suite, [a, b]);
+  assert.equal(promptFingerprint(suite, [b, a]), base);
+  // A suite whose prompts come from a template can reword them without the
+  // preamble moving; those cells were asked something different.
+  assert.notEqual(
+    promptFingerprint(suite, [a, { ...b, prompt: "two, reworded" }]),
+    base,
+  );
 });

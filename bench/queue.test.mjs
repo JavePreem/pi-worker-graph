@@ -5,6 +5,7 @@ import {
   ARMS,
   assertPromptMatches,
   assertProviderMatches,
+  assertSuiteMatches,
   completeTasks,
   createManifest,
   enumerateCells,
@@ -208,4 +209,13 @@ test("a store drawn under one prompt refuses a run under another", () => {
 
 test("a store drawn before prompts were fingerprinted is not refused", () => {
   assert.doesNotThrow(() => assertPromptMatches({}, "bbbbbbbbbbbb"));
+});
+
+test("a store drawn from one suite refuses a run under another", () => {
+  const manifest = createManifest({ taskIds: ["t"], suite: "a", seed: 1 });
+  assert.doesNotThrow(() => assertSuiteMatches(manifest, "a"));
+  assert.throws(() => assertSuiteMatches(manifest, "b"), /suite "a"/);
+  // Task ids mean nothing outside their suite, so an unrecorded one is not
+  // assumed to be whichever suite the run happens to name.
+  assert.throws(() => assertSuiteMatches({}, "a"), /unrecorded/);
 });

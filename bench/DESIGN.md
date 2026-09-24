@@ -4,6 +4,20 @@ An earlier fixture suite lived here and was deleted rather than committed: it
 could not answer the question below, and the section on why is the part of it
 worth keeping. Only its Pi RPC client survives.
 
+## Suites
+
+The harness is suite-agnostic. A suite (`bench/suites/<name>/suite.mjs`, the
+contract in `bench/suites/index.mjs`) owns what a task is -- its image, its
+prompt, how its checkout is prepared at `/testbed`, and how it is graded.
+Containers, confinement, the agent, the queue, the store and the analysis are
+shared. Every command takes `--suite <name>`; the store defaults to
+`bench/store/<suite>` and its manifest refuses a run under another suite.
+
+- **`promax`** -- the TypeScript subset of SWE-Bench ProMax, graded by Bazel
+  targets. Everything below this section is about it unless it says otherwise.
+- **`polyglot`** -- Aider's polyglot benchmark, bundled. See **The polyglot
+  suite** at the end.
+
 ## The question
 
 One expensive model can do the work itself. Or it can decompose the work,
@@ -253,8 +267,8 @@ failed on exactly those gaps: one agent edited a file the test patch touches,
 which voids the grade before a target runs, and another shipped an edit that
 never compiled. Neither is a fact about the model.
 
-So a fixed preamble precedes every statement (`PROMPT_PREAMBLE`,
-`bench/cell.mjs`). It names the checkout, states that existing test files are
+So a fixed preamble precedes every statement (`preamble`,
+`bench/suites/promax/suite.mjs`). It names the checkout, states that existing test files are
 off-limits and why, states that the change must compile, gives the Bazel
 command and warns that it is slow, and asks for verification before finishing.
 
@@ -290,7 +304,7 @@ that passed before regresses. Binary. This is the resolve rate and the
 denominator for cost per resolved instance.
 
 The set is derived rather than read: the dataset ships no `eval_script` and no
-fail-to-pass list, so `bench/validate-instances.py` climbs from each
+fail-to-pass list, so `bench/suites/promax/validate-instances.py` climbs from each
 `test_patch` path to the nearest Bazel test rule, runs every rule before and
 after the gold patch, and keeps the ones that flip. An instance yielding none
 is not gradeable and is dropped before the queue is enumerated, so grading at
@@ -761,7 +775,8 @@ Built, and covered by `npm run test:bench` against fakes:
   once into a host directory and copied in (`bench/toolchain.mjs`), which keeps
   a registry fetch out of the measurement and does not depend on the Node the
   image happens to ship -- see **Not every image can run Pi**.
-- **Grading** (`bench/grade.mjs`). `test_patch` is applied only after the agent
+- **Grading** (`bench/suites/promax/grade.mjs`, over `resolveTier1` in
+  `bench/grade.mjs`). `test_patch` is applied only after the agent
   has finished. The target set is read from `validate-results.json` rather than
   derived per trial, and every target's outcome comes from Bazel's exit code
   rather than from its wording -- exit 4, no test ran, is a failure, and a text
@@ -774,7 +789,7 @@ Built, and covered by `npm run test:bench` against fakes:
   for.
 - **Preconditions** (`bench/preconditions.mjs`), evaluated from the tool's own
   arguments. Arguments the stream did not carry are unknown, never satisfied.
-- **The prompt every arm gets** (`bench/cell.mjs`), with its hash in the
+- **The prompt every arm gets** (`bench/suites/promax/suite.mjs`), with its hash in the
   manifest and checked on every later run, so a reworded preamble cannot be
   pooled with cells drawn under the old one. See **The prompt every arm gets**.
 - **Paired analysis and spend split** (`bench/analyse.mjs`): exact McNemar over
@@ -787,7 +802,7 @@ Still to build:
 - **The Tier-2 judge**, including order swapping, blinding, and identical-pair
   controls. It is only worth building once the spend split says a saving is
   there to defend.
-- **The rest of the grading self-test.** `bench/grade-selftest.mjs` is built and
+- **The rest of the grading self-test.** `bench/selftest.mjs --suite promax` is built and
   has run on 7 of the 22, covering every multi-target shape; the remaining 15
   are single-target instances of a shape already proven, so what is left there
   is breadth rather than an unrun code path.
@@ -1061,7 +1076,7 @@ columns are the ones that apply.
 ### Why the ant-design three are out
 
 **Settled: dropped.** They are recorded in
-`bench/excluded-instances.json`, which both the validation sweep and the pool
+`bench/suites/promax/excluded-instances.json`, which both the validation sweep and the pool
 loader read, and deliberately not in `validate-results.json` -- nothing was run
 on them, and that file's warrant is that every row in it was measured.
 
@@ -1105,11 +1120,11 @@ fan-out -- a 39-file gold patch spanning drawer, dropdown and tooltip, with
 only 1 of its 6 changed test files a snapshot. It is not worth a second grading
 path on its own.
 
-Removing an entry from `bench/excluded-instances.json` is how this is
+Removing an entry from `bench/suites/promax/excluded-instances.json` is how this is
 revisited; the sweep picks the instance up again on its next run.
 
 **The grading path is proven on 7 instances, including every complex shape in
-the pool.** `bench/grade-selftest.mjs` runs a cell with the gold patch standing
+the pool.** `bench/selftest.mjs --suite promax` runs a cell with the gold patch standing
 in for the agent -- `test_patch` applied afterwards, Bazel's exit code read --
 and all seven graded as resolved, at no provider spend:
 
@@ -1348,7 +1363,7 @@ the agent builds with the image's own Bazel and Node and swapping those would
 turn a startup failure into build failures that look like the task being
 failed. Proven on `c_b8f2a50`, the worst case in the probe: Pi 0.85.1 starts,
 `node --version` on the workers' PATH reads v20.11.1 before and after, Bazel
-still resolves under it, and `grade-selftest` graded the gold patch resolved in
+still resolves under it, and the self-test graded the gold patch resolved in
 33s with all five targets passing. The pool stays at 22 and the rest of the
 probe is bookkeeping rather than a gate.
 
@@ -1357,17 +1372,17 @@ probe is bookkeeping rather than a gate.
 ```bash
 # 1. Derive the fail-to-pass targets the dataset does not ship. Resumable, and
 #    on a small host it has to be: an image is ~14 GB unpacked.
-BENCH_RMI=1 python3 bench/validate-instances.py            # or name instances
+BENCH_RMI=1 python3 bench/suites/promax/validate-instances.py   # or name instances
 
 # 2. Prove the grading path with no provider spend: the gold patch stands in
 #    for the agent and must grade as resolved.
-BENCH_RMI=1 node bench/grade-selftest.mjs
+BENCH_RMI=1 node bench/selftest.mjs --suite promax
 
 # 3. Draw the task order, once. Refused while instances are still unvalidated;
 #    the excluded ones count as accounted for, so this needs no flag.
 #    BENCH_PROVIDER is set here deliberately rather than inherited: the
 #    manifest records it, and every later run is checked against it.
-BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --seed 1234
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --suite promax --seed 1234
 
 # 4. Prove the agent side on two chosen cells before buying twelve drawn ones.
 #    Neither writes a record: a hand-picked cell is not a sample from the order.
@@ -1382,13 +1397,13 @@ BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --seed 1234
 #    unset on it and the image stays local between iterations.
 #    --package-spec takes a `npm pack` tarball when the build under test is
 #    not the published one.
-node bench/bench.mjs cell angular__angular-64903 solo-luna --cap 2
-node bench/bench.mjs cell angular__angular-64903 graph-luna --cap 8
+node bench/bench.mjs cell angular__angular-64903 solo-luna --suite promax --cap 2
+node bench/bench.mjs cell angular__angular-64903 graph-luna --suite promax --cap 8
 
 # 5. Work the queue, a few cells at a time.
-BENCH_RMI=1 node bench/bench.mjs run 12 --cap 5
-node bench/bench.mjs status
-node bench/bench.mjs analyse
+BENCH_RMI=1 node bench/bench.mjs run 12 --suite promax --cap 5
+node bench/bench.mjs status --suite promax
+node bench/bench.mjs analyse --suite promax
 ```
 
 `status` is what may be consulted between runs; `analyse` is the quality gap
@@ -1442,3 +1457,66 @@ nodejs.org once per toolchain directory, so the first run there needs network.
 - Reporting of Noninferiority and Equivalence Randomized Trials: Extension of
   the CONSORT 2010 Statement —
   <https://jamanetwork.com/journals/jama/fullarticle/1487502>
+
+## The polyglot suite
+
+ProMax is hard enough that its base rate (~41%) leaves most paired cells 0-0,
+and one instance costs 10-16 GB of disk. The polyglot suite is its opposite
+on both counts: a bench frontier models come close to saturating that cheaper
+models still fall short on, on one 640 MB image built locally from
+`bench/suites/polyglot/image/`.
+
+**Tasks.** Aider's polyglot benchmark, pinned at
+`Aider-AI/polyglot-benchmark@7e0611e`: the Exercism practice exercises Aider
+chose as hard. Python (34) and JavaScript (49) only -- the two whose test
+commands are exit-code clean with no per-exercise build. Exercises are bundled
+three to a task, alphabetically within a language, remainder into the last
+bundle: 27 tasks. A task id names its exercises, so the composition is in
+every record.
+
+**Why bundles.** A single exercise is one worker's work, which is how the
+first fixture suite never fanned out. A bundle's exercises share nothing, so
+a graph arm always has a real split to make, and `graphSizes` of all ones on
+a bundle is a finding about the parent, not about the task.
+
+**Grading.** Tests are hidden, as in Aider's first attempt: the checkout holds
+each exercise's `.docs/` and stub, never `.meta/` or a test file. At grade time
+the pristine tests are written over whatever is at their paths and run by file
+name -- pytest for Python, Jest for JavaScript with `xtest(` un-skipped, which
+is exactly what Aider's harness changes. Each exercise is a target and the
+task resolves only if all of them pass (`resolveTier1`).
+
+Grading goes further than Aider in one respect: nothing the agent leaves
+behind decides how the tests run. Every file the checkout started with except
+the solution is restored, pytest runs with `--noconftest -c /dev/null`, and
+Jest with an explicit empty `--config`. Measured in the image: a skip-all
+`conftest.py` plus `pytest.ini`, or a `jest.config.js` ignoring every spec,
+passed broken code under the plain commands and fails it under these. The
+image is pinned (base by digest, pytest by version), so a rebuild grades as the
+self-test did.
+
+**Measured, at no provider spend.** `node bench/selftest.mjs --suite polyglot`
+grades each bundle with the example solutions standing in for the agent:
+27/27 resolved, 3-9 s each, under the same hardening a cell runs with. The
+bare stubs grade unresolved, and Jest reports every spec test executed. Pi
+0.85.1 installs and starts in the image.
+
+**Not measured.** Whether it separates `sol` from `luna`. A bundle turns a
+per-exercise pass rate p into roughly p^3, so a strong arm at 0.9 resolves
+about 0.73 of tasks and a weak one at 0.6 about 0.22 -- illustrative numbers,
+not observations. Two solo cells per arm on a couple of bundles would settle
+the bundle size before `init`. `bench/power.py` is sized at ProMax's base rate
+and needs rerunning at this suite's. Exercism solutions are public, so
+contamination is likely; it is common to every arm and so does not bias the
+paired comparison, but it does inflate absolute rates.
+
+```bash
+node bench/selftest.mjs --suite polyglot       # builds the image on first use
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --suite polyglot --seed 1234
+node bench/bench.mjs cell python/affine-cipher+beer-song+book-store solo-luna --suite polyglot --cap 1
+node bench/bench.mjs run 8 --suite polyglot --cap 2
+```
+
+Do not pass `BENCH_RMI=1` here: the image is built locally, so dropping it
+means rebuilding it on the next cell.
+

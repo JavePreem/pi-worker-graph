@@ -1,5 +1,6 @@
 /**
- * The per-instance Docker environment a cell runs in.
+ * The per-task Docker environment a cell runs in. Every suite's image holds
+ * the task's checkout at `TESTBED`, which is what the agent is started in.
  *
  * ProMax ships a built checkout per instance -- `node_modules` installed and a
  * warm Bazel cache -- so there is no setup step, but the checkout only exists
@@ -60,6 +61,19 @@ export async function pullImage(image, { timeoutMs = 2_400_000 } = {}) {
   const result = await run(["docker", "pull", image], { timeoutMs });
   if (result.code !== 0)
     throw new Error(`docker pull ${image}: ${result.stderr.slice(-400)}`);
+}
+
+/**
+ * Obtain an image unless the host already has it -- by pulling, unless the
+ * suite says otherwise. A tag that is on the host is the one a self-test
+ * already proved.
+ */
+export async function ensureImage(image, obtain = pullImage) {
+  const present = await run(["docker", "image", "inspect", image], {
+    timeoutMs: 60_000,
+  });
+  if (present.code === 0) return;
+  await obtain(image);
 }
 
 /**

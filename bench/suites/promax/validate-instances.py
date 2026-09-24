@@ -7,12 +7,12 @@ nearest BUILD.bazel declaring a test rule, run every rule before the gold patch
 and after, and keep the ones that flip fail->pass. An instance yielding no such
 target cannot be graded and is dropped. No agent, no provider spend.
 
-Resumable. Results accumulate in bench/validate-results.json, and an instance
+Resumable. Results accumulate in bench/suites/promax/validate-results.json, and an instance
 already recorded there is skipped, so the sweep can be run a couple of
 instances at a time -- which on a small host it has to be. Named instance ids
 are validated in the order given; with no arguments the whole TypeScript subset
 is swept, minus what is already recorded and minus what
-bench/excluded-instances.json keeps out of the pool by decision.
+bench/suites/promax/excluded-instances.json keeps out of the pool by decision.
 
 Dataset pages are fetched to $BENCH_SCRATCH on first use; see DESIGN.md
 "Measured".

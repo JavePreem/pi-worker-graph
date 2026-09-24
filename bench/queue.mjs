@@ -49,6 +49,7 @@ function shuffle(items, seed) {
  */
 export function createManifest({
   taskIds,
+  suite,
   seed,
   arms = ARMS,
   repetitions = 1,
@@ -64,6 +65,9 @@ export function createManifest({
   return {
     schema: SCHEMA,
     createdAt: new Date().toISOString(),
+    // Which task source the order was drawn from. Omitted rather than left
+    // undefined, for the same round-trip reason as the provider below.
+    ...(suite === undefined ? {} : { suite }),
     seed,
     arms: [...arms],
     repetitions,
@@ -119,6 +123,20 @@ export function assertProviderMatches(manifest, provider) {
       `run resolves to "${provider}". Set BENCH_PROVIDER=${manifest.provider}, ` +
       "or start a separate store: cells served by two providers cannot be " +
       "paired against each other.",
+  );
+}
+
+/**
+ * Refuse a run under a different suite than the one the order was drawn from.
+ * Task ids are only meaningful inside their suite, so a store with no suite
+ * recorded is refused too rather than guessed at.
+ */
+export function assertSuiteMatches(manifest, suite) {
+  if (manifest.suite === suite) return;
+  throw new Error(
+    `this store was drawn from suite "${manifest.suite ?? "unrecorded"}" ` +
+      `but the run names "${suite}". Pass --suite ${manifest.suite ?? "<name>"}, ` +
+      "or point BENCH_STORE at that suite's store.",
   );
 }
 

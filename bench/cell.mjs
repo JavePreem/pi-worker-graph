@@ -1,6 +1,10 @@
 /**
  * One cell: one task, one arm, one repetition, from container to record.
  *
+ * The task comes from a suite (`bench/suites/<name>/suite.mjs`), which owns
+ * what a task is: its image, its prompt, how its checkout is prepared and how
+ * it is graded. Everything else here is the same for every suite.
+ *
  * Everything that is not the agent failing the task classes as **not
  * attempted** -- a container that will not start, a provider that will not
  * answer, a cell stopped by its own spend cap. Scoring those as losses would
@@ -13,13 +17,12 @@ import { createHash } from "node:crypto";
 import { armConfig, PROVIDER, workerGraphConfig } from "./arms.mjs";
 import {
   run as dockerCli,
-  pullImage,
+  ensureImage,
   removeImage,
   startContainer,
   TESTBED,
 } from "./container.mjs";
 import { startEgressBroker } from "./egress.mjs";
-import { gradeTier1 } from "./grade.mjs";
 import { evaluatePreconditions } from "./preconditions.mjs";
 import { makeRecord } from "./queue.mjs";
 import { openPi } from "./rpc-client.mjs";
@@ -39,60 +42,19 @@ import {
 const WORKER_STARTUP_FAILURE = "Pi worker process failed to start";
 
 /**
- * What every arm is told, on top of the instance's own problem statement.
- *
- * It exists because the first live cells failed on the harness rather than on
- * the task: one agent edited a file the graded test patch touches, which voids
- * the grade before a target runs, and another shipped an edit that never
- * compiled. Neither is a fact about the model; both are facts about an agent
- * given a bug report and nothing else.
- *
- * It is a harness constant. Every arm gets the same bytes, it says nothing
- * about decomposition, delegation or worker counts -- that is arm
- * configuration and open decision 4 -- and it names nothing instance-specific.
- * Its hash goes in the manifest, so two runs under different wording cannot be
- * pooled by accident.
- *
- * Bazel is named outright because the pool is one repository. A second
- * repository in a top-up pool would have to make this per-repo rather than
- * teach every agent a build system its instance does not use.
- */
-export const PROMPT_PREAMBLE = `You are working in a checkout of this repository at ${TESTBED}.
-
-How the work is judged:
-- Your change is graded by tests that are applied to the checkout after you
-  finish. Do not create, edit or delete any existing test file: a test file you
-  have touched makes the graded patch fail to apply, and the task is scored
-  unresolved whatever your fix was worth.
-- Your change must compile. An edit that does not build scores the same as no
-  edit at all.
-
-Building and testing:
-- Bazel is the build system: ./node_modules/.bin/bazelisk test <target> runs a
-  test target, and ./node_modules/.bin/bazelisk build <target> builds one.
-- It is slow -- expect minutes for a target, not seconds -- so build the
-  narrowest target that covers your change rather than the whole repository.
-- Verify before you finish. Reporting an unverified change is worse than
-  reporting that you ran out of time with the change described.
-
-The task follows.
-
-`;
-
-/** The instance's problem statement, under the constant every arm shares. */
-export function buildPrompt(instance) {
-  return `${PROMPT_PREAMBLE}${instance.row.problem_statement}`;
-}
-
-/**
  * What the manifest records instead of the prompt itself: enough to prove two
- * cells were asked the same thing, short enough to read in a listing.
+ * cells were asked the same thing, short enough to read in a listing. It
+ * covers every drawn task's own prompt as well as the preamble, because a
+ * suite that builds its prompts from a template can reword them without the
+ * preamble moving.
  */
-export function promptFingerprint() {
-  return createHash("sha256")
-    .update(PROMPT_PREAMBLE)
-    .digest("hex")
-    .slice(0, 12);
+export function promptFingerprint(suite, tasks) {
+  const hash = createHash("sha256").update(
+    `${suite.name}\n${suite.revision ?? ""}\n${suite.preamble}`,
+  );
+  for (const task of [...tasks].sort((a, b) => (a.id < b.id ? -1 : 1)))
+    hash.update(`\0${task.id}\0${task.prompt}`);
+  return hash.digest("hex").slice(0, 12);
 }
 
 /**
@@ -274,7 +236,7 @@ async function scrubAgentDirectory(container) {
  * it writes lands here: in memory, in the record, and then in an append-only
  * store that keeps it for good. One cell that generates a file rather than
  * editing one would otherwise be permanent. The cap is generous against real
- * refactors -- the gold patches in this pool run to tens of kilobytes -- and
+ * refactors -- the ProMax gold patches run to tens of kilobytes -- and
  * the overflow says what it dropped rather than ending mid-hunk in silence.
  */
 const MAX_DIFF_BYTES = 2 * 1024 * 1024;
@@ -318,7 +280,8 @@ async function captureDiff(container) {
 }
 
 export async function runCell({
-  instance,
+  suite,
+  task,
   cell,
   manifest,
   agentDirectorySource,
@@ -333,15 +296,16 @@ export async function runCell({
   deps = {},
 }) {
   const {
-    pull = pullImage,
+    pull = suite.ensureImage ?? ensureImage,
     start = startContainer,
+    prepare = suite.prepare,
     drop = removeImage,
     install = installInContainer,
     agentDirectory = makeAgentDirectory,
     openAgentSession = openAgent,
     settle = settleWithSpendCap,
     startBroker = startEgressBroker,
-    grade = gradeTier1,
+    grade = suite.grade,
     dropImage = process.env.BENCH_RMI === "1",
   } = deps;
 
@@ -367,8 +331,8 @@ export async function runCell({
     let outcome;
     let diff = "";
     try {
-      await pull(instance.row.image_name);
-      const name = `cell_${cell.arm}_${cell.repetition}_${instance.id.replace(/[^a-z0-9]/gi, "_").slice(-30)}`;
+      await pull(task.image);
+      const name = `cell_${cell.arm}_${cell.repetition}_${task.id.replace(/[^a-z0-9]/gi, "_").slice(-30)}`;
       // Stood up before the container, so the container can be put on the
       // confined network at creation rather than moved onto it afterwards.
       if (egressAllowHost !== undefined) {
@@ -378,10 +342,11 @@ export async function runCell({
           exec: dockerCli,
         });
       }
-      container = await start(instance.row.image_name, {
+      container = await start(task.image, {
         name,
         network: broker?.network,
       });
+      if (prepare !== undefined) await prepare(container, task);
       agent = await agentDirectory({
         from: agentDirectorySource,
         workerGraphConfig: workerGraphConfig(cell.arm, { provider }),
@@ -397,7 +362,7 @@ export async function runCell({
         settleMs,
       });
       ({ outcome, stats } = await settle(client, {
-        prompt: buildPrompt(instance),
+        prompt: `${suite.preamble}${task.prompt}`,
         settleMs,
         capUsd,
       }));
@@ -423,7 +388,7 @@ export async function runCell({
 
       // The agent is finished, so the credentials it needed have no further
       // purpose -- and what follows is the largest quantity of third-party
-      // code the cell runs. `test_patch` is applied and Bazel builds and runs
+      // code the cell runs. The suite's tests are added and its build runs
       // targets out of an image nobody here built, as root. Real provider
       // credentials should not be sitting on that filesystem while it happens.
       // The client object outlives its session: the transcript it captured is
@@ -533,11 +498,21 @@ export async function runCell({
       });
     }
 
-    const graded = await grade(container, {
-      testPatch: instance.row.test_patch,
-      targets: instance.targets,
-      regressionTargets: instance.regressionTargets,
-    });
+    // A grade that throws is a harness outcome, recorded with what the cell
+    // already spent. Left to propagate, it would end the whole run and lose a
+    // cell that has been paid for -- and a suite that writes its tests into a
+    // checkout the agent controlled can throw on what the agent left there.
+    let graded;
+    try {
+      graded = await grade(container, task);
+    } catch (error) {
+      graded = {
+        resolved: false,
+        outcome: "harness",
+        detail: String(error).slice(0, 400),
+        states: {},
+      };
+    }
 
     // A grading run that could not be performed is a harness outcome; an
     // instance the agent did not fix is a result.
@@ -566,7 +541,7 @@ export async function runCell({
             `${s.state}: ${s.reason}`,
           ]),
         ),
-        // What the failing targets actually said. Bazel's own last words were
+        // What the failing targets actually said. The build's own last words were
         // captured all along and dropped here, which left a cell reporting
         // `fail: build failed` and nothing about what failed to build -- the
         // one thing that tells a task too hard for the model from an edit that
@@ -610,6 +585,6 @@ export async function runCell({
     // After the container, because a network cannot be removed while
     // something is still attached to it.
     await broker?.stop().catch(() => {});
-    if (dropImage) await drop(instance.row.image_name).catch(() => {});
+    if (dropImage) await drop(task.image).catch(() => {});
   }
 }

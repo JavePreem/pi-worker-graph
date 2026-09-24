@@ -1,6 +1,6 @@
 [
   {
-    "instance_id": "angular__angular-64903",
+    "task": "angular__angular-64903",
     "targets": [
       "//packages/forms/signals/test/node:test"
     ],
@@ -12,7 +12,7 @@
     "total_s": 327
   },
   {
-    "instance_id": "angular__angular-c_0362665",
+    "task": "angular__angular-c_0362665",
     "targets": [
       "//packages/core/test/bundling/animations-standalone:symbol_test",
       "//packages/core/test/bundling/animations:symbol_test",
@@ -55,7 +55,7 @@
     "total_s": 546
   },
   {
-    "instance_id": "angular__angular-c_5e0dcf1",
+    "task": "angular__angular-c_5e0dcf1",
     "targets": [
       "//packages/core/test/bundling/animations-standalone:symbol_test",
       "//packages/core/test/bundling/animations:symbol_test",
@@ -98,7 +98,7 @@
     "total_s": 626
   },
   {
-    "instance_id": "angular__angular-c_9f44b41",
+    "task": "angular__angular-c_9f44b41",
     "targets": [
       "//packages/core/test/bundling/animations-standalone:symbol_test",
       "//packages/core/test/bundling/animations:symbol_test",
@@ -143,7 +143,7 @@
     "total_s": 695
   },
   {
-    "instance_id": "angular__angular-c_c089d21",
+    "task": "angular__angular-c_c089d21",
     "targets": [
       "//packages/core/test/bundling/animations-standalone:symbol_test",
       "//packages/core/test/bundling/animations:symbol_test",
@@ -186,7 +186,7 @@
     "total_s": 582
   },
   {
-    "instance_id": "angular__angular-c_e3dcf52",
+    "task": "angular__angular-c_e3dcf52",
     "targets": [
       "//packages/core/test/bundling/animations-standalone:symbol_test",
       "//packages/core/test/bundling/animations:symbol_test",

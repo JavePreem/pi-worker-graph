@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 /**
- * The bench, as commands over one store.
+ * The bench, as commands over one store per suite.
  *
  *   init            draw the task order and record it, once
  *   status          spend, projected spend, complete tasks, preconditions
  *   run N --cap U   execute the next N pending cells, each capped at $U
  *   analyse         the reading, asked for deliberately
  *   cell <id> <arm> --cap U   one named cell, outside queue and store
+ *
+ * Every command takes --suite <name> (or BENCH_SUITE): which task source the
+ * store draws from (`bench/suites/`). The store defaults to
+ * `bench/store/<suite>`, and a manifest refuses a run under any other suite.
  *
  * Both runners take --settle-minutes; a queued cell defaults to 60 and a
  * trial to 20. A trial also takes --events <file>, which writes the session's
@@ -33,13 +37,9 @@ import { analyse } from "./analyse.mjs";
 import { armModels, armNames } from "./arms.mjs";
 import { promptFingerprint, runCell } from "./cell.mjs";
 import {
-  gradeableInstances,
-  loadExclusions,
-  loadInstances,
-} from "./dataset.mjs";
-import {
   assertPromptMatches,
   assertProviderMatches,
+  assertSuiteMatches,
   createManifest,
   pendingCells,
   statusReport,
@@ -50,6 +50,7 @@ import {
   readRecords,
   writeManifest,
 } from "./store.mjs";
+import { loadSuite, suiteNames } from "./suites/index.mjs";
 import {
   assertModelsServed,
   prepareToolchain,
@@ -58,7 +59,9 @@ import {
 } from "./toolchain.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const STORE = process.env.BENCH_STORE ?? path.join(HERE, "store");
+const SUITE = flag("suite", process.env.BENCH_SUITE);
+const STORE =
+  process.env.BENCH_STORE ?? path.join(HERE, "store", SUITE ?? "unnamed");
 const AGENT_DIR =
   process.env.BENCH_AGENT_DIR ?? path.join(homedir(), ".pi", "agent");
 const TOOLCHAIN = process.env.BENCH_TOOLCHAIN ?? path.join(HERE, ".toolchain");
@@ -72,7 +75,14 @@ const TOOLCHAIN = process.env.BENCH_TOOLCHAIN ?? path.join(HERE, ".toolchain");
 function outsideStore(name) {
   const value = flag(name);
   if (value === undefined) return undefined;
-  if (path.resolve(value).startsWith(path.resolve(STORE)))
+  // Every suite's store, not only this one's: a trial under one suite is no
+  // more a sample of another's order.
+  const target = path.resolve(value);
+  if (
+    [STORE, path.join(HERE, "store")].some((s) =>
+      target.startsWith(path.resolve(s)),
+    )
+  )
     throw new Error(`--${name} must not write into the store`);
   // Checked now rather than discovered at the end. A failed write is swallowed
   // where it happens, because by then the cell has been paid for and losing
@@ -171,41 +181,15 @@ async function harnessVersion() {
   return `bench@${pkg.version}`;
 }
 
-async function init() {
-  const { gradeable, dropped } = await gradeableInstances();
-  if (gradeable.length === 0)
-    throw new Error("no gradeable instances; run validate-instances.py");
-
-  // The permutation is drawn once and cannot be extended, so a pool that is
-  // still being validated would silently become the whole experiment. Finish
-  // the sweep, or say explicitly that the smaller pool is the intent.
-  const instances = await loadInstances();
-  const subset = [...instances.values()].filter(
-    (row) =>
-      row.language.toLowerCase() ===
-      (process.env.BENCH_LANGUAGE ?? "typescript"),
-  );
-  // Counted by id rather than by subtracting lengths: an exclusion or a record
-  // for an instance outside the subset would otherwise cancel out a genuinely
-  // unvalidated one and the pool would be drawn short without saying so.
-  const accounted = new Set([
-    ...gradeable.map((i) => i.id),
-    ...dropped.map((d) => d.id),
-  ]);
-  const unvalidated = subset
-    .map((row) => row.instance_id)
-    .filter((id) => !accounted.has(id));
-  if (unvalidated.length > 0 && !process.argv.includes("--partial-pool")) {
-    throw new Error(
-      `${unvalidated.length} of ${subset.length} instances are not validated ` +
-        `yet: ${unvalidated.join(", ")}. The task order is drawn once and ` +
-        "cannot be extended: finish validate-instances.py, or pass " +
-        "--partial-pool to fix the order over the smaller pool deliberately.",
-    );
-  }
+async function init(suite) {
+  const { tasks, dropped } = await suite.loadTasks({
+    partialPool: process.argv.includes("--partial-pool"),
+  });
+  if (tasks.length === 0) throw new Error(`suite ${suite.name} has no tasks`);
   const seed = Number(flag("seed", String(Date.now() % 2 ** 31)));
   const manifest = createManifest({
-    taskIds: gradeable.map((i) => i.id),
+    taskIds: tasks.map((t) => t.id),
+    suite: suite.name,
     seed,
     repetitions: Number(flag("repetitions", "1")),
     // graph-sol is about half the budget. Capping it to a prefix is a weaker
@@ -220,16 +204,15 @@ async function init() {
     provider:
       process.env.BENCH_PROVIDER ??
       (await readAgentSettings(AGENT_DIR)).defaultProvider,
-    promptFingerprint: promptFingerprint(),
+    promptFingerprint: promptFingerprint(suite, tasks),
   });
   const paths = await writeManifest(STORE, manifest);
-  // Split, because the two are different claims: one is a derivation that came
-  // up empty, the other a decision someone took. A single total hides which.
-  const excluded = await loadExclusions();
   console.log(
-    `${manifest.order.length} tasks, seed ${seed}, ${dropped.length} dropped ` +
-      `(${dropped.length - excluded.size} ungradeable, ${excluded.size} excluded)`,
+    `${suite.name}: ${manifest.order.length} tasks, seed ${seed}, ` +
+      `${dropped.length} dropped`,
   );
+  for (const { id, reason } of dropped)
+    console.log(`  dropped ${id}: ${reason}`);
   console.log(
     `${pendingCells(manifest, []).length} cells -> ${paths.manifest}`,
   );
@@ -250,7 +233,7 @@ async function status() {
  * going to be refused for serving the wrong provider should be refused before
  * it spends a minute proving it can install Pi.
  */
-async function prepareExecution({ manifest, arms = [] } = {}) {
+async function prepareExecution({ suite, tasks, manifest, arms = [] }) {
   // The provider is read from the agent directory that actually holds the
   // credentials, rather than assumed: a bench that names the wrong one fails
   // every cell at `set_model` and says nothing about why.
@@ -263,8 +246,24 @@ async function prepareExecution({ manifest, arms = [] } = {}) {
   }
   console.log(`provider ${provider}`);
   if (manifest !== undefined) {
+    assertSuiteMatches(manifest, suite.name);
     assertProviderMatches(manifest, provider);
-    assertPromptMatches(manifest, promptFingerprint());
+    // The drawn tasks, not whatever the suite loads today: a pool that grew
+    // after `init` is not a change to what the drawn cells were asked.
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const missing = manifest.order.filter((id) => !byId.has(id));
+    if (missing.length > 0)
+      throw new Error(
+        `${missing.length} drawn task(s) are no longer in suite ` +
+          `${suite.name}: ${missing.join(", ")}`,
+      );
+    assertPromptMatches(
+      manifest,
+      promptFingerprint(
+        suite,
+        manifest.order.map((id) => byId.get(id)),
+      ),
+    );
   }
   const allowHost = await egressAllowHost(provider);
   // Before the image, not after: a model the provider does not serve fails at
@@ -284,21 +283,23 @@ async function prepareExecution({ manifest, arms = [] } = {}) {
   return { toolchain, provider, allowHost };
 }
 
-async function run(count) {
+async function run(suite, count) {
   if (!Number.isInteger(count) || count < 1)
     throw new Error("run needs a positive cell count");
   const cap = requireCap();
   const manifest = await readManifest(STORE);
   const records = await readRecords(STORE);
-  const { gradeable } = await gradeableInstances();
-  const byId = new Map(gradeable.map((i) => [i.id, i]));
+  const { tasks } = await suite.loadTasks({ partialPool: true });
+  const byId = new Map(tasks.map((t) => [t.id, t]));
   const queue = pendingCells(manifest, records).slice(0, count);
   if (queue.length === 0) {
     console.log("nothing pending");
     return;
   }
 
-  const { toolchain, allowHost } = await prepareExecution({
+  const { toolchain, provider, allowHost } = await prepareExecution({
+    suite,
+    tasks,
     manifest,
     arms: [...new Set(queue.map((c) => c.arm))],
   });
@@ -313,7 +314,8 @@ async function run(count) {
       `\n[${index + 1}/${queue.length}] ${cell.task} ${cell.arm} r${cell.repetition}`,
     );
     const record = await runCell({
-      instance: byId.get(cell.task),
+      suite,
+      task: byId.get(cell.task),
       cell,
       manifest,
       agentDirectorySource: AGENT_DIR,
@@ -340,10 +342,10 @@ async function run(count) {
  * one in would put a chosen task where a drawn one belongs. The record is
  * printed instead, and `--out` writes it somewhere that is not the store.
  */
-async function trialCell(taskId, armName) {
+async function trialCell(suite, taskId, armName) {
   if (!taskId || !armName) {
     throw new Error(
-      `usage: bench.mjs cell <instance-id> <arm>, arm one of ${armNames().join(", ")}`,
+      `usage: bench.mjs cell <task-id> <arm>, arm one of ${armNames().join(", ")}`,
     );
   }
   if (!armNames().includes(armName)) {
@@ -359,21 +361,21 @@ async function trialCell(taskId, armName) {
   const events = outsideStore("events");
   const capUsd = requireCap();
 
-  const { gradeable, excludedGradeable } = await gradeableInstances();
-  const instance =
-    gradeable.find((i) => i.id === taskId) ??
-    excludedGradeable.find((i) => i.id === taskId);
-  if (!instance) {
+  const { tasks, trialOnly = [] } = await suite.loadTasks({
+    partialPool: true,
+  });
+  const task = [...tasks, ...trialOnly].find((t) => t.id === taskId);
+  if (!task) {
     throw new Error(
-      `${taskId} is not a gradeable instance. ` +
-        `Pick one of: ${gradeable.map((i) => i.id).join(", ")}`,
+      `${taskId} is not a ${suite.name} task. ` +
+        `Pick one of: ${tasks.map((t) => t.id).join(", ")}`,
     );
   }
-  // A trial may name an excluded instance on purpose: tuning the harness
-  // against an instance that is still in the drawn order is training on the
-  // test set. Said out loud, because the record does not carry it.
-  if (instance.excludedFor !== undefined)
-    console.log(`note: outside the drawn pool -- ${instance.excludedFor}`);
+  // A trial may name an excluded task on purpose: tuning the harness against
+  // a task that is still in the drawn order is training on the test set. Said
+  // out loud, because the record does not carry it.
+  if (task.excludedFor !== undefined)
+    console.log(`note: outside the drawn pool -- ${task.excludedFor}`);
 
   // A trial is held to the store's provider when there is a store, so that a
   // path proven on one rate card is not then bought on another. Before `init`
@@ -382,6 +384,8 @@ async function trialCell(taskId, armName) {
     ? await readManifest(STORE)
     : undefined;
   const { toolchain, provider, allowHost } = await prepareExecution({
+    suite,
+    tasks: [...tasks, ...trialOnly],
     manifest,
     arms: [armName],
   });
@@ -392,7 +396,8 @@ async function trialCell(taskId, armName) {
   const cell = { task: taskId, arm: armName, repetition: 0 };
   console.log(`\n${taskId} ${armName} (trial, not recorded)`);
   const record = await runCell({
-    instance,
+    suite,
+    task,
     cell,
     // Not a stored manifest: a trial has no drawn order behind it. Only the
     // two version fields a record carries are needed, and they are the ones
@@ -434,20 +439,25 @@ async function trialCell(taskId, armName) {
 
 async function main() {
   const command = process.argv[2];
-  if (command === "init") return init();
+  const usage =
+    "usage: bench.mjs init|status|run <count>|analyse|cell <task-id> <arm> " +
+    `--suite <${suiteNames().join("|")}>`;
+  if (SUITE === undefined) throw new Error(usage);
+  const suite = await loadSuite(SUITE);
+  if (command === "init") return init(suite);
   if (command === "status") return status();
-  if (command === "run") return run(Number(process.argv[3]));
-  if (command === "cell") return trialCell(process.argv[3], process.argv[4]);
+  if (command === "run") return run(suite, Number(process.argv[3]));
+  if (command === "cell")
+    return trialCell(suite, process.argv[3], process.argv[4]);
   if (command === "analyse") {
     const manifest = await readManifest(STORE);
+    assertSuiteMatches(manifest, suite.name);
     console.log(
       JSON.stringify(analyse(manifest, await readRecords(STORE)), null, 2),
     );
     return;
   }
-  console.log(
-    "usage: bench.mjs init|status|run <count>|analyse|cell <instance-id> <arm>",
-  );
+  console.log(usage);
   process.exitCode = 1;
 }
 

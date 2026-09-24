@@ -222,9 +222,15 @@ What remains, in order:
    judge, which is only worth having once the spend split says there is a
    saving to defend.
 
+   The harness is suite-agnostic: ProMax lives in `bench/suites/promax/`, and
+   a second suite, `polyglot` (Aider's polyglot exercises, three to a task,
+   hidden tests), is built and self-tested 27/27 at no provider spend.
+   `bench/DESIGN.md` **The polyglot suite** says what it is for and what is
+   still unmeasured: whether it separates `sol` from `luna`.
+
    The Angular subset is swept in full: 25 of 25 validated, 23 with a
    fail-to-pass set. **The pool is settled at 23.** The 3 ant-design instances
-   are out by decision, recorded in `bench/excluded-instances.json` and argued
+   are out by decision, recorded in `bench/suites/promax/excluded-instances.json` and argued
    in `bench/DESIGN.md` "Why the ant-design three are out": they buy three
    points of power, they do not make the pilot any less an Angular benchmark,
    the largest of them would be graded by a snapshot oracle over a class rename
@@ -233,7 +239,7 @@ What remains, in order:
    needs no `--partial-pool`.
 
    The grading path is no longer the open question.
-   `bench/grade-selftest.mjs` has proven it on 6 of 23 instances, all resolved
+   `bench/selftest.mjs --suite promax` has proven it on 6 of 23 instances, all resolved
    at no provider spend, and the five after the first were picked to cover
    every multi-target shape in the pool -- 54 of its 78 targets, and the first
    exercise `resolveTier1`'s regression branch has had. The other 17 are

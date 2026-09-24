@@ -42,7 +42,7 @@
     "typecheck:extensions": "tsc -p extensions/tsconfig.json",
     "pretest": "node -e \"require('node:fs').rmSync('.test-dist', { recursive: true, force: true })\"",
     "test": "tsc -p test/tsconfig.json && node --test .test-dist/test/*.test.js",
-    "test:bench": "node --test bench/*.test.mjs",
+    "test:bench": "node --test \"bench/**/*.test.mjs\"",
     "format": "biome format --write .",
     "lint": "biome lint .",
     "check": "biome check . && npm run typecheck && npm test && npm run test:bench",
