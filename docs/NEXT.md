@@ -231,6 +231,19 @@ What remains, in order:
    **What a suite must satisfy**: luna fails where sol resolves, the work is
    large against the ~$0.08 per-session sol overhead, and it decomposes.
 
+   **ProMax is being screened for that now, with its tests visible.** One cell
+   at a time, luna first, sol only where luna fails. The hidden tests graded a
+   guess on both instances both arms ran, and the grader scored a conflict
+   whenever an agent edited a file `test_patch` touches, even identically --
+   which is what the unexplained conflicts below were. Both are fixed:
+   `prepare` commits the tests before the agent starts and the graded targets
+   follow the statement, and grading restores those files first. First
+   reading: luna resolves `c_b8f2a50` and `c_9f44b41` with the tests
+   visible, and fails `c_e3dcf52` and `c_768a09d`. Sol "resolved" both of
+   those by copying the upstream fix out of the image's git history: every
+   image checked carries its fix commit, reachable from `git log --all`.
+   **Criterion 1 is unmeasured until `prepare` strips that history.** `bench/DESIGN.md` **Why ProMax's tests are visible**.
+
    The Angular subset is swept in full: 25 of 25 validated, 23 with a
    fail-to-pass set. **The pool is settled at 23.** The 3 ant-design instances
    are out by decision, recorded in `bench/suites/promax/excluded-instances.json` and argued
@@ -336,8 +349,8 @@ What remains, in order:
    `git apply` refused are now kept with the cell rather than dropped
    (`bench/cell.mjs`, `bench/container.mjs`); the runtime ceiling and its
    default are separate figures, 30 minutes and 10; and every arm now gets a
-   fixed preamble naming the checkout, the build command, and the rule that
-   existing test files are off-limits -- `bench/DESIGN.md` **The prompt every
+   fixed preamble naming the checkout and the build command -- since reworded
+   for visible tests -- `bench/DESIGN.md` **The prompt every
    arm gets**, with its hash in the manifest so a reworded run cannot be pooled
    with this one.
 
@@ -347,8 +360,8 @@ What remains, in order:
    `solo-sol` at $0.375 made the same semantic choice on the same line, and the
    graded test wanted the other one. `bench/DESIGN.md` **The rig, and what the
    preamble bought**, and the matching threat to validity: a hidden test can
-   encode a convention the problem statement does not, which no prompting fixes
-   and which caps the resolve rate for every arm.
+   encode a convention the problem statement does not. No prompting fixes
+   that; making the tests visible does, and ProMax now does.
 
    **Seven images could not run Pi, and now can.** A `node --version` probe per
    image, at no provider spend, was stopped at 15 of 23 for host memory, and 7
@@ -362,7 +375,8 @@ What remains, in order:
 
    1. `graph-luna` on the rig, confirming the package path under the preamble
       and buying a third `reviewShare` reading.
-   2. Settle open decision 4, freeze the preamble, then `init`.
+   2. Settle open decision 4, freeze the preamble, then `init` -- only once
+      the ProMax screen shows a luna/sol gap a pool can measure.
    3. Finish the image probe when the box is idle. It is bookkeeping now rather
       than a gate -- worth having so the write-up can say the pool was swept,
       not worth blocking on.

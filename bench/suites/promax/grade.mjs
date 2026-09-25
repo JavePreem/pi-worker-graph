@@ -4,10 +4,12 @@
  * The gate is `resolveTier1` (`bench/grade.mjs`). The target set is read from
  * `validate-results.json`, not derived here -- see DESIGN.md "Grading".
  *
- * The agent must never see the tests, so `test_patch` is applied only at grade
- * time, after the agent has finished.
+ * The tests are visible: `prepare` (`suite.mjs`) commits `test_patch` into the
+ * checkout before the agent starts, and grading puts those files back to that
+ * commit, so what is graded is the tests as shipped, whatever the agent did to
+ * them.
  */
-import { applyPatch, TESTBED } from "../../container.mjs";
+import { TESTBED } from "../../container.mjs";
 import { resolveTier1 } from "../../grade.mjs";
 
 // Bazel's documented exit codes. 4 is the one that matters most here: it means
@@ -77,6 +79,36 @@ export async function runTarget(
   };
 }
 
+/** Every path a diff touches, on either side, `/dev/null` excluded. */
+export function patchPaths(diff) {
+  const paths = new Set();
+  for (const m of diff.matchAll(/^(?:---|\+\+\+) [ab]\/(.+)$/gm)) {
+    paths.add(m[1]);
+  }
+  return [...paths];
+}
+
+/**
+ * Put every file the test patch touches back to HEAD, where `prepare`
+ * committed them; one the agent created where the patch deletes is removed.
+ * SWE-bench grades the same way. The agent may edit a shared test helper to
+ * keep its own build compiling -- `c_b8f2a50` needed that -- and the edit is
+ * discarded rather than voiding the grade.
+ */
+async function restoreTestFiles(container, testPatch) {
+  const script = patchPaths(testPatch)
+    .map((p) => {
+      const q = JSON.stringify(p);
+      return `if git cat-file -e HEAD:${q} 2>/dev/null; then git checkout HEAD -- ${q}; else rm -f -- ${q}; fi`;
+    })
+    .join(" && ");
+  if (script === "") return;
+  const result = await container.exec(`cd ${TESTBED} && ${script}`);
+  if (result.code !== 0) {
+    throw new Error(`restoring test files: ${result.stderr.slice(-400)}`);
+  }
+}
+
 /**
  * Grade a finished checkout. The caller has already run the agent (or applied
  * the gold patch, for the self-test) and the container still holds its work.
@@ -85,24 +117,7 @@ export async function gradeTier1(
   container,
   { testPatch, targets, regressionTargets = [] },
 ) {
-  const applied = await applyPatch(container, testPatch, {
-    label: "test_patch",
-  });
-  if (!applied.applied) {
-    // The tests are supposed to apply cleanly onto whatever the agent left. A
-    // conflict means the agent changed a file the test patch touches, which is
-    // the one thing it was told not to do, and it is an outcome rather than a
-    // harness failure.
-    return {
-      resolved: false,
-      outcome: "test-patch-conflict",
-      detail: applied.detail,
-      // Named, so the claim "the agent edited the tests" can be checked
-      // against the diff instead of taken on the outcome's word.
-      conflicted: applied.conflicted ?? [],
-      states: {},
-    };
-  }
+  await restoreTestFiles(container, testPatch);
   const states = {};
   for (const target of new Set([...targets, ...regressionTargets])) {
     states[target] = await runTarget(container, target);

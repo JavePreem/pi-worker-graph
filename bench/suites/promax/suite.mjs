@@ -2,8 +2,12 @@
  * The ProMax suite: the TypeScript subset of SWE-Bench ProMax, graded by the
  * Bazel targets `validate-instances.py` recorded for each instance.
  *
- * Every image is a built checkout at `/testbed` with a warm Bazel cache, so
- * there is no `prepare` step: the task is the image plus its problem statement.
+ * Every image is a built checkout at `/testbed` with a warm Bazel cache. The
+ * task is the image, its problem statement, and its tests: `prepare` commits
+ * `test_patch` before the agent starts. Hidden tests were tried first and
+ * graded guessing -- on `c_b8f2a50` both models put a new constructor
+ * parameter last, the statement never says where, and the hidden spec passes
+ * it positionally in the middle. See DESIGN.md "Why not hidden".
  */
 import { applyPatch, TESTBED } from "../../container.mjs";
 import { gradeableInstances, loadInstances } from "./dataset.mjs";
@@ -15,10 +19,9 @@ export const name = "promax";
  * What every arm is told, on top of the instance's own problem statement.
  *
  * It exists because the first live cells failed on the harness rather than on
- * the task: one agent edited a file the graded test patch touches, which voids
- * the grade before a target runs, and another shipped an edit that never
- * compiled. Neither is a fact about the model; both are facts about an agent
- * given a bug report and nothing else.
+ * the task: agents shipped edits that never compiled, and could not tell which
+ * tests would judge them. Neither is a fact about the model; both are facts
+ * about an agent given a bug report and nothing else.
  *
  * It is a harness constant. Every arm gets the same bytes, it says nothing
  * about decomposition, delegation or worker counts -- that is arm
@@ -33,10 +36,11 @@ export const name = "promax";
 export const preamble = `You are working in a checkout of this repository at ${TESTBED}.
 
 How the work is judged:
-- Your change is graded by tests that are applied to the checkout after you
-  finish. Do not create, edit or delete any existing test file: a test file you
-  have touched makes the graded patch fail to apply, and the task is scored
-  unresolved whatever your fix was worth.
+- The tests that grade your change are already in the checkout, committed
+  at HEAD, and the Bazel targets that run them are listed after the task.
+  The task is resolved when every listed target passes.
+- Before grading, every file those tests touch is put back to HEAD, so any
+  change you make to them is discarded.
 - Your change must compile. An edit that does not build scores the same as no
   edit at all.
 
@@ -55,7 +59,11 @@ The task follows.
 const task = (instance) => ({
   id: instance.id,
   image: instance.row.image_name,
-  prompt: instance.row.problem_statement,
+  prompt:
+    `${instance.row.problem_statement}\n\nGraded targets:\n` +
+    [...instance.targets, ...instance.regressionTargets]
+      .map((t) => `- ${t}`)
+      .join("\n"),
   targets: instance.targets,
   regressionTargets: instance.regressionTargets,
   testPatch: instance.row.test_patch,
@@ -104,6 +112,26 @@ export async function loadTasks({ partialPool = false } = {}) {
     dropped,
     trialOnly: excludedGradeable.map(task),
   };
+}
+
+/**
+ * Commit the tests over the image's checkout, so they are visible to the agent,
+ * its diff is only its own work, and grading has a commit to restore them from.
+ */
+export async function prepare(container, t) {
+  const file = "/tmp/test_patch.diff";
+  await container.write(file, t.testPatch);
+  // The images' index carries stale stat data, which `--index` reads as a
+  // mismatch; the refresh rewrites only the cached stat.
+  const result = await container.exec(
+    `cd ${TESTBED} && git update-index -q --refresh; ` +
+      `git apply --index ${file} && ` +
+      "git -c user.name=bench -c user.email=bench@invalid commit -q --no-verify -m tests",
+    { timeoutMs: 300_000 },
+  );
+  if (result.code !== 0) {
+    throw new Error(`committing test_patch: ${result.stderr.slice(-400)}`);
+  }
 }
 
 /** A task carries `testPatch`, `targets` and `regressionTargets` by name. */

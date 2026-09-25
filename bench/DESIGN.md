@@ -14,7 +14,9 @@ shared. Every command takes `--suite <name>`; the store defaults to
 `bench/store/<suite>` and its manifest refuses a run under another suite.
 
 - **`promax`** -- the TypeScript subset of SWE-Bench ProMax, graded by Bazel
-  targets. Everything below this section is about it unless it says otherwise.
+  targets, with the tests visible to the agent (**Why ProMax's tests are
+  visible**, under **Measured**). Everything below this section is about it
+  unless it says otherwise.
 - **`polyglot`** -- Aider's polyglot benchmark, bundled. See **The polyglot
   suite** at the end. It fails criteria 1 and 2 below and is kept as a cheap
   harness rig, not as a measurement.
@@ -62,10 +64,10 @@ cell.
 
 | criterion | `promax` | `polyglot` |
 | --- | --- | --- |
-| 1. beyond luna, within sol | unmeasured: one instance, unresolved for both | fails: 6/6 resolved by both |
+| 1. beyond luna, within sol | unmeasured: both sol resolves so far copied the fix from the image's git history (**The images carry their own fixes**) | fails: 6/6 resolved by both |
 | 2. large vs. session overhead | likely: a `graph-luna` cell cost $1.39 on the easiest instance | fails: `solo-sol` $0.17 a bundle, below a graph cell's inferred fixed cost |
 | 3. decomposable | weak: `graphSizes` all ones on 3 of 4 graph cells | by construction |
-| 4. reachable specification | yes: the problem statement plus the repository | yes, with visible tests |
+| 4. reachable specification | yes, with visible tests; hidden tests graded a guess on 2 of 2 instances | yes, with visible tests |
 | 5. runnable here | marginal: 10-16 GB an image | yes: one 640 MB image |
 
 ## The question
@@ -312,15 +314,18 @@ from so the strata can be reported apart.
 
 The dataset's `problem_statement` is a bug report. On its own it tells an agent
 nothing about where the checkout is, whether it may build, what the build
-command is, or that the graded tests arrive afterwards. The first live cells
-failed on exactly those gaps: one agent edited a file the test patch touches,
-which voids the grade before a target runs, and another shipped an edit that
-never compiled. Neither is a fact about the model.
+command is, or which tests will judge it. The first live cells failed on
+exactly those gaps: agents shipped edits that never compiled, and graded tests
+checked details the statement never gave. Neither is a fact about the model.
 
 So a fixed preamble precedes every statement (`preamble`,
-`bench/suites/promax/suite.mjs`). It names the checkout, states that existing test files are
-off-limits and why, states that the change must compile, gives the Bazel
-command and warns that it is slow, and asks for verification before finishing.
+`bench/suites/promax/suite.mjs`). It names the checkout, says the grading tests
+are already committed at HEAD and that the graded targets follow the task,
+says any change to those test files is discarded before grading, states that
+the change must compile, gives the Bazel command and warns that it is slow,
+and asks for verification before finishing. The target list is appended to
+each statement; it is the one instance-specific part of the prompt, and it is
+covered by the same fingerprint.
 
 It is a harness constant, not arm configuration. Every arm receives the same
 bytes. It says nothing about decomposition, delegation or worker counts --
@@ -361,9 +366,16 @@ is not gradeable and is dropped before the queue is enumerated, so grading at
 trial time reads a recorded target set rather than deriving one. See
 **Measured**.
 
-The agent must never see the tests. `test_patch` ships separately from the
-checkout and is applied only at grade time, so a run cannot be gamed by editing
-the thing that scores it.
+The tests are visible. `prepare` commits `test_patch` over the image's
+checkout before the agent starts, so the agent can read and run what grades
+it, and its diff is only its own work. Grading first puts every file
+`test_patch` touches back to that commit (`restoreTestFiles`,
+`bench/suites/promax/grade.mjs`), so a run cannot be gamed by editing the
+thing that scores it: an edit there is discarded, not scored. An earlier
+version kept the tests hidden and applied `test_patch` on top of the agent's
+work at grade time; that version graded guessing, and it scored a conflict
+whenever the agent had edited a file the patch touches, even identically. See
+**Why ProMax's tests are visible**.
 
 ### Tier 2 — judged, only on Tier-1 passes
 
@@ -1017,16 +1029,17 @@ write-up has to say exactly that rather than "TypeScript". Widening means the
 top-up pools, not the three that were dropped; three instances would not have
 made it a statement about anything broader.
 
-**A hidden test can encode a convention the statement does not.** Measured on
+**A hidden test can encode a convention the statement does not.** It was
+measured on two instances, and it is why the tests are now visible. On
 the rig: `angular__angular-64903` asks for a field tree to be iterable, and its
 graded test requires an object field to yield `[key, child]` entries while an
 array field yields values. The statement's only iteration example is
 `@for (field of formGroup)` -- values. Both a `luna` and a `sol` agent chose
 values for both, independently, and each commented the choice as deliberate.
 The instance is under-determined rather than hard, and nothing the agent can
-read would settle it. This depresses the resolve rate for every arm equally, so
-the paired comparison survives, but it caps the rate the pilot is powered
-against -- and that rate is still a placeholder.
+read would settle it. `c_b8f2a50` is the second case: see **Why ProMax's
+tests are visible**. With the tests visible the convention is readable, so
+this threat now applies only to a suite that hides its tests.
 
 **Judge-blind failure.** If the identical-pair controls show high bias, Tier 2
 is uninformative and must be reported as such rather than quietly used anyway.
@@ -1368,6 +1381,12 @@ because `applyPatch` keeps only the last 400 bytes of stderr
 kept text starts mid-word. Widen that before the next graded cell, or the
 queue will produce conflicts nobody can attribute.
 
+*Since resolved.* Every file named in both conflicts is in that instance's
+`test_patch`, and the conflict was a grader fault, not an agent one: the patch
+was applied on top of whatever the agent left. Grading now restores those
+files first, and the conflict outcome is gone. See **Why ProMax's tests are
+visible**.
+
 **One image will not run Pi at all.** `c_b8f2a50` failed with `an export named
 'globSync'` before any provider call: that image's Node predates the API Pi
 0.85.1 imports, so Pi cannot start. It was classed `not-attempted`, which is
@@ -1375,6 +1394,95 @@ the harness behaving correctly, but the pool is not uniformly runnable and
 nothing has swept for it. A `node --version` per image costs no provider spend
 and would say how much of the 23 is affected before `init` draws an order over
 all of them.
+
+### Why ProMax's tests are visible
+
+Trial cells on 2026-09-25, `azure-openai-responses`, under `bench.mjs cell`,
+screening criterion 1 one cell at a time. Records and transcripts are in
+`handoff/promax-screen/` (gitignored).
+
+**The grader scored a forced edit as a conflict.** `solo-luna` on
+`c_b8f2a50` graded `test-patch-conflict`. Its change to `addDirective`'s
+signature forced an edit to a test helper,
+`typecheck/testing/index.ts`, and that edit was byte-identical to the one
+`test_patch` makes -- so `git apply` refused, because the change was already
+there. The three earlier conflicted cells had the same cause. Grading now
+restores the files `test_patch` touches before it applies, as SWE-bench does.
+Regraded at no provider spend, the same diff passed 4 of 5 targets.
+
+**The hidden tests graded a guess.** `solo-sol` on the same instance failed
+the same target the same way, at 40x the spend. The statement says the
+`DirectiveDecoratorHandler` "must accept a `ResourceRegistry` instance as a new
+constructor parameter" and does not say where; for `addDirective`, in the same
+statement, it names the position. The hidden spec passes the registry
+positionally, between `jitDeclarationRegistry` and `strictStandalone`. Both
+models appended it last. With `angular__angular-64903` under **Threats to
+validity**, that is two of the two instances both arms have run on, and in
+both the arms agreed on a reasonable reading the test rejects.
+
+**Made visible, the same instance resolves for luna.** `test_patch` is now
+committed before the agent starts and the graded targets are listed after the
+statement. `solo-luna` put the parameter where the test wants it and resolved,
+touching no test file. Polyglot made the same switch for the same reason (**Why
+not hidden**). The cost is headroom: an instance that resolves once its tests
+are visible does not separate the models, and whether enough of the pool still
+does is exactly what criterion 1 now measures.
+
+| instance | arm | tests | spend | wall | grade |
+| --- | --- | --- | --- | --- | --- |
+| `c_b8f2a50` | `solo-luna` | hidden | $0.051 | 5.3 min | not resolved: 4/5, after regrading the conflict |
+| `c_b8f2a50` | `solo-sol` | hidden | $2.022 | 9.1 min | not resolved: 4/5, same target |
+| `c_b8f2a50` | `solo-luna` | visible | $0.062 | 4.8 min | resolved: 5/5 |
+| `c_e3dcf52` | `solo-luna` | visible | $0.026 | 11.1 min | not resolved: 0/8 graded, 8/8 regression |
+| `c_e3dcf52` | `solo-sol` | visible | $0.300 | 3.3 min | resolved: 16/16 |
+| `c_9f44b41` | `solo-luna` | visible | $0.029 | 12.0 min | resolved: 23/23 |
+| `c_768a09d` | `solo-luna` | visible | $0.066 | 10.2 min | not resolved: 3/4, never ran the failing target |
+| `c_768a09d` | `solo-sol` | visible | $0.242 | 1.5 min | resolved: 4/4 -- **copied from git history** |
+
+**Both sol resolves are void.** See **The images carry their own fixes**,
+directly below. The `c_e3dcf52` sol row above is one of them.
+
+**What luna did on `c_e3dcf52` stands; the gap does not.** `c_e3dcf52` asks for
+a refactor whose graded targets are bundle golden-symbol files. Luna did the
+refactor, then regenerated all eight golden files to match its own output and
+reported them passing; restored before grading, the shipped files did not
+match its bundles. Sol left them alone ("already synchronized at HEAD") and
+ran all 16 targets before finishing -- but it had first read the upstream fix
+commit out of the image's history (`git show e3dcf523ea:...`), so its resolve
+measures nothing. Which symbols differed is not verified: the failing test logs are
+not kept.
+
+**Sol's spend is not yet read.** $0.30 and $0.24 on the two copied cells
+against $2.02 on `c_b8f2a50`, which did not copy: copying is cheap, so the
+cheap readings say nothing about what sol costs on the work.
+
+The self-test was re-run under the visible path on `c_b8f2a50` only (resolved,
+37s). The other recorded self-test results were graded under the hidden path;
+the gold patch touches no test file, so the restore is a no-op for it, but
+they are not re-proven.
+
+### The images carry their own fixes
+
+**Every image checked holds the upstream fix commit in its object store.** An
+instance id `c_<sha>` names the commit that fixed it. In all four local images
+(`c_b8f2a50`, `c_e3dcf52`, `c_9f44b41`, `c_768a09d`) that commit resolves with
+`git rev-parse`, is not an ancestor of HEAD, and is reachable from one of about
+1,300 refs. `git log --all` finds it.
+
+**Sol used it, twice; luna never did.** Scanning every transcript for history
+commands: `solo-sol` on `c_e3dcf52` ran `git log --all -- <new file>`, then
+`git show e3dcf523ea:<path>` for the new modules. `solo-sol` on `c_768a09d`
+ran `git log --all --grep='interpolation config'`, then `git diff
+04462ed67f^ 04462ed67f -- . ':(exclude)packages/compiler/test/**' | git apply`
+-- the fix with the tests excluded -- and finished a 21-file change in 92s on
+1,444 output tokens. No luna cell and no hidden-test cell ran a history
+command. Graph cells' workers are not in the parent transcript, so whether
+they did is **not verified**.
+
+So on this pool the luna/sol difference so far is partly that sol looks for
+the answer in history and luna does not. That is a real capability, and one
+the benchmark must not reward. Every ProMax sol result, and any graph result,
+is void until `prepare` makes the fix unreachable.
 
 ### The rig, and what the preamble bought
 
