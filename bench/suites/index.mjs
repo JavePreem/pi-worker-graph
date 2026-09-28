@@ -18,6 +18,7 @@
  * is checked.
  */
 const SUITES = {
+  coldstart: () => import("./coldstart/suite.mjs"),
   polyglot: () => import("./polyglot/suite.mjs"),
   promax: () => import("./promax/suite.mjs"),
 };

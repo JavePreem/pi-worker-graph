@@ -103,6 +103,7 @@ for (const task of pending) {
         ]),
       );
       if (graded.detail) record.detail = graded.detail;
+      if (graded.quality) record.quality = graded.quality;
     }
   } catch (error) {
     record.outcome = "harness";

@@ -572,6 +572,9 @@ export async function runCell({
         // one thing that tells a task too hard for the model from an edit that
         // never compiled. Kept for failures only; a pass explains itself.
         ...targetFailures(graded.states),
+        // What a suite measures beside the grade, such as how good the tests
+        // the agent wrote are. Recorded, never graded.
+        ...(graded.quality === undefined ? {} : { quality: graded.quality }),
         // The files `git apply` refused, when it did.
         ...(graded.conflicted?.length
           ? { conflictedFiles: graded.conflicted }

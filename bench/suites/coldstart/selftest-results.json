@@ -1,0 +1,132 @@
+[
+  {
+    "task": "mustache",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "comments": "pass: 12/12 passed",
+      "delimiters": "pass: 14/14 passed",
+      "interpolation": "pass: 41/41 passed",
+      "inverted": "pass: 22/22 passed",
+      "partials": "pass: 12/12 passed",
+      "sections": "pass: 34/34 passed"
+    },
+    "quality": {
+      "own": {
+        "passed": 7,
+        "total": 7
+      },
+      "reference": {
+        "passed": 7,
+        "total": 7
+      },
+      "mutants": {
+        "killed": 26,
+        "total": 40
+      },
+      "survivors": [
+        "chevron/tokenizer.py line 51: comparison swapped",
+        "chevron/renderer.py line 115: arithmetic swapped",
+        "chevron/tokenizer.py line 39: comparison swapped",
+        "chevron/renderer.py line 133: boolean flipped",
+        "chevron/tokenizer.py line 35: comparison swapped",
+        "chevron/tokenizer.py line 35: integer incremented",
+        "chevron/renderer.py line 77: comparison swapped",
+        "chevron/tokenizer.py line 62: boolean flipped",
+        "chevron/tokenizer.py line 55: and/or swapped",
+        "chevron/tokenizer.py line 41: boolean flipped"
+      ]
+    },
+    "total_s": 16
+  },
+  {
+    "task": "jmespath",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "basic": "pass: 18/18 passed",
+      "boolean": "pass: 60/60 passed",
+      "current": "pass: 3/3 passed",
+      "escape": "pass: 8/8 passed",
+      "filters": "pass: 88/88 passed",
+      "functions": "pass: 175/175 passed",
+      "identifiers": "pass: 125/125 passed",
+      "indices": "pass: 59/59 passed",
+      "literal": "pass: 41/41 passed",
+      "multiselect": "pass: 53/53 passed",
+      "pipe": "pass: 17/17 passed",
+      "slice": "pass: 40/40 passed",
+      "syntax": "pass: 135/135 passed",
+      "unicode": "pass: 4/4 passed",
+      "wildcard": "pass: 65/65 passed"
+    },
+    "quality": {
+      "own": {
+        "passed": 7,
+        "total": 7
+      },
+      "reference": {
+        "passed": 7,
+        "total": 7
+      },
+      "mutants": {
+        "killed": 20,
+        "total": 40
+      },
+      "survivors": [
+        "_jmespath_reference/functions.py line 311: not removed",
+        "_jmespath_reference/visitor.py line 34: comparison swapped",
+        "_jmespath_reference/visitor.py line 239: comparison swapped",
+        "_jmespath_reference/visitor.py line 231: comparison swapped",
+        "_jmespath_reference/lexer.py line 87: comparison swapped",
+        "_jmespath_reference/visitor.py line 188: not removed",
+        "_jmespath_reference/parser.py line 236: integer incremented",
+        "_jmespath_reference/visitor.py line 32: integer incremented",
+        "_jmespath_reference/parser.py line 44: integer incremented",
+        "_jmespath_reference/visitor.py line 260: and/or swapped"
+      ]
+    },
+    "total_s": 9
+  },
+  {
+    "task": "jsonpath",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "basic": "pass: 45/45 passed",
+      "filter": "pass: 186/186 passed",
+      "index-selector": "pass: 20/20 passed",
+      "name-selector": "pass: 133/133 passed",
+      "slice-selector": "pass: 74/74 passed",
+      "functions": "pass: 76/76 passed",
+      "whitespace": "pass: 168/168 passed"
+    },
+    "quality": {
+      "own": {
+        "passed": 6,
+        "total": 6
+      },
+      "reference": {
+        "passed": 6,
+        "total": 6
+      },
+      "mutants": {
+        "killed": 23,
+        "total": 40
+      },
+      "survivors": [
+        "_jsonpath_reference/function_extensions/_pattern.py line 6: boolean flipped",
+        "_jsonpath_reference/parse.py line 632: comparison swapped",
+        "_jsonpath_reference/selectors.py line 95: and/or swapped",
+        "_jsonpath_reference/tokens.py line 201: comparison swapped",
+        "_jsonpath_reference/parse.py line 635: arithmetic swapped",
+        "_jsonpath_reference/parse.py line 651: comparison swapped",
+        "_jsonpath_reference/parse.py line 603: integer incremented",
+        "_jsonpath_reference/function_extensions/_pattern.py line 20: boolean flipped",
+        "_jsonpath_reference/environment.py line 73: integer incremented",
+        "_jsonpath_reference/parse.py line 592: arithmetic swapped"
+      ]
+    },
+    "total_s": 12
+  }
+]

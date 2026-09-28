@@ -24,6 +24,10 @@ shared. Every command takes `--suite <name>`; the store defaults to
   below and is a cheap harness rig. At twenty (`BENCH_BUNDLE_SIZE=20`) it
   separates the arms on every task, but the two languages it runs make only
   three tasks at that size.
+- **`coldstart`** -- build a library from a published specification alone,
+  tests included, in an empty checkout. See **The cold-start suite** at the
+  end. It exists to measure real-world use: no tests are given, and the pieces
+  share interfaces.
 
 ## What a suite must satisfy
 
@@ -1729,6 +1733,27 @@ said several exercises "would need further refinement". Luna 0/3, sol 3/3:
 criterion 1 holds on every task the pool has at this size, and three tasks
 is the whole pool, which no statistical design here can use.
 
+**Measured: `graph-luna` on the 29-exercise bundle, before and after the node
+check.** One cell each, both resolving 29/29:
+
+| build | cost | wall | graphs | parent reads | where the money went |
+| --- | --- | --- | --- | --- | --- |
+| published `0.1.0-dev.2` | $1.16 | 435 s | 3 | 58 | parent ~$0.49, reviewed nodes $0.54, luna work ~$0.13 |
+| node check + lean guidance (D23) | $0.21 | 267 s | 1 | 6 | parent ~$0.10, eight checked luna nodes $0.11 |
+
+The first cell did what the old guidance asked: read every spec before
+delegating, add a validation node (rejected at eight dependencies), put sol
+reviewers on tested work, and read the changes again to accept them. Three
+nodes that passed every test failed on informational "blockers" (a note about
+concurrent changes, eslint not installed). The second parent gave each of
+eight nodes a check looping jest over its three or four exercises, and
+accepted on those. Solo sol was $0.83 at 266 s.
+
+The first cell measured the published package, not the checkout:
+`--package-spec` defaults to `pi-worker-graph@latest`. A build under test
+goes in as an `npm pack` tarball; its version string is the published one, so
+the record cannot tell them apart.
+
 ```bash
 node bench/selftest.mjs --suite polyglot       # builds the image on first use
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --suite polyglot --seed 1234
@@ -1741,3 +1766,98 @@ node bench/bench.mjs run 8 --suite polyglot --cap 2
 Do not pass `BENCH_RMI=1` here: the image is built locally, so dropping it
 means rebuilding it on the next cell.
 
+## The cold-start suite
+
+Polyglot comes with tests, has no coupling between pieces, and restores its
+tests before grading: the best case for a checked graph, and nothing like
+work where the tests have to be written too. `coldstart` gives the agent a
+published specification and a public contract in an empty checkout, and asks
+for the implementation and a test suite, in Python with the standard library.
+
+| task | specification | hidden cases | reference |
+| --- | --- | --- | --- |
+| `mustache` | the spec's core-module overviews | 135 of 136 | chevron |
+| `jmespath` | `specification.rst` | 891 of 892 | jmespath.py |
+| `jsonpath` | RFC 9535 and RFC 9485 | 702 of 706 | python-jsonpath-rfc9535 |
+
+Each pairs a specification with its own compliance suite and an MIT reference
+implementation, so nothing is hand-authored and the pool can grow the same
+way. Each is a pipeline of coupled parts -- lexer, parser, evaluator,
+functions -- which is what polyglot could not test.
+
+Three layers, all mechanical:
+
+1. **Hidden cases** grade. They are the compliance cases the reference passes,
+   one target per spec area; resolved means every one passes. The dropped
+   cases are the reference's own misses: a Mustache dotted-name precedence
+   case, a JMESPath zero-step slice it raises `ValueError` on, and four
+   JSONPath Unicode-property patterns the standard-library `re` cannot express
+   (the JSONPath reference is run with `re` in place of `regex`, which the
+   task image does not have).
+2. **Validity**: the agent's tests run against the reference; a test that fails
+   there asserts something the specification does not say.
+3. **Strength**: the agent's tests run against 40 mutants of the reference,
+   each one operator or constant changed and each one caught by the hidden
+   cases, so none is equivalent to the reference. The share killed is the
+   strength.
+
+Layers 2 and 3 are recorded as `detail.quality`, never graded. Tests must use
+only the public contract, which is what lets them run against the reference.
+Nothing that grades is in the container while the agent works: the hidden
+cases, reference and mutants are written in afterwards, the runner deletes the
+cases before importing the code under grade, and the checkout is moved aside
+while the agent's tests run against the reference, so a test that hard-codes
+`/testbed` cannot fall back to the agent's own code.
+
+The self-test grades each reference as resolved, and a seven-test
+contract-only suite kills 20-26 of 40 mutants: the strength measure has room
+on both sides.
+
+A fourth, judged layer -- reading the code for structure and maintainability
+-- is done by hand on a sample, blind to the arm, and recorded as notes rather
+than numbers.
+
+**Measured on `jmespath`, one cell per arm:**
+
+| | `solo-luna` | `solo-sol` | `graph-luna` |
+| --- | --- | --- | --- |
+| hidden cases | 553/891 | 862/891 | 875/891 |
+| tests written | 0 | 17 | 69 |
+| valid on the reference | -- | 13/17 | 63/69 |
+| mutants killed | 0/40 | 31/40 | 33/40 |
+| implementation lines | 181 | 557 | 386 |
+| cost | $0.03 | $0.67 | $3.08 |
+| wall | 116 s | 222 s | ~34 min |
+
+Solo luna wrote a 181-line sketch whose final message claimed every feature,
+and no tests. Solo sol missed flattened projections followed by further
+projections, and its own tests missed the same thing: tests written by the
+author of the code share its blind spots.
+
+`graph-luna` stopped at its $3 cap, so its record is `not-attempted` with no
+grade; the row above is the grade of its diff, applied to an empty checkout
+and run through the same three layers by hand. The parent made five
+one-node graphs: build, three repairs, and a tests audit. Each node's worker
+wrote the tests its own check ran, and a sol reviewer (two rounds) rejected
+the first three with precise blockers -- projection state inferred from a
+runtime list's shape, `!` binding tighter than comparisons, raw-string control
+characters. $2.51 of the $3.08 was those review rounds, about $0.30 each,
+because each re-read the 2,070-line specification. The node that finally
+fixed projections was the one without a review, at $0.02.
+
+The per-node spend, and six theories it suggests for a cheaper graph, are in
+`docs/NEXT.md` under **Theories for a cheaper graph**.
+
+So luna under a sol reviewer beat sol alone on the code and on the tests, at
+4.6 times the cost, and not by testing first: no node wrote tests for another
+to be checked against. That arrangement is not reachable here yet: the
+agent configuration (`workerGraphConfig`, `bench/arms.mjs`) offers a writable
+luna `worker` and a read-only sol `reviewer`, so no node can have sol write
+the tests. The cell also ran with a 45-minute settle limit copied from
+polyglot, against solo arms of two to four minutes; first cells on a new setup
+now get about three times the solo wall-clock and twice its cost.
+
+```bash
+node bench/selftest.mjs --suite coldstart
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell jmespath solo-luna --suite coldstart --cap 1
+```

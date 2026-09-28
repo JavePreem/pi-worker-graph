@@ -105,6 +105,14 @@ adapter. Automated tests remain provider-free:
   round limit is reached, with a still-rejected node failing rather than
   publishing work review refused, every round's spend summed into the node's one
   attempt, and the graph left frozen because rounds are not nodes;
+- an optional per-node check (D23): shell commands the runtime runs itself from
+  the checkout root after the worker reports, repairing on failure with a
+  bounded output tail, before any review; run once before the worker to show
+  it can judge the task (`before: "fail"` by default, or `"pass"` for
+  behaviour to keep), with `frozen` paths fingerprinted before the worker and
+  after every round so a worker cannot pass the check by editing its tests,
+  and a runtime-authored trace of how it went (`failingBefore`, `runs`,
+  `outcome`) on the node's terminal event and parent-facing result;
 - configured worker profile names carried to the parent in the request while
   the mode is enabled, prepended by a `context` handler so registration stays
   static, the transcript keeps no copy, and `/swarm off` drops the block from
@@ -390,20 +398,156 @@ What remains, in order:
    Node still serves the Bazel build. Proven live on the worst case:
    `bench/DESIGN.md` **Not every image can run Pi**. The pool stays at 22.
 
+   **Measured since: a checked graph beats solo sol on polyglot, and costs
+   more than it on cold start.** Details in `bench/DESIGN.md` **The polyglot
+   suite** and **The cold-start suite**.
+
+   - `graph-luna` on the 29-exercise JavaScript bundle resolved it twice. On
+     the published `0.1.0-dev.2` it cost $1.16 (sol $0.83): the parent read
+     all 58 specs, made three graphs, and sol reviewers re-judged tested work.
+     With the node check and leaner parent guidance (D23) it cost $0.21 in
+     one graph of eight checked luna nodes. Earlier graph cells ran the
+     published package: `--package-spec` defaults to `pi-worker-graph@latest`,
+     so a local build needs an `npm pack` tarball passed explicitly.
+   - A third suite, `coldstart`, gives only a specification and a contract and
+     asks for the implementation and its tests. It grades hidden compliance
+     cases, and records the agent's tests against a reference (validity) and
+     40 mutants (strength). On `jmespath`: solo luna 553/891 hidden, no tests,
+     $0.03; solo sol 862/891, 17 tests, 31/40 mutants, $0.67; `graph-luna`
+     875/891, 69 tests, 33/40 mutants, $3.08 -- stopped by the $3 cap, graded
+     by hand from its diff. $2.51 of it was sol review rounds. The parent made
+     five one-node graphs and let each worker write the tests its own check
+     ran: reviewer-driven repair, not tests-first.
+
+   **Theories for a cheaper graph, from that `jmespath` cell.** Unverified;
+   each names the data it rests on and the cell that would test it.
+
+   | node (one per graph) | worker | review | review turns | review cache writes |
+   | --- | --- | --- | --- | --- |
+   | implement-jmespath | $0.044, 41 turns | $0.618 | 10 | 53k tokens |
+   | repair-projections-and-conformance | $0.035, 37 turns | $0.637 | 11 | 51k |
+   | repair-final-conformance | $0.050, 59 turns | $0.696 | 11 | 59k |
+   | structural-projection-rewrite | $0.018, 19 turns | none | -- | -- |
+   | broad-conformance-tests-audit | $0.035, 36 turns | $0.561 | 14 | 57k |
+
+   The parent spent the remaining ~$0.39 across 13 reads and five graph calls.
+   The hidden score was 875/891 both after the fourth node and at the end.
+
+   - **T1. Every round starts cold.** Each review round is a fresh sol process
+     that re-reads the 2,070-line specification and the code: about 55k tokens
+     written to cache per node, about $0.30 a round, against $0.02-0.05 for
+     all of a node's luna work. The cost is re-acquiring context, not judging.
+     D20 chose fresh rounds over resumed sessions; this is its price. Test:
+     the same cell with the reviewer handed the relevant specification
+     sections instead of the whole document, or one reviewer session kept
+     across a node's rounds.
+   - **T2. Review findings are tests written in prose.** The blockers were
+     concrete cases -- `foo[*].bar[0]` over a given document "must return
+     `[1]`", `!a == b` must parse as `!(a == b)`. Written as executable
+     tests in a frozen file instead, every later round is judged by the
+     node's check for nothing, and a fix cannot silently regress. Sol then
+     pays once per defect found, not once per round. Test: a reviewer that
+     writes failing tests into the checked, frozen suite instead of blockers.
+   - **T3. A check that runs the worker's own tests accepts nothing.** Every
+     reviewed node's check passed (`runs: 2, outcome: passed`) while the
+     reviewer rejected it: the worker wrote both code and tests, so they
+     agreed. `before: "fail"` held trivially on the first node because no
+     tests existed and pytest exits non-zero when it collects nothing. Test:
+     tests-first -- a node writes the tests, frozen, before the
+     implementation nodes that are checked against them. It needs a writable
+     strong profile (item 1 below). A check failing because nothing ran should
+     probably not count as failing for the right reason.
+   - **T4. One node per graph turns the parent into the repair loop.** All
+     five graphs held one node covering the whole package, so nothing ran in
+     parallel, every review re-read everything, and each repair cost a parent
+     round-trip (reads, a new graph) where the node's own repair rounds would
+     have done. It took 34 minutes against solo sol's 4. Test: guidance to
+     split by specification area behind an interface-first node, and to
+     raise `maxRounds` rather than re-plan.
+   - **T5. Review is dearest where it adds least.** The one node without a
+     review fixed projections for $0.02. The last node, a tests audit,
+     cost $0.60 and moved the hidden score not at all (875 before and after),
+     though it grew the suite from about six test functions to 69. Where the
+     hidden cases already pass, a review buys test coverage at sol prices.
+   - **T6. The measured lift may be a second look, not delegation.** Luna
+     under sol review beat sol alone, but sol alone had one pass. A single
+     session that is asked to refine keeps its context warm, where cached
+     tokens cost about a tenth of fresh ones. Test: `solo-sol` with "refine"
+     sent twice in the same session; if it reaches ~875 for under $3.08, that
+     is the baseline a graph arm has to beat, not plain `solo-sol`.
+
+   The cell cannot attribute its score to a stage: the hidden cases were only
+   run on a snapshot and on the final diff. Grading the checkout after every
+   `worker_graph` call, off the container, would say which rounds bought
+   what.
+
+   **Limitations and caveats on everything above.** Read these before
+   drawing on the numbers:
+
+   - **One cell per arm, one task.** No figure has a variance. Sol's 862 and
+     the graph's 875 differ by 13 of 891 cases; a rerun of either could close
+     that. The polyglot $0.21 is one cell on a bundle picked because it
+     separates the arms.
+   - **The graph's cold-start grade is hand-made.** Its record says
+     `not-attempted (spend-cap)`. The grade applies the recorded diff to an
+     empty checkout and runs the hidden cases on the host (Python 3.12; the
+     image has 3.11) and the test-quality layers in the image. The diff is
+     the checkout at the moment the cap stopped the parent, which may have
+     been about to plan a sixth graph: it neither shows the graph's ceiling
+     nor excludes a regression.
+   - **Strength is coarse.** 40 mutants, one seeded draw of operator and
+     constant changes; one mutant is 2.5 points, so 31 against 33 is not a
+     difference. Validity depends on the reference, which drops the cases it
+     fails (1 JMESPath, 1 Mustache, 4 JSONPath).
+   - **"Hidden" is partly visible.** `specification.rst` carries worked
+     examples, and the compliance suite overlaps them. JMESPath is also a
+     well-known specification whose Python reference shares the contract's
+     module name, so recall may help every arm.
+   - **The cost split is partly inferred.** Node and reviewer figures come
+     from the package's own accounting; the parent's ~$0.39 is the session
+     total minus them. The cause in T1 -- context re-acquired per round --
+     is read from cache-write volumes, not measured by changing it.
+   - **The graph arm measured the bench's configuration, not the package's
+     limit.** Only a luna `worker` and a read-only sol `reviewer` exist, so
+     the parent could not have put sol on a writing node, and the settle
+     limit (45 minutes) was far looser than the task needed.
+   - **The build is not identifiable from the record.** A local tarball
+     carries the published version string, so which build a record measured
+     is known only from these notes.
+   - **Two of three cold-start tasks are unrun.** Mustache and JSONPath have
+     passed the self-test only; nothing says JMESPath is typical.
+   - **The theories were written after seeing the data they explain.** Each
+     needs its own cell before it steers a design change.
+
    What is left, in order:
 
-   1. `graph-luna` on a polyglot 20+ bundle luna failed, JavaScript's 29
-      first: whether the parent fans out on twenty-odd independent
-      exercises, and whether luna workers under a sol reviewer recover what
-      solo luna left failing. If it does neither, a larger pool buys nothing.
-   2. Grow the polyglot pool: Go, Rust, Java and C++ toolchains in the image
-      give 225 exercises, eight to eleven bundles of twenty.
-   3. Settle open decision 4, freeze the preamble, then `init` on that pool.
+   1. Tests-first on cold start. The bench agent configuration
+      (`workerGraphConfig`, `bench/arms.mjs`) has a luna `worker` and a
+      read-only sol `reviewer`, so no node can have sol write the tests. Add
+      a writable strong profile and cold-start guidance -- a tests node,
+      frozen, then implementation nodes checked against it -- and rerun
+      `graph-luna` on `jmespath` against the numbers above. First cells on
+      any new setup run with tight limits: about three times the solo arm's
+      wall-clock and twice its cost, extended only once the setup behaves.
+   2. The refine baseline (T6): a trial-only `solo-sol-refine` arm, sol with
+      "refine" sent twice in the same session under one cap ($2) and one
+      limit (15 minutes), on `jmespath`. Proposed, not built: a follow-up
+      prompt list on the arm in `bench/arms.mjs`, sent after each settle in
+      `bench/cell.mjs`; the queue's own arm list is unaffected.
+   3. Two preconditions describe the graph arm before checks existed: "no
+      node carried a review policy" fails a cell that accepts on checks, and
+      "no graph had more than one task" fails one that repairs through
+      one-node graphs. Decide what a valid graph cell is now.
+   4. A cell stopped by its spend cap is recorded `not-attempted` with no
+      grade, although its diff is the work it paid for. Grade it anyway and
+      keep the stop as its class.
+   5. Grow a pool only once the mechanism works on one task: `coldstart`
+      from further spec-plus-compliance-suite pairs, `polyglot` from the Go,
+      Rust, Java and C++ exercises.
+   6. Settle open decision 4, freeze the preamble, then `init`.
 
-   The precondition that stood before those cells still stands, and is now
-   sharper: a pilot in which every arm scores zero discriminates nothing and
-   costs $17-67 to learn it. Two cells have not produced a resolve, and one of
-   them was the strong arm.
+   The precondition that stood before those cells still stands: a pilot in
+   which every arm scores zero discriminates nothing.
 
    The attribution the spend split needed is now in the package rather than in
    a fifth arm. A node's cost fused the `sol` reviewer with the `luna` worker,

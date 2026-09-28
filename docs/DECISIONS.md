@@ -373,7 +373,8 @@ node succeeds only if its check passes on the work it reported.
 
 The first live `graph-luna` cell on a 29-exercise polyglot bundle resolved it
 at 1.4x the cost of solo `sol`, with the luna workers spending about a sixth
-of it. The rest was the parent reading every spec before delegating, reading
+of it. With checks and the leaner parent guidance the same bundle resolved in
+one graph of eight checked nodes at a quarter of solo `sol`'s cost. The rest was the parent reading every spec before delegating, reading
 the changes again to accept them, and sol reviewers re-judging work the
 exercise tests already judged. Where a command can decide acceptance, a model
 judging it again is spend with nothing to add, and a worker's report of the
