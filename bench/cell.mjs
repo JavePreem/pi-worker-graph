@@ -457,6 +457,31 @@ export async function runCell({
       });
     }
 
+    // A session the provider ended is not evidence about the task either.
+    //
+    // Seen live: a solo-sol cell settled after six tool calls on a turn the
+    // provider cut off with `content_filter`, and was graded as sol failing a
+    // bundle it resolved on the rerun. Pi settles an errored turn like any
+    // other, so only the final message's stop reason tells them apart. An
+    // earlier errored turn that the agent recovered from is not this case.
+    const last = client.events.findLast(
+      (e) => e.type === "message_end" && e.message?.role === "assistant",
+    )?.message;
+    if (last?.stopReason === "error") {
+      return makeRecord({
+        cell,
+        cellClass: "not-attempted",
+        outcome: "provider-error",
+        manifest,
+        provider,
+        usage: stats?.tokens,
+        costUsd: stats?.cost,
+        diff,
+        egress,
+        detail: `the provider ended the session: ${String(last.errorMessage ?? "no message").slice(0, 400)}`,
+      });
+    }
+
     const preconditions = evaluatePreconditions({
       arm: cell.arm,
       events: client.events,

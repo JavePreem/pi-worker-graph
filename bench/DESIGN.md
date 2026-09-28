@@ -16,10 +16,14 @@ shared. Every command takes `--suite <name>`; the store defaults to
 - **`promax`** -- the TypeScript subset of SWE-Bench ProMax, graded by Bazel
   targets, with the tests visible to the agent (**Why ProMax's tests are
   visible**, under **Measured**). Everything below this section is about it
-  unless it says otherwise.
+  unless it says otherwise. Set aside as too hard: top models resolve about
+  41% of it, so the strong arm fails most tasks and a pair where luna fails
+  and sol resolves is rare by construction.
 - **`polyglot`** -- Aider's polyglot benchmark, bundled. See **The polyglot
-  suite** at the end. It fails criteria 1 and 2 below and is kept as a cheap
-  harness rig, not as a measurement.
+  suite** at the end. At three exercises a bundle it fails criteria 1 and 2
+  below and is a cheap harness rig. At twenty (`BENCH_BUNDLE_SIZE=20`) it
+  separates the arms on every task, but the two languages it runs make only
+  three tasks at that size.
 
 ## What a suite must satisfy
 
@@ -53,8 +57,10 @@ cheapest to measure and the one both suites so far have failed or left open.
    free, cost per cell, and harness faults that present as model failures --
    the inherited proxy and **Not every image can run Pi**, under **Measured**.
 
-**How to screen a candidate.** Build grading first and prove it at no spend
-with the self-test. Then run `solo-luna` and `solo-sol` on a sample of about
+**How to screen a candidate.** Start from its published pass rates, at no
+spend: the strong model should resolve most tasks and the cheap one noticeably
+fewer. A suite whose top models mostly fail is out before anything is built.
+Then build grading and prove it at no spend with the self-test. Then run `solo-luna` and `solo-sol` on a sample of about
 six tasks, as trial cells, before any `init`: that measures criterion 1 for
 roughly the cost of the sol cells, and the same records give criterion 2's
 spend per task. Only a candidate that shows a luna/sol gap earns a `graph-luna`
@@ -64,8 +70,8 @@ cell.
 
 | criterion | `promax` | `polyglot` |
 | --- | --- | --- |
-| 1. beyond luna, within sol | unmeasured: both sol resolves so far copied the fix from the image's git history (**The images carry their own fixes**) | fails: 6/6 resolved by both |
-| 2. large vs. session overhead | likely: a `graph-luna` cell cost $1.39 on the easiest instance | fails: `solo-sol` $0.17 a bundle, below a graph cell's inferred fixed cost |
+| 1. beyond luna, within sol | fails: top models resolve ~41%; both sol resolves here copied the fix from the image's git history (**The images carry their own fixes**) | fails at 3 a bundle (6/6 by both); at 20+, luna 0/3 bundles and sol 3/3 -- but 3 is the whole pool |
+| 2. large vs. session overhead | likely: a `graph-luna` cell cost $1.39 on the easiest instance | fails at 3 (`solo-sol` $0.17 a bundle); at 20+, `solo-sol` $0.83-0.97 |
 | 3. decomposable | weak: `graphSizes` all ones on 3 of 4 graph cells | by construction |
 | 4. reachable specification | yes, with visible tests; hidden tests graded a guess on 2 of 2 instances | yes, with visible tests |
 | 5. runnable here | marginal: 10-16 GB an image | yes: one 640 MB image |
@@ -1628,8 +1634,10 @@ models still fall short on, on one 640 MB image built locally from
 `Aider-AI/polyglot-benchmark@7e0611e`: the Exercism practice exercises Aider
 chose as hard. Python (34) and JavaScript (49) only -- the two whose test
 commands are exit-code clean with no per-exercise build. Exercises are bundled
-three to a task, alphabetically within a language, remainder into the last
-bundle: 27 tasks. A task id names its exercises, so the composition is in
+three to a task by default, alphabetically within a language, remainder into
+the last bundle: 27 tasks. `BENCH_BUNDLE_SIZE` sets another size; it is in
+the suite's `revision`, so a store drawn at one size refuses to run at
+another. A task id names its exercises, so the composition is in
 every record.
 
 **Why bundles.** A single exercise is one worker's work, which is how the
@@ -1680,10 +1688,53 @@ satisfy**, and its bundles are too small for criterion 2. Records, per-bundle
 tables and the spend breakdown are in `handoff/polyglot-saturation/RESULTS.md`
 (gitignored). Exercism solutions are public, so contamination is likely.
 
+**Measured: one bundle of 20 separates them.** `BENCH_BUNDLE_SIZE=20`, the
+first JavaScript bundle (`affine-cipher` through `ocr-numbers`), one cell per
+arm. `solo-luna` passed 19 of 20 and failed `complex-numbers` on a stack
+overflow, $0.094; `solo-sol` passed 20 of 20, $0.967, 237 s. One pair, so a
+reading rather than a rate. Whether luna's miss comes from the bundle's size
+or from the exercise alone is **not verified**: `complex-numbers` was in none
+of the six 3-bundles. A first `solo-sol` cell ended after six tool calls on a
+provider `content_filter` error and was graded as sol failing the bundle; the
+harness now classes a session whose final turn the provider errored as
+`not-attempted` (`provider-error`). Records in `handoff/polyglot-scale/`
+(gitignored).
+
+**At 20 the pool is three tasks.** Bundles are cut per language with the
+remainder folded into the last: JavaScript's 49 exercises make bundles of 20
+and 29, Python's 34 make one of 34. The pinned repository has 225 exercises
+in six languages (Python 34, JavaScript 49, Go 39, Rust 30, Java 47, C++ 26);
+the image runs only the first two.
+
+**The other two bundles: luna quits.** `solo-luna` on JavaScript's 29 passed
+16 ($0.036, 290 s) and on Python's 34 passed 9 ($0.040, 163 s). Both runs
+reached failing test output and ended the session anyway, the Python one
+saying some exercises "may still require additional refinement". On the
+JavaScript bundle it first ran Jest from the checkout root, where the specs
+do not transform, and spent turns on that; grading runs each exercise from
+its own directory, and the prompt now says so.
+
+**Measured: all three bundles separate the arms.** Under the corrected
+prompt luna was rerun on both, and sol run on both, one cell each:
+
+| bundle | `solo-luna` | `solo-sol` |
+| --- | --- | --- |
+| JavaScript, 20 | 19/20, $0.094 | 20/20, $0.967, 237 s |
+| JavaScript, 29 | 11/29, $0.037, 289 s | 29/29, $0.831, 266 s |
+| Python, 34 | 11/34, $0.187, 736 s | 34/34, $0.867, 200 s |
+
+The first JavaScript row predates the prompt fix. Both reruns ended the
+session with tests still failing, as the first runs did; the JavaScript one
+said several exercises "would need further refinement". Luna 0/3, sol 3/3:
+criterion 1 holds on every task the pool has at this size, and three tasks
+is the whole pool, which no statistical design here can use.
+
 ```bash
 node bench/selftest.mjs --suite polyglot       # builds the image on first use
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs init --suite polyglot --seed 1234
 node bench/bench.mjs cell python/affine-cipher+beer-song+book-store solo-luna --suite polyglot --cap 1
+BENCH_BUNDLE_SIZE=20 BENCH_PROVIDER=azure-openai-responses \
+  node bench/bench.mjs cell <id> solo-sol --suite polyglot --cap 3   # ids from loadTasks() at that size
 node bench/bench.mjs run 8 --suite polyglot --cap 2
 ```
 

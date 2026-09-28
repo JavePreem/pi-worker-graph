@@ -226,12 +226,31 @@ What remains, in order:
    a second suite, `polyglot` (Aider's polyglot exercises, three to a task,
    visible read-only tests), is built and self-tested 27/27 at no provider
    spend.
-   It does not separate `sol` from `luna`: 6/6 bundles resolved by both solo
-   arms. The next step is finding a suite that meets `bench/DESIGN.md`
-   **What a suite must satisfy**: luna fails where sol resolves, the work is
-   large against the ~$0.08 per-session sol overhead, and it decomposes.
+   At three a bundle it does not separate `sol` from `luna`: 6/6 bundles
+   resolved by both solo arms. The work is finding a suite that meets
+   `bench/DESIGN.md` **What a suite must satisfy**: luna fails where sol
+   resolves, the work is large against the ~$0.08 per-session sol overhead,
+   and it decomposes.
 
-   **ProMax is being screened for that now, with its tests visible.** One cell
+   **Polyglot at twenty a bundle separates them, on too few tasks.**
+   `BENCH_BUNDLE_SIZE=20` cuts the two languages into three bundles (20 and
+   29 JavaScript exercises, 34 Python). `solo-sol` resolved all three at
+   $0.83-0.97 each; `solo-luna` failed all three, passing 19/20, 11/29 and
+   11/34, and ended every session with tests still failing. That is
+   criterion 1 met on the whole pool, and a pool of three. The pinned
+   repository has 225 exercises in six languages; the image runs two.
+   `bench/DESIGN.md` **The polyglot suite**.
+
+   Two harness fixes came out of it. A session whose final turn the provider
+   errored -- sol cut off by `content_filter`, seen live -- is now classed
+   `not-attempted` (`provider-error`) rather than graded as the arm failing
+   the task. And the prompt now says to run an exercise's tests from its own
+   directory, where grading runs them; from the checkout root the JavaScript
+   specs do not transform, and luna spent turns on that.
+
+   **ProMax is set aside as too hard.** Top models resolve about 41% of it, so
+   the strong arm fails most tasks and luna-fails/sol-resolves pairs are rare
+   by construction. What its screen found is kept below. It ran one cell
    at a time, luna first, sol only where luna fails. The hidden tests graded a
    guess on both instances both arms ran, and the grader scored a conflict
    whenever an agent edited a file `test_patch` touches, even identically --
@@ -373,13 +392,13 @@ What remains, in order:
 
    What is left, in order:
 
-   1. `graph-luna` on the rig, confirming the package path under the preamble
-      and buying a third `reviewShare` reading.
-   2. Settle open decision 4, freeze the preamble, then `init` -- only once
-      the ProMax screen shows a luna/sol gap a pool can measure.
-   3. Finish the image probe when the box is idle. It is bookkeeping now rather
-      than a gate -- worth having so the write-up can say the pool was swept,
-      not worth blocking on.
+   1. `graph-luna` on a polyglot 20+ bundle luna failed, JavaScript's 29
+      first: whether the parent fans out on twenty-odd independent
+      exercises, and whether luna workers under a sol reviewer recover what
+      solo luna left failing. If it does neither, a larger pool buys nothing.
+   2. Grow the polyglot pool: Go, Rust, Java and C++ toolchains in the image
+      give 225 exercises, eight to eleven bundles of twenty.
+   3. Settle open decision 4, freeze the preamble, then `init` on that pool.
 
    The precondition that stood before those cells still stands, and is now
    sharper: a pilot in which every arm scores zero discriminates nothing and

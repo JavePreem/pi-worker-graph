@@ -306,6 +306,41 @@ test("absent telemetry is not read as a spend of zero", async () => {
   assert.notEqual(record.outcome, "no-agent-turn");
 });
 
+const assistantEnd = (stopReason, errorMessage) => ({
+  type: "message_end",
+  message: { role: "assistant", stopReason, errorMessage },
+});
+
+test("a session the provider ended is not attempted, and keeps its spend", async () => {
+  // Seen live: sol cut off mid-bundle by `content_filter`, graded as a loss.
+  const record = await run({
+    openAgentSession: async () =>
+      fakeClient({
+        events: [
+          assistantEnd("toolUse"),
+          assistantEnd("error", "Response incomplete: content_filter"),
+        ],
+      }),
+    grade: async () => {
+      throw new Error("a session the provider ended must not be graded");
+    },
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "provider-error");
+  assert.match(record.detail, /content_filter/);
+  assert.equal(record.costUsd, 1.25);
+});
+
+test("an errored turn the agent recovered from is still scored", async () => {
+  const record = await run({
+    openAgentSession: async () =>
+      fakeClient({
+        events: [assistantEnd("error", "rate limited"), assistantEnd("stop")],
+      }),
+  });
+  assert.equal(record.class, "resolved");
+});
+
 test("a trial is handed the session transcript before the client closes", async () => {
   let captured;
   await runCell({

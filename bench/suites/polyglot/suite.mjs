@@ -44,8 +44,17 @@ const COMMIT = "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f";
  * than a pair to split, and a bundle resolves only if every exercise does, so
  * a per-exercise pass rate p becomes p^3 per task: a larger bundle would push
  * the strong arm's resolve rate down faster than it separates the arms.
+ *
+ * `BENCH_BUNDLE_SIZE` overrides it, to push one session's context past what
+ * the cheap model holds -- the one place its published scores fall far behind
+ * the strong model's. It is in `revision`, so the fingerprint carries it.
  */
-export const BUNDLE_SIZE = 3;
+export const BUNDLE_SIZE = Number(process.env.BENCH_BUNDLE_SIZE ?? 3);
+if (!Number.isInteger(BUNDLE_SIZE) || BUNDLE_SIZE < 1) {
+  throw new Error(
+    `BENCH_BUNDLE_SIZE must be a positive integer, got: ${process.env.BENCH_BUNDLE_SIZE}`,
+  );
+}
 
 export const revision = `${REPOSITORY}@${COMMIT} bundles of ${BUNDLE_SIZE}`;
 
@@ -62,7 +71,7 @@ const LANGUAGES = {
   python: {
     about:
       "Python 3.11, standard library only. " +
-      "Run an exercise's tests with: python3 -m pytest <test file>",
+      "Run an exercise's tests from its directory with: python3 -m pytest <test file>",
     // No conftest.py and no ini file the agent may have left: either can skip
     // or deselect every test, and pytest then exits 0 over code that is wrong.
     command: (tests) =>
@@ -73,7 +82,7 @@ const LANGUAGES = {
   javascript: {
     about:
       "JavaScript on Node.js 22, no packages beyond what is installed. " +
-      "Run an exercise's tests with: /node_modules/.bin/jest <spec file>",
+      "Run an exercise's tests from its directory with: /node_modules/.bin/jest <spec file>",
     command: (tests) =>
       // By path: a bare argument is a regex over every test path, so a spec
       // the agent left in a subdirectory under the same name would run too.
