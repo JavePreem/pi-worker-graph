@@ -48,6 +48,7 @@ interface RegisteredTool {
         };
         readonly artifactBytes?: number;
         readonly usage?: { readonly totalTokens: number };
+        readonly check?: unknown;
         readonly diagnostics?: string;
         readonly reportOmitted?: string;
       }[];
@@ -277,6 +278,97 @@ test("defensively rejects unknown request fields before loading configuration", 
     /Invalid worker_graph request/,
   );
   assert.equal(configurationLoads, 0);
+});
+
+test("hands a task's check to its worker payload", async (t) => {
+  const paths = await fixture(t);
+  const payloads: unknown[] = [];
+  const tool = captureTool(paths.agentDirectory, () => async (input) => {
+    payloads.push(input.payload);
+    return { output: nodeOutput() };
+  });
+  const check = { commands: ["npm test"], maxRounds: 2 };
+
+  await tool.execute(
+    "call-id",
+    { tasks: [{ id: "task", profile: "writer", assignment: "Work", check }] },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.deepEqual(payloads, [
+    { profile: "writer", assignment: "Work", check },
+  ]);
+});
+
+test("names each task's check trace beside its report", async (t) => {
+  const paths = await fixture(t);
+  const check = {
+    failingBefore: 1,
+    commands: 1,
+    runs: 2,
+    outcome: "passed" as const,
+  };
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "finished",
+      status: "succeeded",
+      usage: {
+        turns: 1,
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      check,
+    });
+    return { output: nodeOutput() };
+  });
+
+  const result = await tool.execute(
+    "call-id",
+    { tasks: [{ id: "task", profile: "writer", assignment: "Work" }] },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.deepEqual(result.details.nodes[0]?.check, check);
+});
+
+test("rejects a check with no commands before executing a worker", async (t) => {
+  const paths = await fixture(t);
+  let executions = 0;
+  const tool = captureTool(paths.agentDirectory, () => async () => {
+    executions += 1;
+    return { output: nodeOutput() };
+  });
+
+  await assert.rejects(
+    () =>
+      tool.execute(
+        "call-id",
+        {
+          tasks: [
+            {
+              id: "task",
+              profile: "writer",
+              assignment: "Work",
+              check: { commands: [], maxRounds: 1 },
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        { cwd: paths.workingDirectory },
+      ),
+    /Invalid worker_graph request/,
+  );
+  assert.equal(executions, 0);
 });
 
 test("passes parent cancellation into the graph runner", async (t) => {

@@ -1,10 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { CHECK_LIMITS, isContainedPath } from "./check.js";
 import {
   loadWorkerGraphConfiguration,
   type WorkerGraphConfiguration,
 } from "./config.js";
 import type {
+  PiCheckTrace,
   PiSubprocessExecutorOptions,
   PiWorkerProfile,
   PiWorkerProgress,
@@ -65,8 +67,10 @@ const TASK_FIELDS = new Set([
   "acceptanceCriteria",
   "expectedPaths",
   "review",
+  "check",
 ]);
 const REVIEW_FIELDS = new Set(["profile", "maxRounds", "criteria"]);
+const CHECK_FIELDS = new Set(["commands", "maxRounds", "before", "frozen"]);
 
 // JSON Schema counts characters while the defensive parser counts UTF-8 bytes.
 // Keep the schema as a coarse bound and tell the model which limit is real.
@@ -133,6 +137,41 @@ const workerTaskSchema = Type.Object(
         { additionalProperties: false },
       ),
     ),
+    check: Type.Optional(
+      Type.Object(
+        {
+          commands: Type.Array(
+            boundedString(
+              "One shell command the runtime runs from the checkout root after the worker reports; it passes by exiting 0.",
+              CHECK_LIMITS.maxCommandBytes,
+            ),
+            { minItems: 1, maxItems: CHECK_LIMITS.maxCommands },
+          ),
+          maxRounds: Type.Integer({
+            minimum: 1,
+            maximum: CHECK_LIMITS.maxRounds,
+            description:
+              "How many times the commands may run after the work. Each failing run that has a round left is followed by a repair that sees the failing output, then another run.",
+          }),
+          before: Type.Optional(
+            Type.Union([Type.Literal("fail"), Type.Literal("pass")], {
+              description:
+                'What every command must do before any work, checked by running them before the worker starts; a check that does otherwise cannot judge the task, and the task fails without a worker. "fail" (the default) for new behaviour: a command that already passes would accept the task with nothing done. "pass" for behaviour the task must not change.',
+            }),
+          ),
+          frozen: Type.Optional(
+            Type.Array(
+              boundedString(
+                "One repository-relative file or directory the task must leave byte-identical, such as the tests the commands run. A change to it fails the task.",
+                CHECK_LIMITS.maxFrozenPathBytes,
+              ),
+              { minItems: 1, maxItems: CHECK_LIMITS.maxFrozenPaths },
+            ),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -173,6 +212,12 @@ interface WorkerGraphToolTask {
     readonly profile: string;
     readonly maxRounds: number;
     readonly criteria?: readonly string[];
+  };
+  readonly check?: {
+    readonly commands: readonly string[];
+    readonly maxRounds: number;
+    readonly before?: "fail" | "pass";
+    readonly frozen?: readonly string[];
   };
 }
 
@@ -234,6 +279,8 @@ interface WorkerGraphNodeReview {
    * task whose output could not be persisted.
    */
   readonly usage?: PiWorkerUsage;
+  /** Runtime-authored, unlike the report: how this task's check went. */
+  readonly check?: PiCheckTrace;
   readonly diagnostics?: string;
   readonly reportOmitted?: "result_limit" | "unavailable";
 }
@@ -349,6 +396,44 @@ function parseReviewRequest(
   });
 }
 
+function parseCheckRequest(
+  value: unknown,
+): WorkerGraphToolTask["check"] | undefined {
+  if (value === undefined) return undefined;
+  const fields = exactFields(value, CHECK_FIELDS);
+  const maxRounds = positiveInteger(fields.maxRounds, CHECK_LIMITS.maxRounds);
+  const commands = stringList(
+    fields.commands,
+    CHECK_LIMITS.maxCommands,
+    CHECK_LIMITS.maxCommandBytes,
+  );
+  if (maxRounds === undefined || commands === undefined) {
+    return invalidRequest();
+  }
+  if (commands.length === 0) return invalidRequest();
+  const before = fields.before;
+  if (before !== undefined && before !== "fail" && before !== "pass") {
+    return invalidRequest();
+  }
+  const frozen = stringList(
+    fields.frozen,
+    CHECK_LIMITS.maxFrozenPaths,
+    CHECK_LIMITS.maxFrozenPathBytes,
+  );
+  if (
+    frozen !== undefined &&
+    (frozen.length === 0 || !frozen.every(isContainedPath))
+  ) {
+    return invalidRequest();
+  }
+  return Object.freeze({
+    commands,
+    maxRounds,
+    ...(before === undefined ? {} : { before }),
+    ...(frozen === undefined ? {} : { frozen }),
+  });
+}
+
 function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
   const fields = exactFields(value, TOOL_FIELDS);
   const taskItems = arrayItems(fields.tasks, RUN_GRAPH_LIMITS.maxTasks);
@@ -372,6 +457,7 @@ function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
         MAX_EXPECTED_PATH_BYTES,
       );
       const review = parseReviewRequest(task.review);
+      const check = parseCheckRequest(task.check);
       return Object.freeze({
         id: text(task.id, MAX_ID_BYTES),
         profile: text(task.profile, MAX_PROFILE_BYTES),
@@ -380,6 +466,7 @@ function parseWorkerGraphRequest(value: unknown): WorkerGraphToolRequest {
         ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
         ...(expectedPaths === undefined ? {} : { expectedPaths }),
         ...(review === undefined ? {} : { review }),
+        ...(check === undefined ? {} : { check }),
       });
     }),
   );
@@ -549,6 +636,7 @@ function reviewBytes(nodes: readonly WorkerGraphNodeReview[]): number {
 function omittedReview(
   node: NodeStateRecord,
   record?: NodeOutputRecord,
+  check?: PiCheckTrace,
 ): WorkerGraphNodeReview {
   return {
     taskId: node.taskId,
@@ -557,6 +645,7 @@ function omittedReview(
       ? {}
       : { artifactBytes: record.artifact.bytes }),
     ...(record?.usage === undefined ? {} : { usage: record.usage }),
+    ...(check === undefined ? {} : { check }),
     reportOmitted: "result_limit",
   };
 }
@@ -570,6 +659,7 @@ async function collectNodeReviews(
   result: GraphRunResult,
   stateRoot: string,
   readOutput: typeof readNodeOutput,
+  checks: ReadonlyMap<string, PiCheckTrace>,
 ): Promise<readonly WorkerGraphNodeReview[]> {
   const collected = await Promise.all(
     result.nodes.map(async (node): Promise<CollectedNode> => {
@@ -588,10 +678,13 @@ async function collectNodeReviews(
   for (const [index, { node, record, unavailable }] of collected.entries()) {
     const remaining = collected
       .slice(index + 1)
-      .map((entry) => omittedReview(entry.node, entry.record));
+      .map((entry) =>
+        omittedReview(entry.node, entry.record, checks.get(entry.node.taskId)),
+      );
     const fits = (candidate: WorkerGraphNodeReview) =>
       reviewBytes([...reviews, candidate, ...remaining]) <=
       MAX_RESULT_REPORT_BYTES;
+    const check = checks.get(node.taskId);
     const base: WorkerGraphNodeReview = {
       taskId: node.taskId,
       status: node.status,
@@ -599,6 +692,7 @@ async function collectNodeReviews(
         ? {}
         : { artifactBytes: record.artifact.bytes }),
       ...(record?.usage === undefined ? {} : { usage: record.usage }),
+      ...(check === undefined ? {} : { check }),
       ...(unavailable ? { reportOmitted: "unavailable" as const } : {}),
       ...(record?.diagnostics
         ? {
@@ -616,7 +710,7 @@ async function collectNodeReviews(
       continue;
     }
     const summary = { ...base, report: compactReport(record.output, false) };
-    reviews.push(fits(summary) ? summary : omittedReview(node, record));
+    reviews.push(fits(summary) ? summary : omittedReview(node, record, check));
   }
   return Object.freeze(reviews);
 }
@@ -705,22 +799,24 @@ export function registerWorkerGraphOrchestratorTool(
     promptSnippet: "Run an explicit dependency graph of writable workers",
     promptGuidelines: [
       "Use worker_graph only when worker-graph mode is explicitly enabled.",
-      "Before building a graph, read the repository instructions, its structure, the current diff, and the files an assignment will touch; decompose only from what you have read.",
+      "Before building a graph, read the repository instructions, its structure, and the current diff. Decompose from paths and names: leave reading the files an assignment touches to the worker that will change them, and name those paths in its assignment rather than restating their contents.",
+      "Plan the whole job as one graph, and size each task so its work outweighs starting a worker: group several small independent pieces into one task rather than giving each piece its own.",
       "Give each worker_graph task a narrow assignment and explicit dependencies; only independent tasks should overlap.",
       "Prefer overlap when assignments have distinct responsibilities and can each make useful progress alone; minor overlap in one file is a deliberate tradeoff, not a reason to serialize everything.",
       "Serialize tasks that redesign one function, a central interface, a schema, a migration, a package manifest, a lockfile, or a generated file, and serialize a consumer behind the prerequisite that settles its API.",
       "While worker-graph mode is active, delegate all repository writes and command execution to worker_graph tasks.",
       "Treat expected paths as advisory: tell workers to re-read files before editing and preserve concurrent changes.",
-      "Include dependent validation tasks for relevant checks, then inspect the shared checkout with read-only parent tools.",
-      "A worker report is evidence, not acceptance: read the changes yourself before accepting them, and weigh a reported validation result rather than trusting the claim.",
+      "When a command can judge a task — its tests, a type check, a build — give the task a check with that command instead of a separate validation task or a review. The runtime runs it after the worker reports and sends failures back to the worker as a repair, so a checked task that succeeded passed its check on the work it reported.",
+      'Before its worker starts, a task\'s check runs once to show it can judge the task: with before "fail" (the default) every command must fail, with before "pass" every command must pass, and otherwise the task fails with no worker spent. Put the tests a check runs under frozen, so a worker cannot pass the check by editing them.',
+      "A worker report is a claim; a passed check is evidence. Accept a checked task on its check, and read changed files yourself only for work no check covers or when a report looks wrong.",
       "artifactBytes on a node review means that worker retained supplemental long-form text under the run; the report itself must still stand alone, so treat a report that defers its facts to an artifact as incomplete and delegate a repair task that reports them.",
       "Each node review carries the usage that task spent; weigh it when deciding how much to delegate next, and prefer a smaller graph or a cheaper profile when a task cost far more than the work it returned.",
       "If review finds a defect, call worker_graph again with narrow repair tasks and fresh acceptance criteria.",
-      "Give a task a review policy whenever its correctness is worth a second pair of eyes: the runtime then runs a reviewer on that node, feeds any blockers it reports back to the worker as a repair, and reviews again, until the reviewer accepts or the rounds run out.",
+      "Give a task a review policy only for correctness no check command can judge: the runtime then runs a reviewer on that node, feeds any blockers it reports back to the worker as a repair, and reviews again, until the reviewer accepts or the rounds run out.",
       "Point review.profile at a read-only profile, and set maxRounds to the number of review passes the task is worth — two is usually enough, and every extra round costs another worker.",
       "A node whose reviewer still has findings when its rounds run out fails, and its dependents are blocked, so do not attach a review policy you are unwilling to have fail the graph.",
-      "Reviewed nodes need no separate validation task for the same work: the review is that check, and its cost is already counted in the node's usage.",
-      "One taskTimeoutMs covers a whole node, including every review and repair round, so raise it above the default when a task must run a slow build or test suite; a task that times out reports nothing and blocks its dependents.",
+      "Checked or reviewed nodes need no separate validation task for the same work, and a reviewed node's reviewer cost is already counted in the node's usage.",
+      "One taskTimeoutMs covers a whole node, including every check, review, and repair round, so raise it above the default when a task must run a slow build or test suite; a task that times out reports nothing and blocks its dependents.",
     ],
     parameters: workerGraphSchema,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -772,6 +868,7 @@ export function registerWorkerGraphOrchestratorTool(
                 ? {}
                 : { expectedPaths: task.expectedPaths }),
               ...(task.review === undefined ? {} : { review: task.review }),
+              ...(task.check === undefined ? {} : { check: task.check }),
             },
           })),
           ...(request.concurrency === undefined
@@ -790,10 +887,18 @@ export function registerWorkerGraphOrchestratorTool(
             : { taskTimeoutMs: request.taskTimeoutMs }),
         });
         const usage = aggregateUsage(updates);
+        // Checks are traced on progress rather than persisted: a trace is
+        // runtime-authored and lives for this result, not in run state.
+        const checks = new Map<string, PiCheckTrace>();
+        for (const update of updates.values()) {
+          if (update.check !== undefined)
+            checks.set(update.taskId, update.check);
+        }
         const nodes = await collectNodeReviews(
           result,
           configuration.stateRoot,
           readOutput,
+          checks,
         );
         return {
           content: [{ type: "text", text: finalText(result, nodes) }],

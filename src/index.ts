@@ -32,6 +32,7 @@ export {
   parseNodeOutput,
 } from "./output.js";
 export type {
+  PiCheckTrace,
   PiSubprocessExecutorOptions,
   PiThinkingLevel,
   PiWorkerCoordinationTool,

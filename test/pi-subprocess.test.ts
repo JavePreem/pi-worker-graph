@@ -4,8 +4,15 @@ import type {
   SpawnOptions,
 } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { TaskExecutionFailure } from "../src/execution-failure.js";
@@ -1940,5 +1947,293 @@ test("a reviewed node that fails without cancellation still reports failed", asy
   assert.equal(
     seen.filter((progress) => progress.phase === "finished")[0]?.status,
     "failed",
+  );
+});
+
+// --- check cycle ------------------------------------------------------------
+
+/**
+ * Runs a node against a real checkout, where its check commands run for real,
+ * while its workers are scripted: `onRound` stands in for what a round's
+ * worker does to the checkout before it reports.
+ */
+async function runCheckedCycle(
+  t: test.TestContext,
+  reports: readonly NodeOutput[],
+  payload: Record<string, unknown>,
+  onRound: (round: number, checkout: string) => void = () => {},
+  controller: AbortController = new AbortController(),
+  onProgress?: (progress: PiWorkerProgress) => void,
+  prepare: (checkout: string) => void = () => {},
+): Promise<{
+  readonly result: Promise<TaskExecutionResult>;
+  readonly prompts: string[];
+}> {
+  const checkout = mkdtempSync(join(tmpdir(), "pi-worker-graph-check-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  prepare(checkout);
+  const prompts: string[] = [];
+  let round = 0;
+  const spawnProcess = (() => {
+    const index = round++;
+    const report = reports[index];
+    if (report === undefined) {
+      throw new Error(
+        `the cycle spawned round ${index + 1}, beyond the script`,
+      );
+    }
+    const child = new FakeChild();
+    let prompt = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      prompt += chunk.toString("utf8");
+    });
+    child.stdin.on("finish", () => {
+      prompts.push(prompt);
+      onRound(index, checkout);
+      queueMicrotask(() => {
+        child.stdout.end(`${reportEvent(report)}\n`);
+        child.close(0);
+      });
+    });
+    return child as unknown as ChildProcessWithoutNullStreams;
+  }) as never;
+  return {
+    result: runPiReviewedWorkerTask(
+      {
+        ...input(controller.signal, payload as never),
+        workingDirectory: checkout,
+      },
+      onProgress === undefined
+        ? reviewedOptions
+        : { ...reviewedOptions, onProgress },
+      { spawnProcess, terminateProcessTree: () => {} },
+    ),
+    prompts,
+  };
+}
+
+function checkedPayload(
+  commands: readonly string[],
+  maxRounds: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    assignment: "Implement the requested change",
+    profile: "writer",
+    check: { commands, maxRounds, ...extra },
+  };
+}
+
+const writeDone = (_round: number, checkout: string) =>
+  writeFileSync(join(checkout, "done"), "");
+
+test("a checked node whose check passes runs one worker and succeeds", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("Implemented")],
+    checkedPayload(["test -f done"], 2),
+    (_round, checkout) => writeFileSync(join(checkout, "done"), ""),
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Implemented");
+  assert.deepEqual(settled.output.blockers, []);
+  assert.equal(prompts.length, 1);
+});
+
+test("a worker is told the check commands it has to pass", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("Implemented")],
+    checkedPayload(["test -f done"], 1),
+    writeDone,
+  );
+  await result;
+  assert.match(prompts[0] as string, /"checkCommands":\["test -f done"\]/u);
+  assert.match(prompts[0] as string, /succeeds only if each one exits 0/u);
+  assert.doesNotMatch(prompts[0] as string, /review/iu);
+});
+
+test("a failing check sends its output to a repair round and checks again", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["echo 'expected 4, got 5'; test -f done"], 2),
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Repaired");
+  assert.deepEqual(settled.output.blockers, []);
+  assert.equal(prompts.length, 2, "work, then one repair");
+  const repair = prompts[1] as string;
+  assert.match(repair, /check commands after the previous attempt/u);
+  assert.match(repair, /CHECK FAILURES/u);
+  assert.match(repair, /expected 4, got 5/u);
+  assert.match(repair, /Implement the requested change/u);
+});
+
+test("a check still failing on its last round fails the node with its output", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Second attempt")],
+    checkedPayload(["echo 'spec: 3 failing'; exit 3", "test -f done"], 2),
+    writeDone,
+  );
+  const settled = await result;
+  assert.equal(prompts.length, 2);
+  assert.equal(settled.output.blockers.length, 1, "only the failing command");
+  assert.match(settled.output.blockers[0] as string, /Exit code: 3/u);
+  assert.match(settled.output.blockers[0] as string, /spec: 3 failing/u);
+});
+
+test("a check runs before the review, and the review sees passing work", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired"), nodeOutput("Clean")],
+    {
+      ...checkedPayload(["test -f done"], 2),
+      review: { profile: "reviewer", maxRounds: 1 },
+    },
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Repaired");
+  assert.equal(prompts.length, 3, "work, check repair, review");
+  assert.match(prompts[1] as string, /CHECK FAILURES/u);
+  assert.match(
+    prompts[2] as string,
+    /reviewing another worker's completed work/u,
+  );
+});
+
+test("a node cancelled during its check reports aborted", async (t) => {
+  const controller = new AbortController();
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Implemented")],
+    checkedPayload(["test -f done && sleep 30"], 1),
+    (round, checkout) => {
+      writeDone(round, checkout);
+      setTimeout(() => controller.abort(), 100);
+    },
+    controller,
+  );
+  const started = Date.now();
+  await assert.rejects(result, TaskExecutionFailure);
+  assert.ok(Date.now() - started < 10_000, "the command was stopped");
+});
+
+test("a check policy outside its bounds is rejected", () => {
+  const executor = createPiSubprocessExecutor(reviewedOptions);
+  for (const check of [
+    { commands: ["true"], maxRounds: 0 },
+    { commands: ["true"], maxRounds: 5 },
+    { commands: [], maxRounds: 1 },
+    { commands: [" "], maxRounds: 1 },
+    { commands: ["x".repeat(1025)], maxRounds: 1 },
+    { commands: Array.from({ length: 9 }, () => "true"), maxRounds: 1 },
+    { commands: ["true"], maxRounds: 1, unknown: true },
+    { commands: ["true"], maxRounds: 1, before: "maybe" },
+    { commands: ["true"], maxRounds: 1, frozen: [] },
+    { commands: ["true"], maxRounds: 1, frozen: ["../outside"] },
+    { commands: ["true"], maxRounds: 1, frozen: ["/etc/passwd"] },
+  ]) {
+    assert.throws(
+      () =>
+        executor.validateTasks?.([
+          {
+            id: "task",
+            payload: { assignment: "Do it", profile: "writer", check },
+          },
+        ]),
+      TaskExecutionFailure,
+      `expected ${JSON.stringify(check)} to be rejected`,
+    );
+  }
+});
+
+test("a check that already passes fails the node before any worker runs", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [],
+    checkedPayload(["true", "test -f done"], 2),
+  );
+  const settled = await result;
+  assert.equal(prompts.length, 0, "no worker was spent");
+  assert.equal(settled.output.blockers.length, 1, "only the vacuous command");
+  assert.match(
+    settled.output.blockers[0] as string,
+    /passed before any work, so it cannot judge the task: true/u,
+  );
+});
+
+test("a check declared to pass before must pass before and after the work", async (t) => {
+  const refused = await runCheckedCycle(
+    t,
+    [],
+    checkedPayload(["test -f done"], 1, { before: "pass" }),
+  );
+  assert.match(
+    (await refused.result).output.blockers[0] as string,
+    /failed before any work/u,
+  );
+
+  const kept = await runCheckedCycle(
+    t,
+    [nodeOutput("Refactored")],
+    checkedPayload(["test -f done"], 1, { before: "pass" }),
+    undefined,
+    undefined,
+    undefined,
+    (checkout) => writeFileSync(join(checkout, "done"), ""),
+  );
+  const settled = await kept.result;
+  assert.equal(settled.output.summary, "Refactored");
+  assert.deepEqual(settled.output.blockers, []);
+});
+
+test("a worker that edits a frozen path fails its node even when the check passes", async (t) => {
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Made the test pass")],
+    checkedPayload(["grep -q pass spec/check.txt"], 2, { frozen: ["spec"] }),
+    (_round, checkout) =>
+      writeFileSync(join(checkout, "spec", "check.txt"), "pass"),
+    undefined,
+    undefined,
+    (checkout) => {
+      mkdirSync(join(checkout, "spec"));
+      writeFileSync(join(checkout, "spec", "check.txt"), "fail");
+    },
+  );
+  const settled = await result;
+  assert.equal(settled.output.blockers.length, 1);
+  assert.match(
+    settled.output.blockers[0] as string,
+    /A frozen path changed while this task ran: spec/u,
+  );
+});
+
+test("a checked node traces how its check went on its terminal event", async (t) => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["test -f done", "test -f other"], 2),
+    (round, checkout) => {
+      writeDone(round, checkout);
+      if (round === 1) writeFileSync(join(checkout, "other"), "");
+    },
+    undefined,
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const finished = seen.filter((progress) => progress.phase === "finished");
+  assert.deepEqual(
+    finished.map((progress) => progress.check),
+    [{ failingBefore: 2, commands: 2, runs: 2, outcome: "passed" }],
   );
 });

@@ -13,8 +13,8 @@ discovered while work is in progress.
 Early implementation. The package currently provides tested graph primitives,
 a versioned structured worker-report contract, canonical byte-bounded
 prerequisite context, an explicit-root filesystem store, a bounded DAG runner,
-a one-shot Pi subprocess adapter, an optional per-node work-review-repair
-cycle, per-attempt token and cost accounting, immutable run-scoped coordination
+a one-shot Pi subprocess adapter, an optional per-node check and
+work-review-repair cycle, per-attempt token and cost accounting, immutable run-scoped coordination
 events and inboxes, and an explicitly activated parent orchestration tool. The
 parent tool is inactive by default; worker children receive only the
 final-report and coordination tools.
@@ -213,6 +213,34 @@ reviewer profile are resolved during whole-graph validation, before any worker
 starts, so an unresolvable reviewer is not discovered by spending a worker
 first. Findings are bounded on count and size, and overflow fails the node
 rather than handing a repair worker half its defects.
+
+## Node check
+
+A graph task may carry a `check`: one to eight shell commands and a round limit
+of 1 through 4. The worker is told the commands. After it reports, the runtime
+runs every command itself, in order, from the checkout root, with no model
+involved; the check passes when each exits 0. A failing run with a round left
+is followed by a repair worker that sees each failing command, its exit status,
+and the last 2 KiB of its output, and then the check runs again. A node whose
+check still fails on its last round fails with those failures as its blockers.
+
+Before the worker starts, the check runs once to show it can judge the task.
+With `before: "fail"`, the default and the shape for new behaviour, every
+command must fail: one that already passes would accept the task with nothing
+done. With `before: "pass"`, for behaviour the task must not change, every
+command must pass. Otherwise the node fails without spending a worker. A check
+may also name `frozen` paths, such as the tests its commands run; they are
+fingerprinted before the worker starts and after every round, and a change
+fails the node rather than letting a worker pass the check by editing it.
+
+The node's terminal progress event, and its entry in the parent-facing result,
+carry a runtime-authored trace of the check: how many commands failed before
+the work, how many runs it took after, and how it ended.
+
+A check runs before every review, so a reviewer only judges work that passed
+its check, and a review's repair is checked again. A checked node that
+succeeded passed its check on the work it reported; that is evidence the
+runtime produced, not a worker's claim, and it costs no tokens to judge.
 
 ## Pi worker adapter
 

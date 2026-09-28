@@ -56,6 +56,9 @@ is deliberate. Executing a test suite needs a shell; deciding whether its
 output means the work is acceptable needs the model that planned the work, and
 that judgment is never delegated to a worker.
 
+D23 narrows this for work a command can judge: the parent makes that judgment
+up front, by choosing the command, and the runtime applies it.
+
 ### D8 — Runtime activation is explicit
 
 The extension does not activate its graph tool until worker-graph mode is
@@ -361,6 +364,38 @@ release removes the file by path, so it would take a lock acquired after it.
 The exposure is also not the size of the one this decision closes: a hold is
 held for a whole run, a mutation lock for one file write. See "Known defects"
 in `docs/NEXT.md`.
+
+## D23. A command can accept a node
+
+A task may carry a check: shell commands the runtime runs from the checkout
+root after the worker reports, repairing on failure the way a review does. A
+node succeeds only if its check passes on the work it reported.
+
+The first live `graph-luna` cell on a 29-exercise polyglot bundle resolved it
+at 1.4x the cost of solo `sol`, with the luna workers spending about a sixth
+of it. The rest was the parent reading every spec before delegating, reading
+the changes again to accept them, and sol reviewers re-judging work the
+exercise tests already judged. Where a command can decide acceptance, a model
+judging it again is spend with nothing to add, and a worker's report of the
+command's result is a claim a runtime-run command replaces with evidence.
+
+The parent still owns acceptance (D7): it chooses the command, which is where
+the judgment lies. D8's suppression of the parent's shell is unaffected: the
+parent cannot run a command and read its output at will, and a check can do
+nothing a worker's shell could not already do on the same instruction.
+
+The check lives in the node cycle beside the review, for D20's reasons: rounds
+are not nodes, the node keeps one terminal output, and its timeout bounds every
+check run. The commands run in sequence, all of them even after one fails, so
+a repair sees every failure at once. Only a bounded tail of each failing
+command's output is kept.
+
+A check has to show it can judge before it is trusted to: it runs once before
+the worker, and must fail there for new behaviour or pass there for behaviour
+the task must keep. A weak check is the pattern's worst failure, because it
+accepts wrong work silently, and this catches the vacuous ones for no tokens.
+Frozen paths close the other silent route, a worker editing the tests its check
+runs; the runtime detects that change and never restores it (D5).
 
 ## Open decisions
 
