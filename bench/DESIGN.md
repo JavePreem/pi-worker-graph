@@ -473,11 +473,15 @@ A trial that did not administer the treatment must not be scored as evidence
 against it. Before a `graph` trial counts:
 
 - `worker_graph` was called at least once;
-- at least one graph had more than one task — `graphSizes` is a **precondition**,
-  not merely a reported metric, because the first suite's central failure was
-  scoring one-task graphs as if they were fan-out;
-- where the review cycle is under test, at least one node carried a review
-  policy.
+- at least one node carried an acceptance the parent did not supply itself:
+  a review policy or a check.
+
+Fan-out is **recorded, not required** (decided 2026-09-29). `graphSizes` was a
+precondition, because the first suite's central failure was scoring one-task
+graphs as if they were fan-out. But the claim under test is cost at the same
+quality from cheap workers, and parallelism is no part of that. A parent that
+repairs through one-node graphs still delegated the work. `graphSizes` stays in
+every cell's preconditions, so fan-out is still read from the records.
 
 Trials failing a precondition are recorded and reported as degenerate, with
 their count stated. They are not silently dropped, and not counted as losses
@@ -765,6 +769,14 @@ rate; the third is reported with its count and its reason and is eligible for
 re-running, which the other two are not. The distinction has to be drawn by the
 harness at the point of failure, because it cannot be recovered afterwards from
 a record that says only "failed".
+
+A cell stopped by its spend cap or its time limit is still graded: its diff is
+the work it paid for. The grade goes in the record's `detail` (`resolved`,
+`gradeOutcome`, the targets and any quality layers), and the class stays **not
+attempted**, so it never enters a resolve rate. Before grading, everything the
+session started is killed inside the container. Killing the host's `docker exec`
+client leaves Pi and its workers running, so otherwise they would go on editing
+the checkout while it is graded.
 
 **Cap the spend of every cell.** The runtime bounds tasks, concurrency,
 payload, output, context and per-task runtime, but has no token or cost ceiling
@@ -1086,6 +1098,12 @@ is uninformative and must be reported as such rather than quietly used anyway.
    strengthening on top of that is arm configuration and must be disclosed,
    and it is the last remaining place where the harness could put words in the
    orchestrator's mouth.
+
+   Disclosed: the trial-only `graph-luna-tests-first` and
+   `graph-luna-tests-reviewed` arms do exactly that. They append tests-first
+   guidance to the task and add a writable sol `test-author` profile
+   (`testsFirst` in `bench/arms.mjs`). They are not queue arms, and the
+   guidance moves into the package or the queue only on evidence from a cell.
 
 ## Measured
 
@@ -1821,7 +1839,7 @@ than numbers.
 
 | | `solo-luna` | `solo-sol` | `graph-luna` |
 | --- | --- | --- | --- |
-| hidden cases | 553/891 | 862/891 | 875/891 |
+| hidden cases | 490/891 | 862/891 | 875/891 |
 | tests written | 0 | 17 | 69 |
 | valid on the reference | -- | 13/17 | 63/69 |
 | mutants killed | 0/40 | 31/40 | 33/40 |
@@ -1835,8 +1853,9 @@ projections, and its own tests missed the same thing: tests written by the
 author of the code share its blind spots.
 
 `graph-luna` stopped at its $3 cap, so its record is `not-attempted` with no
-grade; the row above is the grade of its diff, applied to an empty checkout
-and run through the same three layers by hand. The parent made five
+grade -- recorded before a capped cell was graded -- and the row above is the
+grade of its diff, applied to an empty checkout and run through the same three
+layers by hand. The parent made five
 one-node graphs: build, three repairs, and a tests audit. Each node's worker
 wrote the tests its own check ran, and a sol reviewer (two rounds) rejected
 the first three with precise blockers -- projection state inferred from a

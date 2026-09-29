@@ -256,6 +256,22 @@ context between rounds.
 It does not settle the third. This cycle is intra-node; whether execution also
 pauses at review barriers between frontiers remains open and independent.
 
+Amended 2026-09-29: a node's **reviewer** resumes one Pi session across its
+rounds; work and repair rounds still start fresh. Fresh review rounds were
+the dearest part of a reviewed node. Pi keys the provider's prompt cache by
+session, so every round re-read the checkout and the specification and wrote
+all of it to the cache again: about 27k tokens a round, 44% of the sol
+reviewer spend in the one cell measured. A resumed session keeps the prefix
+and the key, so the next round reads that context from the cache at a tenth of
+the price.
+
+The isolation this decision protects is intact where it matters. The context
+carried forward is the reviewer's own: what it read and what it found, which
+its next round judges anyway. Nothing crosses into the worker under review,
+and a repair still receives only the structured findings. The session lives in
+the run's directory, outside the checkout, and is deleted with the run. With
+no run directory the rounds start fresh, as before.
+
 ## D21. Configured profile names reach the parent through the request context
 
 `worker_graph` requires every task to name a worker profile, and the reviewer

@@ -1307,13 +1307,17 @@ async function runFakeCycle(
   onProgress?: (progress: PiWorkerProgress) => void,
   controller: AbortController = new AbortController(),
   abortAfterRound?: number,
+  runStateRoot?: string,
 ): Promise<{
   readonly result: Promise<TaskExecutionResult>;
   readonly prompts: string[];
+  readonly argv: (readonly string[])[];
 }> {
   const prompts: string[] = [];
+  const argv: (readonly string[])[] = [];
   let round = 0;
-  const spawnProcess = (() => {
+  const spawnProcess = ((_command: string, args: readonly string[]) => {
+    argv.push(args);
     const index = round++;
     if (abortAfterRound !== undefined && index === abortAfterRound) {
       controller.abort();
@@ -1368,15 +1372,107 @@ async function runFakeCycle(
   }) as never;
   return {
     result: runPiReviewedWorkerTask(
-      input(controller.signal, payload),
+      runStateRoot === undefined
+        ? input(controller.signal, payload)
+        : { ...input(controller.signal, payload), runId: RUN_ID, runStateRoot },
       onProgress === undefined
         ? reviewedOptions
         : { ...reviewedOptions, onProgress },
       { spawnProcess, terminateProcessTree: () => {} },
     ),
     prompts,
+    argv,
   };
 }
+
+const RUN_ID = "0f8b8a52-6a8e-4c43-9d2e-1d2a3b4c5d6e";
+
+/** The session flags a child was spawned with, or `no-session`. */
+function sessionOf(args: readonly string[]): string {
+  if (args.includes("--no-session")) return "no-session";
+  const dir = args[args.indexOf("--session-dir") + 1];
+  const id = args[args.indexOf("--session-id") + 1];
+  return `${dir} ${id}`;
+}
+
+test("a node's reviewer resumes one session across its rounds, under the run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-worker-graph-review-session-"));
+  try {
+    const { result, prompts, argv } = await runFakeCycle(
+      [
+        nodeOutput("First attempt"),
+        rejection("Missing null check in parse()"),
+        nodeOutput("Repaired attempt"),
+        nodeOutput("Clean"),
+      ],
+      reviewedPayload(2),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      root,
+    );
+    await result;
+    const sessions = argv.map(sessionOf);
+    // Work and repair stay isolated; only the reviewer carries context.
+    assert.equal(sessions[0], "no-session");
+    assert.equal(sessions[2], "no-session");
+    assert.match(
+      sessions[1] as string,
+      new RegExp(
+        `^${join(root, "runs", RUN_ID, "sessions")} review-[0-9a-f]{32}$`,
+        "u",
+      ),
+    );
+    assert.equal(sessions[3], sessions[1], "the same session both rounds");
+    assert.ok(existsSync(join(root, "runs", RUN_ID, "sessions")));
+    assert.doesNotMatch(
+      prompts[1] as string,
+      /continues your own earlier review/u,
+    );
+    assert.match(prompts[3] as string, /continues your own earlier review/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a reviewer with nowhere to keep a session reviews fresh each round", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-worker-graph-review-session-"));
+  // A file where the run directory would be, so the session cannot be made.
+  mkdirSync(join(root, "runs"));
+  writeFileSync(join(root, "runs", RUN_ID), "not a directory");
+  try {
+    for (const stateRoot of [undefined, root]) {
+      const { result, prompts, argv } = await runFakeCycle(
+        [
+          nodeOutput("First attempt"),
+          rejection("Fix it"),
+          nodeOutput("Repaired"),
+          nodeOutput("Clean"),
+        ],
+        reviewedPayload(2),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        stateRoot,
+      );
+      await result;
+      assert.deepEqual(argv.map(sessionOf), [
+        "no-session",
+        "no-session",
+        "no-session",
+        "no-session",
+      ]);
+      assert.doesNotMatch(
+        prompts[3] as string,
+        /continues your own earlier review/u,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a task without a review policy runs exactly one worker", async () => {
   const { result, prompts } = await runFakeCycle([nodeOutput("Done")], {

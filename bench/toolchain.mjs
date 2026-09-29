@@ -182,7 +182,8 @@ export async function prepareToolchain({
   const lock = JSON.parse(
     await readFile(path.join(dir, "package-lock.json"), "utf8"),
   );
-  const versionOf = (name) => lock.packages?.[`node_modules/${name}`]?.version;
+  const entryOf = (name) => lock.packages?.[`node_modules/${name}`];
+  const versionOf = (name) => entryOf(name)?.version;
   // The tree is `docker cp`'d into every container, where it is owned by a
   // uid nothing runs as. Same reason as the agent directory below, and the
   // failure is worse: an unreadable `pi` kills the cell before it starts.
@@ -192,6 +193,10 @@ export async function prepareToolchain({
     nodeVersion,
     piVersion: versionOf("@earendil-works/pi-coding-agent"),
     packageVersion: versionOf("pi-worker-graph"),
+    // A local tarball carries the published version string, so the version
+    // alone cannot say which build a cell measured. npm's integrity is the
+    // tarball's own SHA-512, the same for a registry install and a `.tgz`.
+    packageIntegrity: entryOf("pi-worker-graph")?.integrity,
     // Copied into each cell's agent directory rather than referenced, so one
     // cell cannot leave state behind for the next.
     packageTree: path.join(dir, "node_modules", "pi-worker-graph"),

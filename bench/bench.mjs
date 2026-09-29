@@ -174,6 +174,18 @@ function flag(name, fallback) {
   return index === -1 ? fallback : process.argv[index + 1];
 }
 
+/**
+ * The package a cell ran, as its record names it: the version, then the
+ * tarball's integrity, because an unreleased build carries the version of the
+ * release before it.
+ */
+function packageLabel({ packageVersion, packageIntegrity }) {
+  const label = `pi-worker-graph@${packageVersion}`;
+  return packageIntegrity === undefined
+    ? label
+    : `${label} ${packageIntegrity}`;
+}
+
 async function harnessVersion() {
   const pkg = JSON.parse(
     await readFile(path.join(HERE, "..", "package.json"), "utf8"),
@@ -306,7 +318,7 @@ async function run(suite, count) {
   if (toolchain.packageVersion !== undefined) {
     // The store says which package a cell measured, because a task re-run
     // under a different version is a different measurement.
-    manifest.packageVersion = `pi-worker-graph@${toolchain.packageVersion}`;
+    manifest.packageVersion = packageLabel(toolchain);
   }
 
   for (const [index, cell] of queue.entries()) {
@@ -407,7 +419,7 @@ async function trialCell(suite, taskId, armName) {
       packageVersion:
         toolchain.packageVersion === undefined
           ? "pi-worker-graph@unknown"
-          : `pi-worker-graph@${toolchain.packageVersion}`,
+          : packageLabel(toolchain),
     },
     agentDirectorySource: AGENT_DIR,
     toolchainDir: toolchain.dir,

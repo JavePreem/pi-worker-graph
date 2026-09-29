@@ -290,6 +290,38 @@ test("the toolchain tree is readable by the container's root too", async () => {
   }
 });
 
+test("the toolchain names the installed build, not only its version", async () => {
+  // A local tarball carries the published version string, so two builds of
+  // one version are told apart only by the tarball's integrity.
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-toolchain-build-"));
+  try {
+    const toolchain = await prepareToolchain({
+      dir,
+      piSpec: "@earendil-works/pi-coding-agent@0.85.1",
+      packageSpec: "./pi-worker-graph-0.1.0-dev.2.tgz",
+      ensure: async () => "22.19.0",
+      install: async (cwd) => {
+        await writeFile(
+          path.join(cwd, "package-lock.json"),
+          JSON.stringify({
+            packages: {
+              "node_modules/pi-worker-graph": {
+                version: "0.1.0-dev.2",
+                integrity: "sha512-abc==",
+              },
+            },
+          }),
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    assert.equal(toolchain.packageVersion, "0.1.0-dev.2");
+    assert.equal(toolchain.packageIntegrity, "sha512-abc==");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the carried directory is writable, not only readable", async () => {
   // Pi writes back into its own agent directory: a catalogue refresh rewrites
   // models-store.json, an OAuth arm rewrites auth.json when the token is

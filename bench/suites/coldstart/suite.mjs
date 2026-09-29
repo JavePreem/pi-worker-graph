@@ -400,7 +400,11 @@ async function readJson(container, file) {
   }
 }
 
-/** Groups as grading targets: pass only when every case in the group does. */
+/**
+ * Groups as grading targets: pass only when every case in the group does.
+ * Every failure is kept, not a tail: which cases failed is what says whether
+ * a group lost to one bug or to many.
+ */
 export function targetStates(groups) {
   return Object.fromEntries(
     Object.entries(groups).map(([group, g]) => [
@@ -408,7 +412,7 @@ export function targetStates(groups) {
       {
         state: g.passed === g.total ? "pass" : "fail",
         reason: `${g.passed}/${g.total} passed`,
-        tail: g.failures.join("\n").slice(-600),
+        tail: g.failures.join("\n"),
       },
     ]),
   );

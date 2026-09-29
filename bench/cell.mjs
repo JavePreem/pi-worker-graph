@@ -147,6 +147,23 @@ export async function settleWithSpendCap(
   }
 }
 
+/**
+ * Abort a session the cell stopped, then read its spend again.
+ *
+ * A worker's usage reaches the session only when its graph returns, and a
+ * graph returns on abort with every node settled and its usage kept. Killed
+ * instead, a worker still running at the stop is never counted: the
+ * tests-first cell reported $0.93 without the audit node its timeout cut off.
+ * Pi answers `abort` once the session is idle, so the wait is bounded rather
+ * than assumed, and a session that does not answer keeps the spend read at
+ * the stop.
+ */
+async function abortSession(client) {
+  const response = await client.send({ type: "abort" }, 120_000);
+  if (response?.success !== true) return undefined;
+  return sessionStats(client);
+}
+
 async function sessionStats(client) {
   const response = await client.send({ type: "get_session_stats" }, 60_000);
   return response?.success === true ? response.data : undefined;
@@ -279,6 +296,58 @@ async function captureDiff(container) {
   return `${diff.subarray(0, end).toString("utf8")}\n${note}\n`;
 }
 
+/**
+ * Grade a cell, turning a grade that throws into a harness outcome recorded
+ * with what the cell already spent. Left to propagate, it would end the whole
+ * run and lose a cell that has been paid for -- and a suite that writes its
+ * tests into a checkout the agent controlled can throw on what the agent left
+ * there.
+ */
+async function gradeSafely(grade, container, task) {
+  try {
+    return await grade(container, task);
+  } catch (error) {
+    return {
+      resolved: false,
+      outcome: "harness",
+      detail: String(error).slice(0, 400),
+      states: {},
+    };
+  }
+}
+
+/** What a graded record carries beside its class and outcome. */
+function gradeDetail(graded, client, startedAt) {
+  return {
+    targetStates: Object.fromEntries(
+      Object.entries(graded.states ?? {}).map(([t, s]) => [
+        t,
+        `${s.state}: ${s.reason}`,
+      ]),
+    ),
+    // What the failing targets actually said. The build's own last words were
+    // captured all along and dropped here, which left a cell reporting
+    // `fail: build failed` and nothing about what failed to build -- the
+    // one thing that tells a task too hard for the model from an edit that
+    // never compiled. Kept for failures only; a pass explains itself.
+    ...targetFailures(graded.states),
+    // What a suite measures beside the grade, such as how good the tests
+    // the agent wrote are. Recorded, never graded.
+    ...(graded.quality === undefined ? {} : { quality: graded.quality }),
+    // The files `git apply` refused, when it did.
+    ...(graded.conflicted?.length
+      ? { conflictedFiles: graded.conflicted }
+      : {}),
+    // The tool's own result text carries per-task worker accounting, which
+    // is what the spend split is computed from later.
+    workerGraphResults: client.toolCalls
+      .filter((c) => c.toolName === "worker_graph")
+      .map((c) => c.text),
+    wallClockMs: Date.now() - startedAt,
+    ...(graded.detail === undefined ? {} : { gradeDetail: graded.detail }),
+  };
+}
+
 export async function runCell({
   suite,
   task,
@@ -361,11 +430,31 @@ export async function runCell({
         provider,
         settleMs,
       });
+      // One deadline for the whole session, follow-ups included, so a refining
+      // arm is held to the same limit as the arm it is compared with.
+      const deadline = Date.now() + settleMs;
       ({ outcome, stats } = await settle(client, {
-        prompt: `${suite.preamble}${task.prompt}`,
+        prompt: `${suite.preamble}${task.prompt}${armConfig(cell.arm).guidance ?? ""}`,
         settleMs,
         capUsd,
       }));
+      for (const followUp of armConfig(cell.arm).followUps ?? []) {
+        if (outcome !== "settled") break;
+        const remaining = deadline - Date.now();
+        // A follow-up the deadline left no room for is a timeout, not a
+        // settled cell: the arm's treatment was not all administered.
+        ({ outcome, stats } =
+          remaining > 0
+            ? await settle(client, {
+                prompt: followUp,
+                settleMs: remaining,
+                capUsd,
+              })
+            : { outcome: "timeout", stats });
+      }
+      // Before the diff, too, so the diff is what the stopped session left
+      // rather than a snapshot of workers still editing.
+      if (outcome !== "settled") stats = (await abortSession(client)) ?? stats;
       diff = await captureDiff(container);
       // Handed over before the session is closed, because a cell that settled
       // without spending anything is diagnosable only from its event stream
@@ -395,6 +484,13 @@ export async function runCell({
       // still read below.
       await client.close(true).catch(() => {});
       sessionClosed = true;
+      // Closing the client does not stop the session. A killed `docker exec`
+      // client leaves what it started running in the container -- checked
+      // against a live one -- so a cell stopped mid-turn would still have Pi
+      // and its workers editing the checkout while it is graded. Everything
+      // but the container's own init goes, before the scrub, so nothing is
+      // left holding the credentials either.
+      await container.exec("kill -9 -1", { timeoutMs: 60_000 }).catch(() => {});
       // Also swallowed, and for the same reason. The `finally` scrubs again
       // and is idempotent, so a failure here costs a retry rather than the
       // measurement.
@@ -409,7 +505,10 @@ export async function runCell({
     if (outcome !== "settled") {
       // A timed-out or capped cell did run and did spend, so its cost is
       // recorded; it is still not a measurement of whether the task was
-      // resolvable, so it is not scored.
+      // resolvable, so it is not scored. Its diff is graded all the same: it
+      // is the work the cell paid for, and the grade is what says whether the
+      // stop cut off a result or only more of the same.
+      const graded = await gradeSafely(grade, container, task);
       return makeRecord({
         cell,
         cellClass: "not-attempted",
@@ -423,7 +522,12 @@ export async function runCell({
         // A relay that never carried anything and a provider that was slow
         // both end here, and only the log tells them apart.
         brokerLog: await brokerLog(),
-        detail: `agent did not settle: ${outcome}`,
+        detail: {
+          stopped: `agent did not settle: ${outcome}`,
+          resolved: graded.resolved,
+          gradeOutcome: graded.outcome,
+          ...gradeDetail(graded, client, startedAt),
+        },
       });
     }
 
@@ -523,21 +627,7 @@ export async function runCell({
       });
     }
 
-    // A grade that throws is a harness outcome, recorded with what the cell
-    // already spent. Left to propagate, it would end the whole run and lose a
-    // cell that has been paid for -- and a suite that writes its tests into a
-    // checkout the agent controlled can throw on what the agent left there.
-    let graded;
-    try {
-      graded = await grade(container, task);
-    } catch (error) {
-      graded = {
-        resolved: false,
-        outcome: "harness",
-        detail: String(error).slice(0, 400),
-        states: {},
-      };
-    }
+    const graded = await gradeSafely(grade, container, task);
 
     // A grading run that could not be performed is a harness outcome; an
     // instance the agent did not fix is a result.
@@ -559,34 +649,7 @@ export async function runCell({
       preconditions,
       diff,
       egress,
-      detail: {
-        targetStates: Object.fromEntries(
-          Object.entries(graded.states ?? {}).map(([t, s]) => [
-            t,
-            `${s.state}: ${s.reason}`,
-          ]),
-        ),
-        // What the failing targets actually said. The build's own last words were
-        // captured all along and dropped here, which left a cell reporting
-        // `fail: build failed` and nothing about what failed to build -- the
-        // one thing that tells a task too hard for the model from an edit that
-        // never compiled. Kept for failures only; a pass explains itself.
-        ...targetFailures(graded.states),
-        // What a suite measures beside the grade, such as how good the tests
-        // the agent wrote are. Recorded, never graded.
-        ...(graded.quality === undefined ? {} : { quality: graded.quality }),
-        // The files `git apply` refused, when it did.
-        ...(graded.conflicted?.length
-          ? { conflictedFiles: graded.conflicted }
-          : {}),
-        // The tool's own result text carries per-task worker accounting, which
-        // is what the spend split is computed from later.
-        workerGraphResults: client.toolCalls
-          .filter((c) => c.toolName === "worker_graph")
-          .map((c) => c.text),
-        wallClockMs: Date.now() - startedAt,
-        ...(graded.detail === undefined ? {} : { gradeDetail: graded.detail }),
-      },
+      detail: gradeDetail(graded, client, startedAt),
     });
   } catch (error) {
     if (!(error instanceof NotAttempted)) throw error;

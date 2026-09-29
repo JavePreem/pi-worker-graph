@@ -11,7 +11,9 @@ name, exactly as the task statement names it. Every case runs under its own
 alarm, so one runaway case fails that case rather than the whole grade.
 
 The output is {"groups": {group: {"passed": n, "total": n, "failures": [...]}}}
-with at most a few failures kept per group, each naming the case.
+with every failure kept, each naming the case. A failure's detail is bounded,
+so the whole list is bounded by the case count: a record that kept only a few
+per group hid the one bug behind most of them.
 
 Standard library only: this runs inside the task image, which has nothing else.
 """
@@ -23,7 +25,6 @@ import signal
 import sys
 
 CASE_SECONDS = 5
-KEPT_FAILURES = 5
 
 
 class CaseTimeout(Exception):
@@ -142,8 +143,7 @@ def run(task, impl_dir, cases, failed=None):
             group["passed"] += 1
         else:
             failed.append(case["name"])
-            if len(group["failures"]) < KEPT_FAILURES:
-                group["failures"].append(f"{case['name']}: {detail}")
+            group["failures"].append(f"{case['name']}: {detail}")
     return groups
 
 

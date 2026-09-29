@@ -630,6 +630,14 @@ function coordinationDirectory(stateRoot: string, runId: string): string {
   return join(runPath(stateRoot, runId), RUN_COORDINATION_DIRECTORY);
 }
 
+/**
+ * Where a run's resumable Pi sessions live. Inside the run, so they share its
+ * permissions and are removed with it; nothing in the store reads them.
+ */
+export function runSessionDirectory(stateRoot: string, runId: string): string {
+  return join(runPath(stateRoot, runId), "sessions");
+}
+
 function recordId(fileName: string): string {
   return fileName.slice(0, -RECORD_SUFFIX.length);
 }

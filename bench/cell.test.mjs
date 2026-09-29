@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { workerGraphConfig } from "./arms.mjs";
+import { armConfig, workerGraphConfig } from "./arms.mjs";
 import {
   NotAttempted,
   promptFingerprint,
@@ -38,6 +38,7 @@ const fakeContainer = () => ({
 const fakeClient = (over = {}) => ({
   events: [],
   toolCalls: [],
+  send: async () => ({ success: false }),
   close: async () => {},
   ...over,
 });
@@ -166,6 +167,145 @@ test("a cell stopped by its spend cap is not attempted, and its cost is still re
   assert.equal(record.costUsd, 9.99);
 });
 
+test("a cell stopped by its spend cap is still graded, and keeps the stop as its class", async () => {
+  const record = await run({
+    settle: async () => ({
+      outcome: "spend-cap",
+      stats: { cost: 3.08, tokens: { total: 5 } },
+    }),
+    grade: async () => ({
+      resolved: false,
+      outcome: "unresolved",
+      states: { "hidden:l1": { state: "fail", reason: "875/891" } },
+      quality: { tests: 69 },
+    }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "spend-cap");
+  assert.equal(record.detail.resolved, false);
+  assert.equal(record.detail.gradeOutcome, "unresolved");
+  assert.equal(record.detail.targetStates["hidden:l1"], "fail: 875/891");
+  assert.deepEqual(record.detail.quality, { tests: 69 });
+});
+
+test("nothing the session started is still running when the cell is graded", async () => {
+  // A killed `docker exec` client leaves its processes running in the
+  // container, so a capped cell's workers would otherwise go on editing the
+  // checkout under the grader.
+  const seen = [];
+  const container = {
+    ...fakeContainer(),
+    exec: async (script) => {
+      seen.push(script);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  await run({
+    start: async () => container,
+    settle: async () => ({ outcome: "spend-cap", stats: { cost: 4 } }),
+    grade: async () => {
+      seen.push("grade");
+      return { resolved: false, outcome: "unresolved", states: {} };
+    },
+  });
+  const killed = seen.indexOf("kill -9 -1");
+  assert.notEqual(killed, -1);
+  assert.equal(killed < seen.indexOf("grade"), true);
+});
+
+test("a refining arm sends its follow-ups in the same session, after each settle", async () => {
+  const prompts = [];
+  let spent = 0;
+  const record = await run(
+    {
+      settle: async (_client, { prompt }) => {
+        prompts.push(prompt);
+        spent += 0.5;
+        return {
+          outcome: "settled",
+          stats: { cost: spent, tokens: { total: 1 } },
+        };
+      },
+    },
+    { task: "i1", arm: "solo-sol-refine", repetition: 1 },
+  );
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts[0], "preamble\nfix the thing");
+  assert.match(prompts[1], /^Refine your work/);
+  assert.equal(prompts[2], prompts[1]);
+  assert.equal(record.class, "resolved");
+  assert.equal(record.costUsd, 1.5);
+});
+
+test("a refining arm stopped before its last follow-up is not a settled cell", async () => {
+  const prompts = [];
+  const record = await run(
+    {
+      settle: async (_client, { prompt }) => {
+        prompts.push(prompt);
+        return prompts.length === 2
+          ? { outcome: "spend-cap", stats: { cost: 2.1 } }
+          : { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
+      },
+    },
+    { task: "i1", arm: "solo-sol-refine", repetition: 1 },
+  );
+  assert.equal(prompts.length, 2);
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "spend-cap");
+});
+
+test("an arm without follow-ups is asked once", async () => {
+  let prompts = 0;
+  await run({
+    settle: async () => {
+      prompts += 1;
+      return { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
+    },
+  });
+  assert.equal(prompts, 1);
+});
+
+test("a stopped cell is aborted first, so the spend it records includes workers that were running", async () => {
+  const sent = [];
+  const record = await run({
+    openAgentSession: async () =>
+      fakeClient({
+        send: async (command) => {
+          sent.push(command.type);
+          return command.type === "abort"
+            ? { success: true }
+            : { success: true, data: { cost: 1.2, tokens: { total: 9 } } };
+        },
+      }),
+    settle: async () => ({ outcome: "timeout", stats: { cost: 0.93 } }),
+  });
+  assert.deepEqual(sent, ["abort", "get_session_stats"]);
+  assert.equal(record.costUsd, 1.2);
+  assert.equal(record.outcome, "timeout");
+});
+
+test("a stopped session that will not abort keeps the spend read at the stop", async () => {
+  const record = await run({
+    settle: async () => ({ outcome: "spend-cap", stats: { cost: 1.6 } }),
+  });
+  assert.equal(record.costUsd, 1.6);
+});
+
+test("a settled cell is not aborted", async () => {
+  const sent = [];
+  await run({
+    openAgentSession: async () =>
+      fakeClient({
+        send: async (command) => {
+          sent.push(command.type);
+          return { success: true };
+        },
+      }),
+  });
+  assert.deepEqual(sent, []);
+});
+
 test("a timed-out cell is not scored either", async () => {
   const record = await run({
     settle: async () => ({ outcome: "timeout", stats: { cost: 3 } }),
@@ -198,6 +338,60 @@ test("a graph arm is given a worker-graph configuration and a solo arm is not", 
   assert.equal(seen[0], undefined);
   assert.equal(seen[1].profiles.worker.model, "gpt-5.6-luna");
   assert.equal(seen[1].profiles.reviewer.model, "gpt-5.6-sol");
+});
+
+test("the tests-first arm adds a writable sol profile and its guidance, and nothing else", async () => {
+  const base = workerGraphConfig("graph-luna");
+  const config = workerGraphConfig("graph-luna-tests-first");
+  assert.deepEqual(config.profiles.worker, base.profiles.worker);
+  assert.deepEqual(config.profiles.reviewer, base.profiles.reviewer);
+  assert.equal(config.profiles["test-author"].model, "gpt-5.6-sol");
+  assert.ok(config.profiles["test-author"].tools.includes("write"));
+  assert.equal("test-author" in base.profiles, false);
+
+  const prompts = [];
+  await run(
+    {
+      settle: async (_client, { prompt }) => {
+        prompts.push(prompt);
+        return { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
+      },
+    },
+    { task: "i1", arm: "graph-luna-tests-first", repetition: 1 },
+  );
+  assert.ok(prompts[0].startsWith("preamble\nfix the thing\n\n"));
+  assert.match(prompts[0], /test-author profile/);
+  await run({
+    settle: async (_client, { prompt }) => {
+      prompts.push(prompt);
+      return { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
+    },
+  });
+  assert.equal(prompts[1], "preamble\nfix the thing");
+});
+
+test("the reviewed-tests arm differs from tests-first only by the review of the tests", () => {
+  const first = armConfig("graph-luna-tests-first");
+  const reviewed = armConfig("graph-luna-tests-reviewed");
+  assert.deepEqual(
+    workerGraphConfig("graph-luna-tests-reviewed"),
+    workerGraphConfig("graph-luna-tests-first"),
+  );
+  assert.equal(
+    first.guidance.includes("review on the reviewer profile"),
+    false,
+  );
+  assert.match(
+    reviewed.guidance,
+    /review on the reviewer profile, maxRounds 2/,
+  );
+  assert.equal(
+    reviewed.guidance.replace(
+      /\n {2}Give that task a review[\s\S]*?specification\./,
+      "",
+    ),
+    first.guidance,
+  );
 });
 
 test("the reviewer profile holds no tool that can change the checkout", () => {

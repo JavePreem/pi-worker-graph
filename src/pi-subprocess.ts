@@ -1,6 +1,8 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -32,6 +34,7 @@ import type {
   TaskExecutorTask,
 } from "./run.js";
 import { RUN_GRAPH_LIMITS } from "./run.js";
+import { runSessionDirectory } from "./store.js";
 import type { TaskUsage } from "./usage.js";
 import { TASK_USAGE_LIMITS } from "./usage.js";
 
@@ -867,10 +870,20 @@ function batchCallsReportWithSiblings(content: unknown): boolean {
   );
 }
 
+/**
+ * A Pi session a child resumes rather than starting empty. Only a node's
+ * reviewer has one: see `reviewSession`.
+ */
+interface PiChildSession {
+  readonly directory: string;
+  readonly id: string;
+}
+
 async function runNormalizedPiWorkerProcess(
   input: TaskExecutionInput,
   options: NormalizedExecutorOptions,
   dependencies: ProcessDependencies = {},
+  session?: PiChildSession,
 ): Promise<TaskExecutionResult> {
   const payload = parseWorkerTaskPayload(input.payload);
   const profile = options.profiles.get(payload.profile);
@@ -900,7 +913,9 @@ async function runNormalizedPiWorkerProcess(
     "--mode",
     "json",
     "-p",
-    "--no-session",
+    ...(session === undefined
+      ? ["--no-session"]
+      : ["--session-dir", session.directory, "--session-id", session.id]),
     "--no-extensions",
     "--extension",
     options.extensionPath,
@@ -1378,11 +1393,17 @@ function reviewPayload(
   payload: PiWorkerTaskPayload,
   policy: PiReviewPolicy,
   round: number,
+  resumed: boolean,
 ): PiWorkerTaskPayload {
   return Object.freeze({
     profile: policy.profile,
     assignment: [
       `You are reviewing another worker's completed work, review round ${round}.`,
+      ...(resumed
+        ? [
+            "This continues your own earlier review of this work. A repair worker has since been given your findings. Re-read what it changed and judge the work again; what you read before and has not changed need not be read again.",
+          ]
+        : []),
       "",
       "THE ASSIGNMENT THAT WORKER WAS GIVEN",
       payload.assignment,
@@ -1786,6 +1807,7 @@ async function runPiReviewCycle(
   // check has passed, and a review's repair is checked again.
   let checks = 0;
   let reviews = 0;
+  let session = policy === undefined ? undefined : reviewSession(input);
   for (;;) {
     if (check !== undefined && trace !== undefined) {
       // Checked before the commands run, so a test the worker edited cannot
@@ -1841,10 +1863,27 @@ async function runPiReviewCycle(
     if (policy === undefined) return settle(work);
 
     reviews += 1;
+    if (reviews === 1 && session !== undefined) {
+      // A directory that cannot be made costs the cache, not the review.
+      const directory = session.directory;
+      session = await mkdir(directory, { recursive: true, mode: 0o700 }).then(
+        () => session,
+        () => undefined,
+      );
+    }
     const review = await runNormalizedPiWorkerProcess(
-      withPayload(input, reviewPayload(payload, policy, reviews)),
+      withPayload(
+        input,
+        reviewPayload(
+          payload,
+          policy,
+          reviews,
+          session !== undefined && reviews > 1,
+        ),
+      ),
       roundProgress(options, running, false),
       dependencies,
+      session,
     ).catch(failed(true));
     spend(review.usage, true);
 
@@ -1866,6 +1905,32 @@ async function runPiReviewCycle(
       return settle(review);
     }
   }
+}
+
+/**
+ * The session a node's reviewer keeps across its rounds, or none.
+ *
+ * Every round used to start a fresh process with a fresh session, and Pi keys
+ * the provider's prompt cache by session, so each round re-read the checkout
+ * and the documents it judges against and wrote all of it to the cache again:
+ * measured at about 27k cache-written tokens a round, 44% of a sol reviewer's
+ * spend. Resuming keeps the prefix and the key, so a later round reads that
+ * context from the cache instead.
+ *
+ * It carries only the reviewer's own earlier rounds: what it read and what it
+ * found, which its next round is judging anyway. The worker it reviews stays
+ * isolated, and every repair still starts fresh. The session lives with the
+ * run, outside the checkout, and goes when the run does; without a run
+ * directory there is nowhere to keep it, and rounds start fresh as before.
+ */
+function reviewSession(input: TaskExecutionInput): PiChildSession | undefined {
+  if (input.runStateRoot === undefined) return undefined;
+  // Pi accepts only a plain identifier, and a task ID need not be one.
+  const digest = createHash("sha256").update(input.taskId).digest("hex");
+  return {
+    directory: runSessionDirectory(input.runStateRoot, input.runId),
+    id: `review-${digest.slice(0, 32)}`,
+  };
 }
 
 function stripReview(payload: PiWorkerTaskPayload): PiWorkerTaskPayload {
@@ -1910,7 +1975,14 @@ export function createPiSubprocessExecutor(
         // failing a node whose worker had already changed the checkout.
         if (
           Buffer.byteLength(
-            JSON.stringify(reviewPayload(payload, payload.review, 1)),
+            JSON.stringify(
+              reviewPayload(
+                payload,
+                payload.review,
+                payload.review.maxRounds,
+                payload.review.maxRounds > 1,
+              ),
+            ),
           ) > RUN_GRAPH_LIMITS.maxPayloadBytes
         ) {
           throw new TaskExecutionFailure("invalid_assignment", task.id);

@@ -51,6 +51,25 @@ test("every task names its contract module, and the preamble asks for tests", ()
   assert.match(preamble, /only the public contract/);
 });
 
+test("every failing hidden case is kept, not a sample of them", async () => {
+  const cases = Array.from({ length: 12 }, (_, i) => ({
+    group: "g",
+    name: `c${i}`,
+    expression: "a",
+    given: {},
+    result: i,
+  }));
+  const { groups } = await runHidden(
+    "jmespath",
+    "class JMESPathError(Exception): pass\ndef search(e, d): return None\n",
+    cases,
+  );
+  assert.equal(groups.g.failures.length, 12);
+  const states = targetStates(groups);
+  assert.match(states.g.tail, /^c0: /);
+  assert.match(states.g.tail, /\nc11: /);
+});
+
 test("a hidden case never takes a boolean for a number", async () => {
   const { groups } = await runHidden(
     "jmespath",
