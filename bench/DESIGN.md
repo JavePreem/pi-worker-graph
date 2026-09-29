@@ -4,6 +4,38 @@ An earlier fixture suite lived here and was deleted rather than committed: it
 could not answer the question below, and the section on why is the part of it
 worth keeping. Only its Pi RPC client survives.
 
+## What the bench says so far
+
+Measured 2026-09-29, one cell per arm on each task, so no figure has a
+variance. The answer to the title depends on what accepts the work.
+
+| task | acceptance | `solo-sol` | `graph-luna` | graph / solo cost |
+| --- | --- | --- | --- | --- |
+| polyglot js29 | visible tests | 29/29, $0.83, 4 min | 29/29, $0.21, 4 min | 0.26 |
+| polyglot py34 | visible tests | 34/34, $0.87, 3 min | 34/34, $0.30, 8 min | 0.34 |
+| coldstart `mustache` | specification | 135/135, $0.24, 4 min | 135/135, $0.32, 8 min | 1.33 |
+| coldstart `jmespath` | specification | 862/891, $0.67, 4 min | 875 / 848, $3.08 / $1.63, 30+ min | 2.4-4.6 |
+
+- **With a test oracle, it costs less at the same quality.** Luna nodes run in
+  parallel and the runtime accepts each on its check, which costs no tokens.
+  Sol only plans, about half the cell.
+- **Without one, sol alone is cheaper.** Acceptance needs sol to judge the
+  work against the specification, so each reviewer round re-acquires the
+  understanding solo sol pays for once. Sol was 87-94% of those graph cells'
+  spend; luna's implementation was $0.04-0.18.
+- **No graph cell beat solo sol on quality by more than noise.** The best was
+  875 against 862 of 891 on `jmespath`.
+- **The graph is slower**, 2x on the smaller tasks and 7-8x on `jmespath`,
+  except where checked nodes run fully in parallel.
+- **Two approaches were tried and gave nothing on `jmespath`.** Sending sol
+  "refine" twice in the same session left it at 862. Tests-first scored 790,
+  because the tests became the ceiling. Reviewing the tests cost $1.32 before
+  any implementation ran.
+
+Open: no `solo-luna` cell on `mustache`, so whether its review bought
+anything is unmeasured, and `jsonpath` is unrun. Details and caveats are
+under **The polyglot suite**, **The cold-start suite**, and `docs/NEXT.md`.
+
 ## Suites
 
 The harness is suite-agnostic. A suite (`bench/suites/<name>/suite.mjs`, the
@@ -1099,11 +1131,13 @@ is uninformative and must be reported as such rather than quietly used anyway.
    and it is the last remaining place where the harness could put words in the
    orchestrator's mouth.
 
-   Disclosed: the trial-only `graph-luna-tests-first` and
-   `graph-luna-tests-reviewed` arms do exactly that. They append tests-first
-   guidance to the task and add a writable sol `test-author` profile
-   (`testsFirst` in `bench/arms.mjs`). They are not queue arms, and the
-   guidance moves into the package or the queue only on evidence from a cell.
+   Disclosed: two trial-only arms, `graph-luna-tests-first` and
+   `graph-luna-tests-reviewed`, did exactly that on 2026-09-29. They appended
+   tests-first guidance to the task and added a writable sol `test-author`
+   profile. Both were removed the same day, after the approach was abandoned:
+   it encodes the solution in the tests, costs at least what `solo-sol` does,
+   and forces a design choice on the model (`docs/NEXT.md`). No queue arm
+   carries harness guidance.
 
 ## Measured
 
@@ -1759,6 +1793,12 @@ check.** One cell each, both resolving 29/29:
 | published `0.1.0-dev.2` | $1.16 | 435 s | 3 | 58 | parent ~$0.49, reviewed nodes $0.54, luna work ~$0.13 |
 | node check + lean guidance (D23) | $0.21 | 267 s | 1 | 6 | parent ~$0.10, eight checked luna nodes $0.11 |
 
+**Measured 2026-09-29: `graph-luna` on the Python bundle**, on the build
+with reviewer sessions and round traces: 34/34, $0.297, 8 minutes. The parent
+made one graph of eight parallel luna nodes, each checked and none reviewed.
+The nodes cost $0.14 in all and the parent $0.16. Solo sol was $0.867 at
+200 s.
+
 The first cell did what the old guidance asked: read every spec before
 delegating, add a validation node (rejected at eight dependencies), put sol
 reviewers on tested work, and read the changes again to accept them. Three
@@ -1869,12 +1909,41 @@ The per-node spend, and six theories it suggests for a cheaper graph, are in
 
 So luna under a sol reviewer beat sol alone on the code and on the tests, at
 4.6 times the cost, and not by testing first: no node wrote tests for another
-to be checked against. That arrangement is not reachable here yet: the
-agent configuration (`workerGraphConfig`, `bench/arms.mjs`) offers a writable
-luna `worker` and a read-only sol `reviewer`, so no node can have sol write
-the tests. The cell also ran with a 45-minute settle limit copied from
-polyglot, against solo arms of two to four minutes; first cells on a new setup
-now get about three times the solo wall-clock and twice its cost.
+to be checked against. The cell also ran with a 45-minute settle limit copied
+from polyglot, against solo arms of two to four minutes; first cells on a new
+setup now get about three times the solo wall-clock and twice its cost.
+
+**Measured since, 2026-09-29, all harness-graded:**
+
+| task | arm | hidden | cost | wall | tests | valid | mutants |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `jmespath` | `solo-sol-refine` | 862/891 | $1.07 | 7 min | 12 | 6/12 | 17/40 |
+| `jmespath` | tests-first (removed) | 790/891 | $0.93 | 15 min, timeout | 131 | 120/131 | 35/40 |
+| `jmespath` | `graph-luna`, new build | 848/891 | $1.63 | 30 min, timeout | 29 | 20/29 | 28/40 |
+| `mustache` | `solo-sol` | 135/135 | $0.24 | 4 min | 15 | 11/15 | 34/40 |
+| `mustache` | `graph-luna`, new build | 135/135 | $0.32 | 8 min | 15 | 10/15 | 35/40 |
+
+- **Refine.** Two follow-up turns made spot edits without re-reading the
+  specification, and left solo sol's main bug in place: a projection after a
+  flatten (`a[].b[].c`), about 20 of its 29 failures.
+- **Tests-first.** A sol node wrote the tests and a contract stub, then luna
+  implemented against them, frozen. Luna passed every check first time, and
+  the hidden score followed the tests. 78 of the 101 failures were one
+  grammar production (`sub-expression`, `specification.rst:258`) that no
+  test exercised. A sol review of the tests found that gap, but the tests
+  node then cost $1.32, twice solo sol's whole run. The approach was
+  abandoned: it writes the solution into the tests and forces a design on the
+  model.
+- **`graph-luna` on the new build**, with resumed reviewer sessions and the
+  three-to-four-rounds guidance. It cost half the old graph, with two graphs
+  instead of five and resumed review rounds 31-80% cheaper. It was stopped by
+  the 30-minute limit with a review in flight. About 20 of its 43 failures
+  are the same flatten-projection bug. One earlier attempt was degenerate:
+  the parent's only turn refused the task.
+- **`mustache`.** One luna node wrote the library ($0.037). Its sol reviewer
+  took $0.214 over two rounds (4 findings, then none), 68% of the cell.
+  Solo sol resolved it for less. No `solo-luna` cell exists, so whether the
+  review was needed is unmeasured.
 
 ```bash
 node bench/selftest.mjs --suite coldstart

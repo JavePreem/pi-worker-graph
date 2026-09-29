@@ -437,7 +437,7 @@ export async function runCell({
       // arm is held to the same limit as the arm it is compared with.
       const deadline = Date.now() + settleMs;
       ({ outcome, stats } = await settle(client, {
-        prompt: `${suite.preamble}${task.prompt}${armConfig(cell.arm).guidance ?? ""}`,
+        prompt: `${suite.preamble}${task.prompt}`,
         settleMs,
         capUsd,
       }));

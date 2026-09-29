@@ -587,9 +587,8 @@ What remains, in order:
      reference still grades resolved on `jmespath`.
    - A stopped cell sends Pi `abort` and re-reads the spend before killing
      anything (`bench/cell.mjs` `abortSession`). An aborted graph's result
-     carries its in-flight workers' usage (`aggregateUsage`). Whether Pi adds
-     that result to its session stats after an abort is unverified until a
-     stopped live cell.
+     carries its in-flight workers' usage (`aggregateUsage`), and Pi adds it to
+     its session stats after an abort. Verified live on `graph-luna` v2 (below).
    - `graph-luna-tests-reviewed` is `graph-luna-tests-first` plus one change:
      a sol review (2 rounds) of the tests node against the specification.
 
@@ -615,7 +614,8 @@ What remains, in order:
      guidance now gives it `maxRounds 2` (`bench/arms.mjs` `testsFirst`).
    - **Abort worked live.** The parent's last message ended `aborted`, and the
      spend read after the abort includes the tests node. No worker was
-     running at the stop, so in-flight worker accounting is still unverified.
+     running at the stop; in-flight accounting was verified later, on
+     `graph-luna` v2.
    - The cap was sized wrong, not the arm. Both review rounds plus the
      author's repair came to about $1.70 before any luna work, above the cap.
 
@@ -648,17 +648,80 @@ What remains, in order:
    make them direct. Rounds are dropped before the report when the result is
    short of room.
 
+   **Measured 2026-09-29: `graph-luna` on the new build costs half as much and
+   ran out of time.** Two cells were run on `jmespath` with
+   `review-sessions-traces-budget-2026-09-29.tgz`, a $2 cap and 30 minutes.
+   The first was degenerate: the parent's only turn was "I'm sorry, but I
+   can't complete this implementation within the current run" ($0.014, no
+   tools called). The second:
+
+   | cell | hidden | cost | wall | review | parent | graphs |
+   | --- | --- | --- | --- | --- | --- | --- |
+   | `graph-luna` (2026-09-28) | 875/891 | $3.08 | 34 min, cap | $2.51 | $0.39 | 5 |
+   | `graph-luna` v2 | 848/891 | $1.63 | 30 min, timeout | $1.28 | $0.18 | 2 |
+
+   - **Resumed review rounds are cheaper, measured per round** from the new
+     `rounds` trace. Implementation reviews went $0.278, then $0.191, then
+     $0.145, with cache writes of 23.7k, 13.1k and 11.1k tokens. The tests
+     reviews went $0.193 then $0.107. The `tests-repair` reviews went $0.240
+     then $0.049. A resumed round cost 31-80% less than the first.
+   - **The parent followed the new guidance.** It gave the implementation
+     `maxRounds 3` and planned two graphs instead of five. The first held
+     implementation and tests in parallel, then integration.
+   - **The parent turned review findings into a check by itself.** After
+     `implementation` failed with 4 blockers, `impl-repair` carried them as
+     executable assertions with no review, and passed first time for $0.012
+     in 95 s.
+   - **The time limit bound, not the cap**, during `final-integration`'s
+     review. An aborted node's in-flight spend is counted, verified live:
+     parent $0.184 + graph 1 $1.046 + graph 2 $0.403 = $1.633, the session
+     total.
+   - **The quality gap is one bug.** About 20 of the 43 failures are a
+     projection after a flatten (`a[].b[].c`), solo-sol's bug, which
+     yesterday's graph fixed. Whether a reviewer found it this time is not
+     recorded: only a node's final report survives, and the implementation's
+     first review raised 18 blockers. Another ~6 are a multi-select on a
+     missing key.
+   - The two graph cells are not equal-quality points. v2 was stopped with a
+     review in flight, and one cell each has no variance.
+
+   **Measured 2026-09-29: which acceptance a task needs decides whether the
+   graph pays.** Three cells tested the hypothesis, on the latest build.
+
+   | task | acceptance | arm | quality | cost | wall | sol share |
+   | --- | --- | --- | --- | --- | --- | --- |
+   | polyglot js29 | visible tests | solo-sol | 29/29 | $0.83 | 4 min | 100% |
+   | | | graph-luna (checks) | 29/29 | $0.21 | 4 min | 48% |
+   | polyglot py34 | visible tests | solo-sol | 34/34 | $0.87 | 3 min | 100% |
+   | | | graph-luna (checks) | 34/34 | $0.30 | 8 min | 54% |
+   | coldstart mustache | spec only | solo-sol | 135/135 | $0.24 | 4 min | 100% |
+   | | | graph-luna (check + review) | 135/135 | $0.32 | 8 min | 87% |
+   | coldstart jmespath | spec only | solo-sol | 862/891 | $0.67 | 4 min | 100% |
+   | | | graph-luna v1 / v2 | 875 / 848 | $3.08 / $1.63 | 34 / 30 min | 94% / 90% |
+
+   - **Where the tests exist, the graph is 3-4x cheaper at equal quality.**
+     On py34, eight parallel luna nodes were accepted on their checks alone
+     for $0.14 in all. Sol spent $0.16, all of it the parent planning.
+   - **Where acceptance takes judgement against a specification, solo sol is
+     cheaper.** On `mustache`, one luna node wrote the library for $0.037.
+     Its sol reviewer took $0.214 over two rounds, 4 findings then none. That
+     is 68% of the cell, and together with the parent the graph cost more
+     than solo sol's whole run.
+   - The direction held on all four tasks, one cell per arm each.
+   - **Open: whether the review bought anything on `mustache`.** No
+     `solo-luna` cell exists there. If luna alone resolves it, `mustache`
+     fails criterion 1 and says nothing about supervision.
+   - The resumed reviewer saved less on `mustache` ($0.120, then $0.094):
+     round 2 re-wrote about 8k tokens, the size of the repaired code it
+     re-read.
+
    What is left, in order:
 
-   1. Tests-first on cold start. Built as a trial-only arm,
-      `graph-luna-tests-first` (`bench/arms.mjs`): `graph-luna` plus a
-      writable sol `test-author` profile and guidance appended to the task.
-      One tests node writes the suite and a stub of the contract, checked by
-      `pytest --collect-only`. Then luna nodes per specification area, each
-      checked against its frozen area tests, with no review. First cell run
-      2026-09-29 at a $1.50 cap and 15 minutes; results above.
-      Known risk: an area whose tests an earlier node already made pass fails
-      its `before: "fail"` check and blocks its dependents.
+   1. Tests-first on cold start: run and abandoned 2026-09-29. It writes the
+      solution into the tests, the tests node alone costs at least what
+      `solo-sol` does, and it forces a design on the model. Both arms and the
+      `test-author` profile were removed from `bench/arms.mjs`; the results
+      above stand.
    2. The refine baseline (T6): a trial-only `solo-sol-refine` arm, sol with
       "refine" sent twice in the same session under one cap ($2) and one
       limit (15 minutes), on `jmespath`. Built: `followUps` on the arm in
@@ -673,10 +736,19 @@ What remains, in order:
    4. Done: a cell stopped by its spend cap or time limit is graded, with the
       grade in `detail` and the stop kept as its class; the container's
       processes are killed first (`bench/cell.mjs`).
-   5. Grow a pool only once the mechanism works on one task: `coldstart`
-      from further spec-plus-compliance-suite pairs, `polyglot` from the Go,
-      Rust, Java and C++ exercises.
-   6. Settle open decision 4, freeze the preamble, then `init`.
+   5. Close what the four tasks leave open, all cheap:
+      - `solo-luna` on `mustache`. If luna alone resolves it, the task says
+        nothing about whether review is needed.
+      - `jsonpath` on all three arms, as a third specification-only task.
+      - A repeat of `solo-sol` and `graph-luna` on `jmespath`, for a first
+        look at variance. 875 against 862 is 13 cases in 891.
+   6. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
+      says so far**). On current evidence the saving exists only where a
+      command can accept the work. A pilot drawn from test-backed tasks (the
+      polyglot bundles at twenty, grown with the Go, Rust, Java and C++
+      exercises) tests that narrower claim. The cold-start tasks measure where
+      it fails.
+   7. Settle open decision 4, freeze the preamble, then `init`.
 
    The precondition that stood before those cells still stands: a pilot in
    which every arm scores zero discriminates nothing.

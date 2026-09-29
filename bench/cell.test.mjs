@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { armConfig, workerGraphConfig } from "./arms.mjs";
+import { workerGraphConfig } from "./arms.mjs";
 import {
   NotAttempted,
   promptFingerprint,
@@ -338,60 +338,6 @@ test("a graph arm is given a worker-graph configuration and a solo arm is not", 
   assert.equal(seen[0], undefined);
   assert.equal(seen[1].profiles.worker.model, "gpt-5.6-luna");
   assert.equal(seen[1].profiles.reviewer.model, "gpt-5.6-sol");
-});
-
-test("the tests-first arm adds a writable sol profile and its guidance, and nothing else", async () => {
-  const base = workerGraphConfig("graph-luna");
-  const config = workerGraphConfig("graph-luna-tests-first");
-  assert.deepEqual(config.profiles.worker, base.profiles.worker);
-  assert.deepEqual(config.profiles.reviewer, base.profiles.reviewer);
-  assert.equal(config.profiles["test-author"].model, "gpt-5.6-sol");
-  assert.ok(config.profiles["test-author"].tools.includes("write"));
-  assert.equal("test-author" in base.profiles, false);
-
-  const prompts = [];
-  await run(
-    {
-      settle: async (_client, { prompt }) => {
-        prompts.push(prompt);
-        return { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
-      },
-    },
-    { task: "i1", arm: "graph-luna-tests-first", repetition: 1 },
-  );
-  assert.ok(prompts[0].startsWith("preamble\nfix the thing\n\n"));
-  assert.match(prompts[0], /test-author profile/);
-  await run({
-    settle: async (_client, { prompt }) => {
-      prompts.push(prompt);
-      return { outcome: "settled", stats: { cost: 1, tokens: { total: 1 } } };
-    },
-  });
-  assert.equal(prompts[1], "preamble\nfix the thing");
-});
-
-test("the reviewed-tests arm differs from tests-first only by the review of the tests", () => {
-  const first = armConfig("graph-luna-tests-first");
-  const reviewed = armConfig("graph-luna-tests-reviewed");
-  assert.deepEqual(
-    workerGraphConfig("graph-luna-tests-reviewed"),
-    workerGraphConfig("graph-luna-tests-first"),
-  );
-  assert.equal(
-    first.guidance.includes("review on the reviewer profile"),
-    false,
-  );
-  assert.match(
-    reviewed.guidance,
-    /review on the reviewer profile, maxRounds 2/,
-  );
-  assert.equal(
-    reviewed.guidance.replace(
-      /\n {2}Give that task a review[\s\S]*?specification\./,
-      "",
-    ),
-    first.guidance,
-  );
 });
 
 test("a graph arm's configuration carries the cell's cap as its graph budget", async () => {

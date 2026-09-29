@@ -82,6 +82,14 @@ worker executes one narrow assignment the parent already scoped, so the example
 configures a cheaper model here. Add further profiles when tasks genuinely need
 different capability or a narrower tool set.
 
+Measured on the bench (`bench/DESIGN.md`, **What the bench says so far**), a
+cheaper worker pays off when a command can accept its work. On two
+test-backed bundles, cheap workers accepted on checks cost a third to a quarter
+of the strong model working alone, at the same result. It does not pay when
+acceptance needs the strong model to judge the work against a specification.
+There the reviewer re-reads what the worker read, and on both such tasks the
+graph cost more than the strong model alone.
+
 The parent session can be configured in the same file, through an optional
 `orchestrator` block:
 
@@ -208,7 +216,12 @@ The cycle lives in the Pi adapter rather than the graph runner, so the graph
 stays frozen: rounds are not nodes, the node keeps one immutable terminal
 output, and the node's existing timeout bounds the whole cycle rather than any
 single round. A repair is a fresh child process carrying the reviewer's
-structured findings, never a resumed session. Both the worker profile and the
+structured findings, never a resumed session. The reviewer is the exception:
+every review round of a node resumes the reviewer's own Pi session, kept in the
+run's directory outside the checkout and deleted with the run. It keeps the
+provider's prompt cache warm, so a later round reads what the first one read
+instead of paying for it again. In the cells measured, a resumed round cost
+22-80% less than the first. Both the worker profile and the
 reviewer profile are resolved during whole-graph validation, before any worker
 starts, so an unresolvable reviewer is not discovered by spending a worker
 first. Findings are bounded on count and size, and overflow fails the node
@@ -236,6 +249,12 @@ fails the node rather than letting a worker pass the check by editing it.
 The node's terminal progress event, and its entry in the parent-facing result,
 carry a runtime-authored trace of the check: how many commands failed before
 the work, how many runs it took after, and how it ended.
+
+Every node's entry also carries its wall-clock as `durationMs`. A checked or
+reviewed node also carries `rounds`: each check, work, review, and repair step
+in order, with its own duration, usage, and the number of blockers or failing
+commands it left open. That shows the parent whether a review is converging.
+When the result is short of room, rounds are dropped before the report.
 
 A check runs before every review, so a reviewer only judges work that passed
 its check, and a review's repair is checked again. A checked node that
@@ -550,14 +569,14 @@ usage for the attempt at all, so wherever a total is present the share within
 it is complete. `readRunUsage()` sums it the same way it sums the totals, and
 `/swarm usage` names it on the run line when a reviewer ran.
 
-The runtime bounds tasks, concurrency, payload, output, context, and runtime,
-but does not yet enforce a token or cost ceiling.
+The runtime bounds tasks, concurrency, payload, output, context, and runtime.
+An optional `maxGraphCostUsd` (see the configuration section) caps the cost of
+one graph, checked on live progress.
 
 ## Planned runtime
 
 The remaining runtime will add:
 
-- a configured token or cost budget, enforced against recorded usage;
 - persisted worker attempts and interrupted-run recovery behavior.
 
 Writable workers will intentionally share one checkout. The runtime will not

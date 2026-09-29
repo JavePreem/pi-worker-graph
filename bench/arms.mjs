@@ -1,6 +1,6 @@
 /**
- * The four queued arms, the trial-only arms, and the configuration each one
- * hands the agent.
+ * The four queued arms, a trial-only baseline, and the configuration each
+ * one hands the agent.
  *
  * They vary two things independently: whether the orchestration machinery is
  * in the loop, and what model does the work. Everything else -- harness,
@@ -46,43 +46,6 @@ export const MAX_REVIEW_ROUNDS = 2;
 const REFINE =
   "Refine your work: check it against the task once more and fix anything that falls short.";
 
-/**
- * What the tests-first arm adds to the task, after it. Arm configuration, not
- * package guidance: it is the harness putting words in the orchestrator's
- * mouth, which open decision 4 in DESIGN.md says must be disclosed, and it is
- * written for a cold-start task -- a specification, a public contract, and no
- * tests. It moves into the package only if a cell shows it works.
- *
- * The contract stub is there so the tests-writing task has a check: tests
- * that import a module which does not exist cannot even be collected.
- */
-function testsFirst({ reviewTests }) {
-  const review = reviewTests
-    ? `
-  Give that task a review on the reviewer profile, maxRounds 2, with the
-  criteria: every rule of the specification's grammar and every function it
-  defines has a test, and every test agrees with the specification.`
-    : "";
-  return `
-
-How to run this task with worker_graph:
-- Write the tests first, as one task on the test-author profile: from the
-  specification alone, a test suite under tests/ with one file per area of
-  the specification, and a stub of the public contract -- every name it lists,
-  every function raising NotImplementedError -- and no implementation. Check
-  it with \`python3 -m pytest --collect-only -q tests\`, maxRounds 2.${review}
-- Then implement against those tests on the worker profile: the structure
-  every area shares in one task first, then one task per area behind it. Check
-  each with its own area's test files, freeze tests/ and spec/, give it
-  maxRounds 4 and no review. The frozen tests are its acceptance.
-- Tell implementation workers that a test contradicting the specification is
-  a blocker to report, not something to work around. Give its correction to a
-  test-author task, then re-run the work it blocked.
-- Repair through a task's own check rounds. Plan a new graph only for tasks
-  that failed with their rounds spent.
-- Finish when \`python3 -m pytest tests\` passes in full.`;
-}
-
 export const ARMS = {
   "solo-sol": { machinery: false, parent: MODELS.sol },
   // Trial-only: the queue draws its own arm list (`bench/queue.mjs`), so this
@@ -107,29 +70,6 @@ export const ARMS = {
     worker: MODELS.luna,
     reviewer: MODELS.sol,
   },
-  // Trial-only, like `solo-sol-refine`: `graph-luna` with a writable sol
-  // profile for the tests and guidance to write them first (`docs/NEXT.md`
-  // T2-T4). A reviewer is still configured, so the only additions are the
-  // profile and the words.
-  "graph-luna-tests-first": {
-    machinery: true,
-    parent: MODELS.sol,
-    worker: MODELS.luna,
-    reviewer: MODELS.sol,
-    testAuthor: MODELS.sol,
-    guidance: testsFirst({ reviewTests: false }),
-  },
-  // Trial-only: the tests-first arm with one change, a sol review of the tests
-  // against the specification. The tests-first cell traced 89 of its 101
-  // hidden failures to gaps and errors in the tests (`docs/NEXT.md`).
-  "graph-luna-tests-reviewed": {
-    machinery: true,
-    parent: MODELS.sol,
-    worker: MODELS.luna,
-    reviewer: MODELS.sol,
-    testAuthor: MODELS.sol,
-    guidance: testsFirst({ reviewTests: true }),
-  },
 };
 
 export function armNames() {
@@ -143,11 +83,7 @@ export function armNames() {
  */
 export function armModels(name) {
   const arm = armConfig(name);
-  return [
-    ...new Set(
-      [arm.parent, arm.worker, arm.reviewer, arm.testAuthor].filter(Boolean),
-    ),
-  ];
+  return [...new Set([arm.parent, arm.worker, arm.reviewer].filter(Boolean))];
 }
 
 export function armConfig(name) {
@@ -192,16 +128,6 @@ export function workerGraphConfig(
         thinkingLevel: "medium",
         tools: REVIEWER_TOOLS,
       },
-      ...(arm.testAuthor === undefined
-        ? {}
-        : {
-            "test-author": {
-              provider,
-              model: arm.testAuthor,
-              thinkingLevel: "medium",
-              tools: WORKER_TOOLS,
-            },
-          }),
     },
   };
 }
