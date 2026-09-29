@@ -418,7 +418,10 @@ export async function runCell({
       if (prepare !== undefined) await prepare(container, task);
       agent = await agentDirectory({
         from: agentDirectorySource,
-        workerGraphConfig: workerGraphConfig(cell.arm, { provider }),
+        workerGraphConfig: workerGraphConfig(cell.arm, {
+          provider,
+          maxGraphCostUsd: capUsd,
+        }),
         packageTree,
         packageVersion,
         provider,

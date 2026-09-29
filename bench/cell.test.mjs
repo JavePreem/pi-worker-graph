@@ -394,6 +394,25 @@ test("the reviewed-tests arm differs from tests-first only by the review of the 
   );
 });
 
+test("a graph arm's configuration carries the cell's cap as its graph budget", async () => {
+  const seen = [];
+  await runCell({
+    suite,
+    task,
+    cell: { task: "i1", arm: "graph-luna", repetition: 1 },
+    manifest,
+    capUsd: 1.5,
+    deps: deps({
+      agentDirectory: async ({ workerGraphConfig: config }) => {
+        seen.push(config);
+        return { dir: "/tmp/agent", dispose: async () => {} };
+      },
+    }),
+  });
+  assert.equal(seen[0].maxGraphCostUsd, 1.5);
+  assert.equal("maxGraphCostUsd" in workerGraphConfig("graph-luna"), false);
+});
+
 test("the reviewer profile holds no tool that can change the checkout", () => {
   const config = workerGraphConfig("graph-luna");
   for (const tool of config.profiles.reviewer.tools) {

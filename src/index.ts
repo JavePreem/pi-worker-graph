@@ -33,6 +33,7 @@ export {
 } from "./output.js";
 export type {
   PiCheckTrace,
+  PiRoundTrace,
   PiSubprocessExecutorOptions,
   PiThinkingLevel,
   PiWorkerCoordinationTool,

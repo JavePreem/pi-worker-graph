@@ -167,7 +167,7 @@ export function armConfig(name) {
  */
 export function workerGraphConfig(
   name,
-  { provider = PROVIDER, stateRoot } = {},
+  { provider = PROVIDER, stateRoot, maxGraphCostUsd } = {},
 ) {
   const arm = armConfig(name);
   if (!arm.machinery) return undefined;
@@ -175,6 +175,10 @@ export function workerGraphConfig(
     schemaVersion: 1,
     maxRetainedRuns: 64,
     ...(stateRoot === undefined ? {} : { stateRoot }),
+    // The cell's cap, so a graph is stopped from the inside. The harness's
+    // own poll reads the parent's session, which learns a graph's spend only
+    // when the graph returns.
+    ...(maxGraphCostUsd === undefined ? {} : { maxGraphCostUsd }),
     profiles: {
       worker: {
         provider,

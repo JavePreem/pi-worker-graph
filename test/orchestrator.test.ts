@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { TaskExecutionFailure } from "../src/execution-failure.js";
 import {
   MAX_PROFILE_CONTEXT_BYTES,
   registerWorkerGraphOrchestratorTool,
@@ -49,6 +50,8 @@ interface RegisteredTool {
         readonly artifactBytes?: number;
         readonly usage?: { readonly totalTokens: number };
         readonly check?: unknown;
+        readonly durationMs?: number;
+        readonly rounds?: unknown;
         readonly diagnostics?: string;
         readonly reportOmitted?: string;
       }[];
@@ -62,7 +65,10 @@ interface RegisteredTool {
   }>;
 }
 
-async function fixture(t: test.TestContext): Promise<{
+async function fixture(
+  t: test.TestContext,
+  extra: Record<string, unknown> = {},
+): Promise<{
   readonly root: string;
   readonly agentDirectory: string;
   readonly workingDirectory: string;
@@ -75,6 +81,7 @@ async function fixture(t: test.TestContext): Promise<{
   await writeFile(
     join(agentDirectory, "worker-graph.json"),
     JSON.stringify({
+      ...extra,
       schemaVersion: 1,
       stateRoot: "state",
       profiles: {
@@ -338,6 +345,119 @@ test("names each task's check trace beside its report", async (t) => {
   );
 
   assert.deepEqual(result.details.nodes[0]?.check, check);
+});
+
+test("names each task's wall-clock and rounds beside its report", async (t) => {
+  const paths = await fixture(t);
+  const rounds = [
+    { kind: "work" as const, durationMs: 40, blockers: 0 },
+    { kind: "review" as const, durationMs: 20, blockers: 2 },
+  ];
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "finished",
+      status: "succeeded",
+      usage: {
+        turns: 1,
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      durationMs: 60,
+      rounds,
+    });
+    return { output: nodeOutput() };
+  });
+
+  const result = await tool.execute(
+    "call-id",
+    { tasks: [{ id: "task", profile: "writer", assignment: "Work" }] },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.equal(result.details.nodes[0]?.durationMs, 60);
+  assert.deepEqual(result.details.nodes[0]?.rounds, rounds);
+});
+
+function spentUsage(total: number) {
+  return {
+    turns: 1,
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 2,
+    cost: { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total },
+  };
+}
+
+test("a graph that crosses its cost ceiling mid-run is aborted and says why", async (t) => {
+  const paths = await fixture(t, { maxGraphCostUsd: 1 });
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    // The spend lands while both nodes are still running: the ceiling has to
+    // stop a frontier from inside, not wait for it to finish.
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "turn_completed",
+      usage: spentUsage(0.75),
+    });
+    await new Promise((resolve) =>
+      input.signal.addEventListener("abort", resolve, { once: true }),
+    );
+    throw new TaskExecutionFailure("process", undefined, spentUsage(0.75));
+  });
+
+  const result = await tool.execute(
+    "call-id",
+    {
+      tasks: [
+        { id: "a", profile: "writer", assignment: "Work" },
+        { id: "b", profile: "writer", assignment: "Work" },
+      ],
+      concurrency: 2,
+    },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.equal(result.details.status, "aborted");
+  assert.deepEqual(
+    (result.details as unknown as { budgetStop: unknown }).budgetStop,
+    { maxCostUsd: 1, spentUsd: 1.5 },
+  );
+  assert.match(result.content[0]?.text ?? "", /Stopped by the graph budget/u);
+});
+
+test("a graph under its cost ceiling runs as it would without one", async (t) => {
+  const paths = await fixture(t, { maxGraphCostUsd: 1 });
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "finished",
+      status: "succeeded",
+      usage: spentUsage(0.5),
+    });
+    return { output: nodeOutput(), usage: spentUsage(0.5) };
+  });
+
+  const result = await tool.execute(
+    "call-id",
+    { tasks: [{ id: "a", profile: "writer", assignment: "Work" }] },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.equal(result.details.status, "succeeded");
+  assert.equal("budgetStop" in result.details, false);
+  assert.doesNotMatch(result.content[0]?.text ?? "", /graph budget/u);
 });
 
 test("rejects a check with no commands before executing a worker", async (t) => {

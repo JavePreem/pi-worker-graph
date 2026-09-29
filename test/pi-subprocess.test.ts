@@ -2333,3 +2333,108 @@ test("a checked node traces how its check went on its terminal event", async (t)
     [{ failingBefore: 2, commands: 2, runs: 2, outcome: "passed" }],
   );
 });
+
+test("a reviewed node's terminal event traces every round in order", async () => {
+  const seen: PiWorkerProgress[] = [];
+  const usage = {
+    input: 10,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+    cost: {
+      input: 0.01,
+      output: 0.02,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0.03,
+    },
+  };
+  const { result } = await runFakeCycle(
+    [
+      nodeOutput("First attempt"),
+      rejection("Missing null check", "No empty-case test"),
+      nodeOutput("Repaired"),
+      nodeOutput("Clean"),
+    ],
+    reviewedPayload(2),
+    usage,
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const terminal = seen.filter((progress) => progress.phase === "finished");
+  assert.equal(terminal.length, 1);
+  const rounds = terminal[0]?.rounds ?? [];
+  // Convergence is readable per round: two findings, then none.
+  assert.deepEqual(
+    rounds.map((round) => [round.kind, round.blockers]),
+    [
+      ["work", 0],
+      ["review", 2],
+      ["repair", 0],
+      ["review", 0],
+    ],
+  );
+  for (const round of rounds) {
+    assert.equal(round.usage?.cost.total, 0.03);
+    assert.ok(round.durationMs >= 0);
+  }
+  assert.ok((terminal[0]?.durationMs ?? -1) >= 0);
+  // A round's own lifecycle never reads as the node's.
+  assert.equal(
+    seen.filter((progress) => progress.durationMs !== undefined).length,
+    1,
+  );
+});
+
+test("a checked node traces its checks beside its rounds, spending nothing on them", async (t) => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["test -f done"], 2),
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+    undefined,
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const rounds =
+    seen.find((progress) => progress.phase === "finished")?.rounds ?? [];
+  assert.deepEqual(
+    rounds.map((round) => [round.kind, round.blockers]),
+    [
+      ["check_before", 0],
+      ["work", 0],
+      ["check", 1],
+      ["repair", 0],
+      ["check", 0],
+    ],
+  );
+  for (const round of rounds.filter((r) => r.kind.startsWith("check")))
+    assert.equal(round.usage, undefined);
+});
+
+test("an unchecked worker's terminal event carries its wall-clock", async () => {
+  const seen: PiWorkerProgress[] = [];
+  const child = new FakeChild();
+  child.stdin.on("finish", () => {
+    queueMicrotask(() => {
+      child.stdout.end(`${reportEvent(nodeOutput("Done"))}\n`);
+      child.close(0);
+    });
+  });
+  await runPiWorkerProcess(
+    input(new AbortController().signal),
+    { ...options, onProgress: (progress) => seen.push(progress) },
+    {
+      spawnProcess: (() =>
+        child as unknown as ChildProcessWithoutNullStreams) as never,
+      terminateProcessTree: () => {},
+    },
+  );
+  const terminal = seen.find((progress) => progress.phase === "finished");
+  assert.ok((terminal?.durationMs ?? -1) >= 0);
+  assert.equal(terminal?.rounds, undefined);
+});

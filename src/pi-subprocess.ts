@@ -184,6 +184,22 @@ export interface PiCheckTrace {
     | "frozen_changed";
 }
 
+/**
+ * One step of a checked or reviewed node, in the order it ran, so a parent —
+ * and anyone measuring the cycle — can see what each round cost and whether
+ * the rounds were converging, rather than one figure for all of them.
+ *
+ * `blockers` is what the round left open: a worker's own blockers, a
+ * reviewer's findings, or a check's failing commands. Usage is absent on a
+ * check, which spends nothing, and on a round whose telemetry was unusable.
+ */
+export interface PiRoundTrace {
+  readonly kind: "check_before" | "work" | "check" | "review" | "repair";
+  readonly durationMs: number;
+  readonly blockers: number;
+  readonly usage?: PiWorkerUsage;
+}
+
 export interface PiWorkerProgress {
   readonly taskId: string;
   readonly phase: PiWorkerProgressPhase;
@@ -191,6 +207,10 @@ export interface PiWorkerProgress {
   readonly status?: "succeeded" | "failed" | "aborted";
   readonly usage: PiWorkerUsage;
   readonly check?: PiCheckTrace;
+  /** Terminal events only: the whole node's wall-clock. */
+  readonly durationMs?: number;
+  /** Terminal events of checked or reviewed nodes only. */
+  readonly rounds?: readonly PiRoundTrace[];
 }
 
 export interface PiSubprocessExecutorOptions {
@@ -1005,6 +1025,7 @@ async function runNormalizedPiWorkerProcess(
     let progressEvents = 0;
     let terminalProgressEmitted = false;
 
+    const startedAt = Date.now();
     const emitProgress = (
       phase: PiWorkerProgressPhase,
       fields: Pick<PiWorkerProgress, "tool" | "status"> = {},
@@ -1025,6 +1046,7 @@ async function runNormalizedPiWorkerProcess(
         phase,
         ...fields,
         usage: immutableUsage(accumulated.usage),
+        ...(terminal ? { durationMs: Date.now() - startedAt } : {}),
       });
       try {
         options.onProgress(progress);
@@ -1578,7 +1600,7 @@ function roundProgress(
         forward({ ...progress, usage });
         return;
       }
-      const { status: _status, ...rest } = progress;
+      const { status: _status, durationMs: _durationMs, ...rest } = progress;
       forward({ ...rest, phase: "turn_completed", usage });
     },
   };
@@ -1662,6 +1684,23 @@ async function runPiReviewCycle(
    */
   let terminalEmitted = false;
   let trace: PiCheckTrace | undefined;
+  const startedAt = Date.now();
+  const rounds: PiRoundTrace[] = [];
+  const traceRound = (
+    kind: PiRoundTrace["kind"],
+    since: number,
+    blockers: number,
+    usage?: TaskUsage,
+  ): void => {
+    rounds.push(
+      Object.freeze({
+        kind,
+        durationMs: Date.now() - since,
+        blockers,
+        ...(usage === undefined ? {} : { usage: immutableUsage(usage) }),
+      }),
+    );
+  };
   const notify = (status: "succeeded" | "failed" | "aborted"): void => {
     if (options.onProgress === undefined || terminalEmitted) return;
     terminalEmitted = true;
@@ -1671,6 +1710,8 @@ async function runPiReviewCycle(
       status,
       usage: withReview(running),
       ...(trace === undefined ? {} : { check: Object.freeze({ ...trace }) }),
+      durationMs: Date.now() - startedAt,
+      rounds: Object.freeze([...rounds]),
     });
     try {
       options.onProgress(progress);
@@ -1758,9 +1799,11 @@ async function runPiReviewCycle(
         });
       }
     }
+    const checkStarted = Date.now();
     const before = await runCheck(check, input.workingDirectory, input.signal);
     if (input.signal.aborted) return cancelled();
     const findings = unjudgeableFindings(check, before);
+    traceRound("check_before", checkStarted, findings.length);
     trace = {
       failingBefore: before.filter((finding) => finding !== undefined).length,
       commands: check.commands.length,
@@ -1772,11 +1815,38 @@ async function runPiReviewCycle(
 
   // The work round runs without its own review policy: a worker is told what to
   // build, never that something will check it.
-  let work = await runNormalizedPiWorkerProcess(
-    withPayload(input, stripReview(payload)),
-    roundProgress(options, running, true),
-    dependencies,
-  ).catch(failed(false));
+  /**
+   * Runs one model round and traces it, whichever way it ends: a round that
+   * throws is traced with the spend its failure carried before the cycle
+   * settles on it.
+   */
+  const runRound = async (
+    kind: "work" | "repair" | "review",
+    next: PiWorkerTaskPayload,
+    session?: PiChildSession,
+  ): Promise<TaskExecutionResult> => {
+    const since = Date.now();
+    try {
+      const result = await runNormalizedPiWorkerProcess(
+        withPayload(input, next),
+        roundProgress(options, running, kind === "work"),
+        dependencies,
+        session,
+      );
+      traceRound(kind, since, result.output.blockers.length, result.usage);
+      return result;
+    } catch (error) {
+      traceRound(
+        kind,
+        since,
+        0,
+        error instanceof TaskExecutionFailure ? error.usage : undefined,
+      );
+      throw error;
+    }
+  };
+
+  let work = await runRound("work", stripReview(payload)).catch(failed(false));
   spend(work.usage, false);
 
   const repair = async (
@@ -1792,11 +1862,7 @@ async function runPiReviewCycle(
     ) {
       return false;
     }
-    work = await runNormalizedPiWorkerProcess(
-      withPayload(input, next),
-      roundProgress(options, running, false),
-      dependencies,
-    ).catch(failed(false));
+    work = await runRound("repair", next).catch(failed(false));
     spend(work.usage, false);
     return true;
   };
@@ -1833,6 +1899,7 @@ async function runPiReviewCycle(
         }
       }
       checks += 1;
+      const checkStarted = Date.now();
       const outcomes = await runCheck(
         check,
         input.workingDirectory,
@@ -1842,6 +1909,7 @@ async function runPiReviewCycle(
       const findings = outcomes.filter(
         (finding): finding is string => finding !== undefined,
       );
+      traceRound("check", checkStarted, findings.length);
       trace = {
         ...trace,
         runs: checks,
@@ -1871,18 +1939,14 @@ async function runPiReviewCycle(
         () => undefined,
       );
     }
-    const review = await runNormalizedPiWorkerProcess(
-      withPayload(
-        input,
-        reviewPayload(
-          payload,
-          policy,
-          reviews,
-          session !== undefined && reviews > 1,
-        ),
+    const review = await runRound(
+      "review",
+      reviewPayload(
+        payload,
+        policy,
+        reviews,
+        session !== undefined && reviews > 1,
       ),
-      roundProgress(options, running, false),
-      dependencies,
       session,
     ).catch(failed(true));
     spend(review.usage, true);

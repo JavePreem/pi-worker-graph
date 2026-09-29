@@ -420,6 +420,15 @@ creation can never leave a slot that holds capacity without naming its owner.
 Reaching the limit rejects the new graph; run state is never deleted
 automatically.
 
+An optional `maxGraphCostUsd` caps what one `worker_graph` call may spend, in
+the providers' own cost estimate. It counts cost rather than tokens, because
+one graph mixes models whose token prices differ widely. It is checked against
+every worker's live progress, so a single long node cannot spend past it
+unseen. The first update that takes the graph's total over the ceiling aborts
+every node still running. Completed work stays in the checkout, and the result
+says the budget stopped the graph. The spend can overshoot by the turn in
+flight when the ceiling is crossed. Without the field there is no ceiling.
+
 A creation interrupted between claiming its slot and publishing its run leaves
 the slot claimed. `/swarm runs` names everything holding capacity — each run
 with its slot and creation time, a slot whose run was never published, and a

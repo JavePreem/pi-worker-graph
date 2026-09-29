@@ -640,6 +640,14 @@ What remains, in order:
    a long specification. The saving is unmeasured; estimated at $0.4-0.6 on
    that cell.
 
+   **Each node now reports its wall-clock and its rounds.** Every node's
+   entry in the parent's result carries `durationMs`. A checked or reviewed
+   node also carries `rounds`: each `check_before`, work, check, review, and
+   repair step in order, with its own duration, usage, and open blockers. The
+   per-round splits above had to be inferred from cache-write spikes; these
+   make them direct. Rounds are dropped before the report when the result is
+   short of room.
+
    What is left, in order:
 
    1. Tests-first on cold start. Built as a trial-only arm,
@@ -766,24 +774,36 @@ event (`src/store.ts`), which the parent and other workers can read — and a
 retained artifact for the long form of what it saw. Neither is the terminal
 report, so the question stands; it is no longer a dead end.
 
-## Deferred budget work
+## Budget
 
-**Backlogged deliberately.** Nothing currently needs a ceiling badly enough to
-buy one: a graph is bounded per task by its timeout, and the operator watching
-a run is the enforcement. It moves up the list only when something runs graphs
-unattended.
+Built 2026-09-29, once the bench measured a need for it. In the
+`graph-luna-tests-reviewed` cell, the parent's session total stood at $0.14
+for five minutes while a single node spent $1.32, which reached the session
+only when the graph returned. Neither the bench's cap nor an operator could see
+that spend, let alone stop it; only the node's timeout bounded it.
 
-Usage is now recorded but nothing acts on it. The runtime bounds tasks,
-concurrency, payload, output, context, and per-task runtime; it has no token or
-cost ceiling, so a graph can spend without limit as long as each worker stays
-inside its timeout.
+`maxGraphCostUsd` in `worker-graph.json` is checked in the orchestrator on
+every worker's live progress, and enforced through the runner's existing abort
+path. The two open questions are settled:
 
-The next slice is a configured budget in `worker-graph.json`, checked in the
-runner between frontiers and enforced through the existing abort path, which
-already settles remaining nodes and returns a result with usage intact. Two
-things to settle first: whether the budget counts tokens or cost — cost is the
-provider's estimate, tokens are the sturdy number — and whether crossing it
-aborts the graph or only refuses to open the next frontier.
+- **Cost, not tokens.** One graph mixes models whose token prices differ
+  twentyfold (sol and luna), so a token ceiling would mean something
+  different for every graph. Cost is the provider's estimate, and is what the
+  operator is actually limiting.
+- **It aborts running nodes; it does not wait for the frontier.** A check
+  between frontiers would not have stopped the one-frontier node above.
+
+The spend a stop records can overshoot by the turn in flight. A worker whose
+telemetry is unusable reports zero progress usage, so it is under-counted
+rather than refused.
+
+The bench passes each cell's `--cap` as the graph arms' `maxGraphCostUsd`
+(`bench/arms.mjs` `workerGraphConfig`). The harness's own poll still covers
+the parent session.
+
+The build with reviewer sessions, round traces, and the budget is packed as
+`handoff/builds/review-sessions-traces-budget-2026-09-29.tgz` (gitignored,
+hash in `SHA256SUMS`). No cell has run on it yet.
 
 ## Deferred attempt and recovery work
 

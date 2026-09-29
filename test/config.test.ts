@@ -102,6 +102,37 @@ test("loads and bounds an explicit retained-run limit", async (t) => {
   }
 });
 
+test("loads an optional graph cost ceiling and rejects one that is not a positive amount", async (t) => {
+  const paths = await directories(t);
+  await writeConfiguration(paths.agentDirectory, validConfiguration());
+  assert.equal(
+    "maxGraphCostUsd" in (await loadWorkerGraphConfiguration(paths)),
+    false,
+  );
+
+  await writeConfiguration(paths.agentDirectory, {
+    ...(validConfiguration() as object),
+    maxGraphCostUsd: 1.5,
+  });
+  assert.equal(
+    (await loadWorkerGraphConfiguration(paths)).maxGraphCostUsd,
+    1.5,
+  );
+
+  for (const maxGraphCostUsd of [0, -1, "1", null, 2e9]) {
+    await writeConfiguration(paths.agentDirectory, {
+      ...(validConfiguration() as object),
+      maxGraphCostUsd,
+    });
+    await assert.rejects(
+      loadWorkerGraphConfiguration(paths),
+      (error: unknown) =>
+        error instanceof WorkerGraphConfigurationError &&
+        error.code === "invalid",
+    );
+  }
+});
+
 test("rejects state roots inside the target checkout", async (t) => {
   const paths = await directories(t);
   await writeConfiguration(

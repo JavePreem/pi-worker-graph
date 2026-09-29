@@ -19,6 +19,7 @@ import {
   parsePiWorkerProfiles,
 } from "./pi-subprocess.js";
 import { RUN_STORE_DEFAULT_MAX_RUNS, RUN_STORE_MAX_RUNS } from "./store.js";
+import { TASK_USAGE_LIMITS } from "./usage.js";
 
 export const WORKER_GRAPH_CONFIG_FILENAME = "worker-graph.json";
 export const WORKER_GRAPH_DEFAULT_STATE_DIRECTORY = "worker-graph";
@@ -30,6 +31,7 @@ const CONFIG_FIELDS = new Set([
   "maxRetainedRuns",
   "orchestrator",
   "profiles",
+  "maxGraphCostUsd",
 ]);
 const MAX_PATH_BYTES = 4 * 1024;
 
@@ -69,6 +71,12 @@ export interface WorkerGraphConfiguration {
    */
   readonly orchestrator?: PiOrchestratorProfile;
   readonly profiles: Readonly<Record<string, PiWorkerProfile>>;
+  /**
+   * The most one `worker_graph` call may spend, in the providers' own cost
+   * estimate. Cost rather than tokens, because a graph mixes models whose
+   * token prices differ twentyfold. Absent means no ceiling.
+   */
+  readonly maxGraphCostUsd?: number;
 }
 
 export interface LoadWorkerGraphConfigurationOptions {
@@ -219,11 +227,22 @@ function parseConfiguration(
   ) {
     throw new WorkerGraphConfigurationError("invalid");
   }
+  const maxGraphCostUsd = value.maxGraphCostUsd;
+  if (
+    maxGraphCostUsd !== undefined &&
+    (typeof maxGraphCostUsd !== "number" ||
+      !Number.isFinite(maxGraphCostUsd) ||
+      maxGraphCostUsd <= 0 ||
+      maxGraphCostUsd > TASK_USAGE_LIMITS.maxCost)
+  ) {
+    throw new WorkerGraphConfigurationError("invalid");
+  }
   return Object.freeze({
     stateRoot,
     maxRetainedRuns,
     ...(orchestrator === undefined ? {} : { orchestrator }),
     profiles,
+    ...(maxGraphCostUsd === undefined ? {} : { maxGraphCostUsd }),
   });
 }
 
