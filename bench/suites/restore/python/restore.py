@@ -282,7 +282,8 @@ def pytest_runtest_protocol(item, nextitem):
 
 def grade(checkout, out, tests, options):
     """Runs the pinned tests, each under a time limit, so a body that never
-    returns fails its test instead of hanging the grade."""
+    returns fails its test instead of hanging the grade. Bytecode goes to a
+    cache of the grade's own: none the agent left in the checkout is read."""
     scratch = tempfile.mkdtemp()
     with open(os.path.join(scratch, "restore_timeout.py"), "w") as handle:
         handle.write(f"LIMIT = {TEST_TIMEOUT_S}\n{TIMEOUT}")
@@ -290,6 +291,7 @@ def grade(checkout, out, tests, options):
     env = dict(
         os.environ,
         PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPYCACHEPREFIX=os.path.join(scratch, "bytecode"),
         PYTHONPATH=os.pathsep.join([checkout, scratch]),
     )
     subprocess.run(

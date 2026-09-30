@@ -43,7 +43,7 @@
       "test/test_tokenize.py": "pass: 208/208 passed",
       "test/test_utils.py": "pass: 35/35 passed"
     },
-    "total_s": 6
+    "total_s": 7
   },
   {
     "task": "parso-cluster-20",
@@ -71,6 +71,6 @@
       "test/test_tokenize.py": "pass: 208/208 passed",
       "test/test_utils.py": "pass: 35/35 passed"
     },
-    "total_s": 6
+    "total_s": 7
   }
 ]

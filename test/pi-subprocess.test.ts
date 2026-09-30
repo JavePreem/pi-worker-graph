@@ -2328,6 +2328,79 @@ test("what the check writes into a frozen path is not a worker's change", async 
   assert.deepEqual(settled.output.blockers, []);
 });
 
+test("bytecode a worker's own test runs leave in a frozen path is not an edit", async (t) => {
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Done")],
+    checkedPayload(["test -f done"], 1, { frozen: ["spec"] }),
+    (round, checkout) => {
+      writeDone(round, checkout);
+      mkdirSync(join(checkout, "spec", "__pycache__"));
+      writeFileSync(join(checkout, "spec", "__pycache__", "t.pyc"), "");
+    },
+    undefined,
+    undefined,
+    (checkout) => mkdirSync(join(checkout, "spec")),
+  );
+  assert.deepEqual((await result).output.blockers, []);
+});
+
+test("a file a worker adds to a frozen path is an edit", async (t) => {
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Done")],
+    checkedPayload(["test -f done"], 1, { frozen: ["spec"] }),
+    (round, checkout) => {
+      writeDone(round, checkout);
+      writeFileSync(join(checkout, "spec", "conftest.py"), "");
+    },
+    undefined,
+    undefined,
+    (checkout) => mkdirSync(join(checkout, "spec")),
+  );
+  assert.match(
+    (await result).output.blockers[0] as string,
+    /A frozen path changed while this task ran: spec/u,
+  );
+});
+
+test("a check keeps Python's bytecode out of the checkout", async (t) => {
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Done")],
+    checkedPayload(
+      [
+        'case "$PYTHONPYCACHEPREFIX" in "" | "$PWD"*) exit 2 ;; esac; test -f done',
+      ],
+      1,
+    ),
+    writeDone,
+  );
+  assert.deepEqual((await result).output.blockers, []);
+});
+
+test("a check that cannot isolate Python's bytecode fails instead of running", async (t) => {
+  const previous = process.env.TMPDIR;
+  t.after(() => {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  });
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Done")],
+    checkedPayload(["test -f done"], 1),
+    (round, checkout) => {
+      writeDone(round, checkout);
+      // Only the check after the work loses its temporary directory.
+      process.env.TMPDIR = join(checkout, "missing", "tmp");
+    },
+  );
+  assert.match(
+    (await result).output.blockers[0] as string,
+    /No directory for Python's bytecode cache could be created/u,
+  );
+});
+
 test("a checked node traces how its check went on its terminal event", async (t) => {
   const seen: PiWorkerProgress[] = [];
   const { result } = await runCheckedCycle(

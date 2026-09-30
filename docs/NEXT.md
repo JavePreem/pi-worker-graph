@@ -758,7 +758,10 @@ What remains, in order:
         $1.45, in 17 minutes against 4, two one-node graphs.
         `parso-cluster-20` stopped at its 30 minutes, 1874/1988, $0.760: the
         first node failed on `__pycache__` written into a frozen directory,
-        and two of the other three hunted for an upstream copy.
+        and two of the other three hunted for an upstream copy. A re-run with
+        the first frozen fix stopped at the limit too, 1760/1988, $1.017;
+        workers' own imports still wrote `__pycache__`. Fixed in
+        `frozen-bytecode-2-2026-09-30.tgz`; not yet re-run.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the

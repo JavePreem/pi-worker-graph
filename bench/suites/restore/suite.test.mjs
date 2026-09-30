@@ -202,4 +202,5 @@ test("the prompt names every gutted function and the command that judges them", 
     /python3 -m pytest test\.py --deselect=test\.py::EngineTestCase\n/,
   );
   assert.match(preamble, /restored to their original state/);
+  assert.match(preamble, /No other copy of the library exists/);
 });

@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, readlink } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 /**
@@ -35,7 +43,10 @@ export interface CheckPolicy {
   readonly commands: readonly string[];
   readonly maxRounds: number;
   readonly before?: CheckBefore;
-  /** Repository-relative paths the work must leave byte-identical. */
+  /**
+   * Repository-relative paths the work must leave byte-identical, bytecode
+   * caches aside (`fingerprintPaths`).
+   */
   readonly frozen?: readonly string[];
 }
 
@@ -55,6 +66,7 @@ export function isContainedPath(path: string): boolean {
 function runCommand(
   command: string,
   workingDirectory: string,
+  env: NodeJS.ProcessEnv,
   signal: AbortSignal,
 ): Promise<string | undefined> {
   return new Promise((resolve) => {
@@ -67,6 +79,7 @@ function runCommand(
     };
     const child = spawn(command, {
       cwd: workingDirectory,
+      env,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -117,16 +130,36 @@ function runCommand(
  * All of them run even after one fails, so a repair round sees every failing
  * check at once rather than discovering them one round at a time. They run in
  * sequence because two test commands in one checkout can collide.
+ *
+ * Python's bytecode cache is kept in a directory of the check's own, so the
+ * check neither reads bytecode a worker left in the checkout nor writes its
+ * own there. That is what lets `fingerprintPaths` pass over `__pycache__`.
+ * Without that directory no command runs: each fails, rather than running
+ * where planted bytecode could pass it.
  */
 export async function runCheck(
   policy: CheckPolicy,
   workingDirectory: string,
   signal: AbortSignal,
 ): Promise<readonly (string | undefined)[]> {
+  const bytecode = await mkdtemp(
+    join(tmpdir(), "pi-worker-graph-check-"),
+  ).catch(() => undefined);
+  if (bytecode === undefined) {
+    return policy.commands.map(
+      (command) =>
+        `Check command could not start: ${command}\nNo directory for Python's bytecode cache could be created under ${tmpdir()}.`,
+    );
+  }
+  const env = { ...process.env, PYTHONPYCACHEPREFIX: bytecode };
   const outcomes: (string | undefined)[] = [];
-  for (const command of policy.commands) {
-    if (signal.aborted) break;
-    outcomes.push(await runCommand(command, workingDirectory, signal));
+  try {
+    for (const command of policy.commands) {
+      if (signal.aborted) break;
+      outcomes.push(await runCommand(command, workingDirectory, env, signal));
+    }
+  } finally {
+    await rm(bytecode, { recursive: true, force: true }).catch(() => {});
   }
   return outcomes;
 }
@@ -135,6 +168,11 @@ export async function runCheck(
  * Fingerprints each frozen path: a file by its bytes, a symbolic link by its
  * target (never followed), a directory by every entry beneath it, and a
  * missing path as missing, so creating it counts as a change.
+ *
+ * A directory's `__pycache__` entries are passed over. Python writes bytecode
+ * there for every module it imports, so a worker that only runs the tests
+ * would otherwise count as editing them, and the check reads none of it
+ * (`runCheck`). Any other new entry, such as a `conftest.py`, is a change.
  *
  * Throws when a directory holds more than `maxFrozenFiles` entries: a
  * fingerprint that silently covered part of a tree would pass tampering with
@@ -155,7 +193,9 @@ export async function fingerprintPaths(
     if (stats.isSymbolicLink()) return `link:${await readlink(absolute)}`;
     if (stats.isDirectory()) {
       const hash = createHash("sha256");
-      const names = (await readdir(absolute)).sort();
+      const names = (await readdir(absolute))
+        .filter((name) => name !== "__pycache__")
+        .sort();
       for (const name of names) {
         hash.update(`${name}\0${await fingerprint(join(absolute, name))}\0`);
       }

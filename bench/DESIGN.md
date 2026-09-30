@@ -1996,10 +1996,11 @@ module has exactly 20 candidates, so 20 is its ceiling.
 data and pytest configuration alike, then the pinned test files run with
 `--continue-on-collection-errors`, so one file that cannot import does not
 fail the rest unseen. Each test runs under a 60 s limit, so a body that never
-returns fails its test instead of hanging the grade. Each test file is a
-target; resolved means every test passes. The self-test puts the original
-bodies back and grades all four tasks resolved; the gutted checkouts grade
-unresolved. Each checkout holds one commit, so no history carries the
+returns fails its test instead of hanging the grade. Bytecode is cached in a
+directory of the grade's own, so no `.pyc` the agent left in the checkout is
+read. Each test file is a target; resolved means every test passes. The
+self-test puts the original bodies back and grades all four tasks resolved;
+the gutted checkouts grade unresolved. Each checkout holds one commit, so no history carries the
 originals.
 
 python-chess's `EngineTestCase` is deselected in the agent's command, the
@@ -2109,14 +2110,41 @@ each, all failed:
   and `python3 -m pytest test` writes 24 `__pycache__` entries under `test`
   and nothing else (reproduced in the image). Any Python test directory
   named frozen fails this way; chess froze the single file `test.py`. Fixed
-  2026-09-30: the fingerprint is taken after the check's first run, so what
-  the commands write themselves is baseline. Graph cells from then on use
-  `handoff/builds/frozen-after-check-2026-09-30.tgz`.
+  2026-09-30 in two steps. First the fingerprint was taken after the
+  check's first run (`handoff/builds/frozen-after-check-2026-09-30.tgz`);
+  that was not enough, below. Then the fingerprint passes over `__pycache__`,
+  and check commands run with `PYTHONPYCACHEPREFIX` in a directory of their
+  own, so the check neither reads bytecode left in the checkout nor writes
+  any there. If that directory cannot be made, the check fails rather than
+  run without it. A new file such as a `conftest.py` in a frozen directory
+  still fails the node. Build:
+  `handoff/builds/frozen-bytecode-2-2026-09-30.tgz`. Without the prefix a
+  planted unchecked-hash `.pyc` runs in place of its source (shown in the
+  image), which is why the cache is moved, not only ignored.
 - `authoritative-restore`, frozen on one test file, used all four rounds and
   failed ($0.215, 140 turns, 11 minutes).
 - `fetch-upstream` and `local-source-recovery` were told to fetch parso from
   the network or find a copy on disk. Neither exists, and they spent $0.289
   and 15 minutes before the limit.
+
+**Re-run with the first fix**, same cap and time: stopped at the limit
+again, 1760/1988 and 17/20 files, $1.017. The frozen fix held for the check's
+own run but not for the workers': a plain import of a test module and a
+pytest recompile wrote two new files under `test/__pycache__`, and
+`repair-errors` failed on `frozen_changed` again. The parent's nodes:
+
+- `restore-errors` (worker): three check runs, still failing, $0.332, 133
+  turns, 19 minutes.
+- `diagnose-errors` (`reviewer` profile, so sol): a read-only diagnosis,
+  $0.392 in 10 turns.
+- `repair-errors` (worker): `frozen_changed`, $0.075.
+- `exact-upstream-restore` (worker), told to find or fetch an upstream copy:
+  cut off by the limit, $0.087.
+
+Luna $0.494 and sol $0.523 (parent $0.131, reviewer node $0.392). The suite
+prompt now says no other copy exists or can be downloaded: every arm probed
+for one (2-6 commands in each solo cell), but only the graph parent spent
+whole nodes on it. Cells before 2026-09-30 evening ran without that line.
 
 ```bash
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore

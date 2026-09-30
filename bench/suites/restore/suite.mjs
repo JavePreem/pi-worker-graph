@@ -92,7 +92,8 @@ be installed.
 
 Some of the library's functions have had their bodies removed: each now
 raises NotImplementedError. Re-implement every one of them so that the
-library's own test suite passes again.
+library's own test suite passes again. No other copy of the library exists
+in the container or its history, and none can be downloaded.
 
 The tests are the acceptance. They are restored to their original state
 before grading, so changing them changes nothing. Run them from ${TESTBED}

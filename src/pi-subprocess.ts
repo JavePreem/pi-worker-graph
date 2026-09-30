@@ -1796,8 +1796,8 @@ async function runPiReviewCycle(
     };
     if (findings.length > 0) return settle({ output: unjudgeable(findings) });
     // After the check's first run, not before it: what the commands write
-    // themselves, such as a test runner's bytecode cache beside the tests, is
-    // then part of the baseline rather than a change the worker is failed for.
+    // themselves is then part of the baseline rather than a change the worker
+    // is failed for.
     if (check.frozen !== undefined) {
       frozenBefore = await fingerprint(check.frozen);
       if (frozenBefore === undefined) {
