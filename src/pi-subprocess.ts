@@ -1783,22 +1783,6 @@ async function runPiReviewCycle(
   // judge would otherwise accept work it never examined.
   let frozenBefore: ReadonlyMap<string, string> | undefined;
   if (check !== undefined) {
-    if (check.frozen !== undefined) {
-      frozenBefore = await fingerprint(check.frozen);
-      if (frozenBefore === undefined) {
-        trace = {
-          failingBefore: 0,
-          commands: check.commands.length,
-          runs: 0,
-          outcome: "unjudgeable",
-        };
-        return settle({
-          output: unjudgeable([
-            `The frozen paths could not be fingerprinted; together they may hold at most ${CHECK_LIMITS.maxFrozenFiles} files.`,
-          ]),
-        });
-      }
-    }
     const checkStarted = Date.now();
     const before = await runCheck(check, input.workingDirectory, input.signal);
     if (input.signal.aborted) return cancelled();
@@ -1811,6 +1795,20 @@ async function runPiReviewCycle(
       outcome: findings.length === 0 ? "not_run" : "unjudgeable",
     };
     if (findings.length > 0) return settle({ output: unjudgeable(findings) });
+    // After the check's first run, not before it: what the commands write
+    // themselves, such as a test runner's bytecode cache beside the tests, is
+    // then part of the baseline rather than a change the worker is failed for.
+    if (check.frozen !== undefined) {
+      frozenBefore = await fingerprint(check.frozen);
+      if (frozenBefore === undefined) {
+        trace = { ...trace, outcome: "unjudgeable" };
+        return settle({
+          output: unjudgeable([
+            `The frozen paths could not be fingerprinted; together they may hold at most ${CHECK_LIMITS.maxFrozenFiles} files.`,
+          ]),
+        });
+      }
+    }
   }
 
   // The work round runs without its own review policy: a worker is told what to

@@ -2066,7 +2066,57 @@ polyglot bundles: 4-10 test runs, then a summary that names the remaining
 failures ("the task is not yet fully complete"). On `parso-spread-20` it
 re-implemented 16 of the 20. Every tool error was a failing test run or an
 edit that did not match, none a harness fault. Luna's half of criterion 1
-holds on all four; `solo-sol` is unmeasured.
+holds on all four.
+
+**`solo-sol`, 2026-09-30**, $2.50 cap and 25 minutes:
+
+| task | tests passing | files passing | cost | time |
+| --- | --- | --- | --- | --- |
+| `chess-cluster-20` | 247/247, resolved | 1/1 | $1.45 | 4 min |
+| `parso-spread-20` | 1575/1988, stopped at the cap | 5/20 | $2.65 | 6 min |
+| `parso-cluster-20` | 1988/1988, resolved ($4 cap) | 20/20 | $2.13 | 7 min |
+
+`parso-cluster-20` meets criteria 1 and 2 too: luna 1740/1988 for $0.052,
+sol resolved in 58 turns. `chess-cluster-20` meets criteria 1 and 2: luna 192/247 for $0.048, sol
+resolved for $1.45, all 20 re-implemented and the suite run six times. On
+`parso-spread-20` sol spent its cap in 73 turns, 4.3M tokens read from cache,
+so whether it resolves the task is unmeasured.
+
+**`graph-luna` on `chess-cluster-20`, 2026-09-30**, $2.50 cap and 25
+minutes: resolved, 247/247, for $0.514 in 17 minutes. That is 0.36 of solo
+sol's cost at 4x its time. The parent made two `worker_graph` calls of one
+node each (`graphSizes` [1, 1]), so there was no fan-out:
+
+- `restore-chess-core`: the 20 bodies, then one repair round, still failing
+  at its `maxRounds` of 2. $0.105 of luna, 91 turns.
+- `repair-exact-upstream`: two repair rounds, passing. $0.174 of luna, 121
+  turns.
+
+Luna was $0.279 of the cell and the sol parent $0.235. The saving came from
+the check loop holding luna to the command it quits on when alone, not from
+parallel work. The parent told both workers to look for pristine copies in
+git objects, site-packages and pip caches; the image holds none (searched
+2026-09-30), and the checkout has one commit.
+
+**`graph-luna` on `parso-cluster-20`, 2026-09-30**, $2.25 cap and 30
+minutes: stopped at the time limit, 1874/1988 and 17/20 files, for $0.760
+(luna $0.539, the sol parent $0.221). Four `worker_graph` calls of one node
+each, all failed:
+
+- `restore-errors` wrote all 20 bodies ($0.035, 36 turns) and failed on
+  `frozen_changed: test` without touching a test. The frozen paths are
+  fingerprinted before the check's own first run (`src/pi-subprocess.ts`),
+  and `python3 -m pytest test` writes 24 `__pycache__` entries under `test`
+  and nothing else (reproduced in the image). Any Python test directory
+  named frozen fails this way; chess froze the single file `test.py`. Fixed
+  2026-09-30: the fingerprint is taken after the check's first run, so what
+  the commands write themselves is baseline. Graph cells from then on use
+  `handoff/builds/frozen-after-check-2026-09-30.tgz`.
+- `authoritative-restore`, frozen on one test file, used all four rounds and
+  failed ($0.215, 140 turns, 11 minutes).
+- `fetch-upstream` and `local-source-recovery` were told to fetch parso from
+  the network or find a copy on disk. Neither exists, and they spent $0.289
+  and 15 minutes before the limit.
 
 ```bash
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore

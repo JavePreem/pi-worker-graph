@@ -2313,6 +2313,21 @@ test("a worker that edits a frozen path fails its node even when the check passe
   );
 });
 
+test("what the check writes into a frozen path is not a worker's change", async (t) => {
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("Done")],
+    checkedPayload(["touch spec/cache; test -f done"], 1, { frozen: ["spec"] }),
+    writeDone,
+    undefined,
+    undefined,
+    (checkout) => mkdirSync(join(checkout, "spec")),
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Done");
+  assert.deepEqual(settled.output.blockers, []);
+});
+
 test("a checked node traces how its check went on its terminal event", async (t) => {
   const seen: PiWorkerProgress[] = [];
   const { result } = await runCheckedCycle(

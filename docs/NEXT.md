@@ -750,8 +750,15 @@ What remains, in order:
       tasks self-test resolved.
       - `solo-luna` on all four tasks. A task luna resolves is out. Done
         2026-09-30: failed all four, $0.235 in all.
-      - `solo-sol` only on the tasks luna failed.
-      - `graph-luna` only where luna failed and sol resolved.
+      - `solo-sol` only on the tasks luna failed. Done on two, 2026-09-30:
+        `chess-cluster-20` resolved for $1.45; `parso-spread-20` stopped at
+        its $2.50 cap at 1575/1988. `parso-cluster-20` resolved for $2.13.
+      - `graph-luna` only where luna failed and sol resolved. Done on
+        `chess-cluster-20`, 2026-09-30: resolved for $0.514 against sol's
+        $1.45, in 17 minutes against 4, two one-node graphs.
+        `parso-cluster-20` stopped at its 30 minutes, 1874/1988, $0.760: the
+        first node failed on `__pycache__` written into a frozen directory,
+        and two of the other three hunted for an upstream copy.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the
