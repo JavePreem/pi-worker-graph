@@ -742,11 +742,16 @@ What remains, in order:
       - `jsonpath` on all three arms, as a third specification-only task.
       - A repeat of `solo-sol` and `graph-luna` on `jmespath`, for a first
         look at variance. 875 against 862 is 13 cases in 891.
-   6. Screen the `restore` suite (`bench/DESIGN.md` **The restore suite**):
-      `solo-luna`, `solo-sol` and `graph-luna` on `toolz-spread-12` and
-      `toolz-cluster-12`. It tests whether the test-backed saving survives
-      real code with shared modules, and where coupling hands the win back to
-      solo sol. Built and self-tested; no cell has run.
+   6. Screen the `restore` suite (`bench/DESIGN.md` **The restore suite**),
+      cheapest question first. It tests whether the test-backed saving
+      survives real code with shared modules, and where coupling hands the
+      win back to solo sol. Rebuilt 2026-09-30 on python-chess and parso after
+      a `solo-luna` smoke cell resolved the toolz build for $0.027; the four
+      tasks self-test resolved.
+      - `solo-luna` on all four tasks. A task luna resolves is out. Done
+        2026-09-30: failed all four, $0.235 in all.
+      - `solo-sol` only on the tasks luna failed.
+      - `graph-luna` only where luna failed and sol resolved.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the

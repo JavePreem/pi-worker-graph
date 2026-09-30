@@ -1,6 +1,6 @@
 """Builds and grades restore tasks: a real library with some functions gutted.
 
-    python3 restore.py trace <checkout> <package> <out.json> <test-path>...
+    python3 restore.py trace <checkout> <package> <out.json> <test>...
         Run the library's tests with a profiler and record every function of
         the package they call, as {"path": [first line, ...]}. Runs in the task
         image, so the Python that decides what is covered is the one that
@@ -14,10 +14,11 @@
         starting from the function with the most calls to its neighbours and
         growing along those calls), which is the coupling the suite varies.
 
-    python3 restore.py grade <checkout> <out.json> <test-path>...
+    python3 restore.py grade <checkout> <out.json> <test>...
         Run the pinned tests and report {"groups": {test file: {"passed",
         "total", "failures"}}}, the shape `targetStates` reads.
 
+A <test> is a test path, or `--deselect=<node id>` for tests left out of both.
 Standard library only: `trace` and `grade` run inside the task image.
 """
 
@@ -231,7 +232,7 @@ def profiled(checkout, package, command, what):
         return json.load(handle)
 
 
-def trace(checkout, package, out, tests):
+def trace(checkout, package, out, tests, options):
     """Records what the tests call, and what merely importing the package
     calls. A function run at import time is never gutted: gutting it breaks
     every import, so no test could run at all.
@@ -254,21 +255,49 @@ def trace(checkout, package, out, tests):
         checkout,
         package,
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "-p", "restore_trace", *tests],
+         "-p", "restore_trace", *options, *tests],
         "the pristine tests",
     )
     with open(out, "w") as handle:
         json.dump({"covered": covered, "import": at_import}, handle)
 
 
-def grade(checkout, out, tests):
-    report = os.path.join(tempfile.mkdtemp(), "report.xml")
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=checkout)
+TEST_TIMEOUT_S = int(os.environ.get("RESTORE_TEST_TIMEOUT_S", "60"))
+
+TIMEOUT = """
+import signal, pytest
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    def expire(signum, frame):
+        pytest.fail("ran over %d s" % LIMIT, pytrace=False)
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(LIMIT)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+"""
+
+
+def grade(checkout, out, tests, options):
+    """Runs the pinned tests, each under a time limit, so a body that never
+    returns fails its test instead of hanging the grade."""
+    scratch = tempfile.mkdtemp()
+    with open(os.path.join(scratch, "restore_timeout.py"), "w") as handle:
+        handle.write(f"LIMIT = {TEST_TIMEOUT_S}\n{TIMEOUT}")
+    report = os.path.join(scratch, "report.xml")
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=os.pathsep.join([checkout, scratch]),
+    )
     subprocess.run(
         # One file that cannot be collected must not stop the others from
         # running, or a single broken import grades as every test failing.
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "--continue-on-collection-errors", f"--junitxml={report}", *tests],
+         "-p", "restore_timeout", "--continue-on-collection-errors",
+         f"--junitxml={report}", *options, *tests],
         cwd=checkout, env=env, capture_output=True, text=True, timeout=1500,
     )
     groups = {test: {"passed": 0, "total": 0, "failures": []} for test in tests}
@@ -307,11 +336,17 @@ def grade(checkout, out, tests):
         json.dump({"groups": groups}, handle)
 
 
+def split(tests):
+    """Test paths, and the `--deselect=` options among them."""
+    options = [t for t in tests if t.startswith("--deselect=")]
+    return [t for t in tests if t not in options], options
+
+
 def main():
     command, *args = sys.argv[1:]
     if command == "trace":
         checkout, package, out, *tests = args
-        trace(os.path.abspath(checkout), package, out, tests)
+        trace(os.path.abspath(checkout), package, out, *split(tests))
     elif command == "build":
         checkout, package, traced, out, mode, count, seed, min_lines = args
         with open(traced) as handle:
@@ -330,7 +365,7 @@ def main():
             )
     elif command == "grade":
         checkout, out, *tests = args
-        grade(os.path.abspath(checkout), out, tests)
+        grade(os.path.abspath(checkout), out, *split(tests))
     else:
         raise SystemExit(f"unknown command: {command}")
 

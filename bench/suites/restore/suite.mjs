@@ -14,8 +14,9 @@
  *
  * Only functions the tests call are gutted, and never one that importing the
  * package calls: that would break every import, and no test could run. The
- * checkout starts a fresh repository, so no history holds the originals. The
- * tests are restored before grading, and grading runs only the pinned files.
+ * checkout starts a fresh repository, so no history holds the originals.
+ * Every file outside the package is restored before grading, and grading runs
+ * only the pinned test files.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -41,25 +42,40 @@ const SOURCES = path.join(SCRATCH, "restore");
 
 /**
  * Every library a task draws on, pinned. A library qualifies when its tests
- * run in the task image with nothing but pytest, and when the image does not
+ * run in the task image with nothing but pytest, when the image does not
  * already carry an installed copy the agent could read the originals from
- * (more-itertools is out on that count).
+ * (more-itertools is out on that count), and when its code is hard enough
+ * that `solo-luna` does not restore it (toolz is out on that count).
+ *
+ * `tests` are test directories, or single test files. `deselect` names tests
+ * left out of the agent's command, the trace, and grading alike.
  */
 const LIBRARIES = {
-  toolz: {
+  chess: {
     repository: [
-      "https://github.com/pytoolz/toolz",
-      "451af60dec590a6010e2babdbf391ea8f815122f",
+      "https://github.com/niklasf/python-chess",
+      "0c6bdaccfcb3b09cdbe94b0f81e948cb2a356015",
     ],
-    package: "toolz",
-    tests: ["toolz/tests", "toolz/sandbox/tests"],
-    // Reads the installed distribution's metadata, which a checkout has not.
-    exclude: ["toolz/tests/test_package.py"],
+    package: "chess",
+    tests: ["test.py"],
+    // Its UCI tests drive a mock engine through an event loop; a body that
+    // raises inside the loop leaves the test awaiting a reply that never
+    // comes, so a gutted checkout hangs instead of failing.
+    deselect: ["test.py::EngineTestCase"],
+  },
+  parso: {
+    repository: [
+      "https://github.com/davidhalter/parso",
+      "b26da16316da46e4770d589ed5f8d404531a22af",
+    ],
+    package: "parso",
+    tests: ["test"],
+    deselect: [],
   },
 };
 
 /** How many functions a task guts. Sized so `solo-luna` fails (criterion 1). */
-export const COUNT = Number(process.env.BENCH_RESTORE_COUNT ?? 12);
+export const COUNT = Number(process.env.BENCH_RESTORE_COUNT ?? 20);
 if (!Number.isInteger(COUNT) || COUNT < 1) {
   throw new Error(
     `BENCH_RESTORE_COUNT must be a positive integer, got: ${process.env.BENCH_RESTORE_COUNT}`,
@@ -67,8 +83,8 @@ if (!Number.isInteger(COUNT) || COUNT < 1) {
 }
 const MODES = ["spread", "cluster"];
 const SEED = 1;
-/** Bodies shorter than this are left alone: a one-liner tests nothing. */
-const MIN_LINES = 5;
+/** Bodies shorter than this are left alone: each gut should be real work. */
+const MIN_LINES = 15;
 
 export const preamble = `You are working in a checkout at ${TESTBED} of an open-source Python library.
 Python 3.11 with its standard library and pytest are available; nothing can
@@ -129,31 +145,49 @@ async function fetchSources(root) {
   }
 }
 
+/** Changes whenever the material would: this file builds it, the tool guts. */
 async function buildKey() {
   return createHash("sha256")
     .update(revision)
+    .update(await readFile(fileURLToPath(import.meta.url)))
     .update(await readFile(TOOL))
     .digest("hex")
     .slice(0, 12);
 }
 
-/** The library's tracked files, less the excluded ones. */
-async function trackedFiles(clone, exclude) {
+/** The library's tracked files. */
+async function trackedFiles(clone) {
   const listed = await sh(["git", "-C", clone, "ls-files"], "git ls-files");
-  return listed
-    .split("\n")
-    .filter((file) => file.length > 0 && !exclude.includes(file));
+  return listed.split("\n").filter((file) => file.length > 0);
 }
 
-/** The pinned test files: every `test_*.py` under the library's test paths. */
+/** The library's tests left out, as the options `restore.py` passes on. */
+function deselected(library) {
+  return LIBRARIES[library].deselect.map((id) => `--deselect=${id}`);
+}
+
+/**
+ * The pinned test files: each listed test file, and every `test_*.py` under
+ * the listed test directories.
+ */
 function testFiles(files, library) {
   return files
-    .filter(
-      (file) =>
-        library.tests.some((dir) => file.startsWith(`${dir}/`)) &&
-        /(^|\/)test_[^/]*\.py$/.test(file),
+    .filter((file) =>
+      library.tests.some(
+        (entry) =>
+          file === entry ||
+          (file.startsWith(`${entry}/`) && /(^|\/)test_[^/]*\.py$/.test(file)),
+      ),
     )
     .sort();
+}
+
+/**
+ * What grading restores: every tracked file outside the package, so no edit
+ * to a test, its data, or the pytest configuration changes the grade.
+ */
+function restoredFiles(files, library) {
+  return files.filter((file) => !file.startsWith(`${library.package}/`));
 }
 
 async function writeTree(dir, entries) {
@@ -201,7 +235,7 @@ async function traceLibrary(root, library, key, image, tests) {
       "-c",
       `cp -r /src /tmp/checkout && rm -rf /tmp/checkout/.git && ` +
         `python3 /tool/restore.py trace /tmp/checkout ${LIBRARIES[library].package} ` +
-        `/out/${path.basename(out)} ${tests.join(" ")}`,
+        `/out/${path.basename(out)} ${[...deselected(library), ...tests].join(" ")}`,
     ],
     `${library} trace`,
     { timeoutMs: 900_000 },
@@ -220,7 +254,7 @@ async function buildTask(root, id, library, mode, key, image) {
   if (existsSync(done)) return { dir, ...JSON.parse(await readFile(done)) };
   const config = LIBRARIES[library];
   const clone = path.join(root, library);
-  const files = await trackedFiles(clone, config.exclude);
+  const files = await trackedFiles(clone);
   const tests = testFiles(files, config);
   const traced = await traceLibrary(root, library, key, image, tests);
   const gutted = path.join(dir, "gutted.json");
@@ -242,7 +276,9 @@ async function buildTask(root, id, library, mode, key, image) {
     `${id} build`,
   );
   const built = JSON.parse(await readFile(gutted, "utf8"));
-  const original = async (file) => readFile(path.join(clone, file), "utf8");
+  // Bytes, not text: a library carries binary data and files in other
+  // encodings, which a round trip through UTF-8 would corrupt.
+  const original = async (file) => readFile(path.join(clone, file));
 
   const staging = path.join(dir, "staging");
   await rm(staging, { recursive: true, force: true });
@@ -252,7 +288,12 @@ async function buildTask(root, id, library, mode, key, image) {
   await writeTree(path.join(staging, "checkout"), checkout);
   await writeTree(
     path.join(staging, "tests"),
-    await Promise.all(tests.map(async (file) => [file, await original(file)])),
+    await Promise.all(
+      restoredFiles(files, config).map(async (file) => [
+        file,
+        await original(file),
+      ]),
+    ),
   );
   await writeTree(
     path.join(staging, "reference"),
@@ -278,18 +319,18 @@ async function buildTask(root, id, library, mode, key, image) {
   return { dir, ...task };
 }
 
-export function taskPrompt({ library, tests, functions }) {
-  const directories = LIBRARIES[library].tests;
+export function taskPrompt({ library, functions }) {
+  const command = [...LIBRARIES[library].tests, ...deselected(library)];
   return [
     `The library is ${library}. Run its tests with:`,
-    `  python3 -m pytest ${directories.join(" ")}`,
+    `  python3 -m pytest ${command.join(" ")}`,
     "",
     `The ${functions.length} functions to re-implement:`,
     ...functions.map(
       ({ path: file, name: qualname }) => `  ${file}: ${qualname}`,
     ),
     "",
-    `Grading runs those tests, all ${tests.length} files of them, as they are now.`,
+    "Grading runs that command's tests, as they are now.",
     "",
   ].join("\n");
 }
@@ -305,6 +346,7 @@ export async function loadTasks({ root = SOURCES } = {}) {
       const built = await buildTask(root, id, library, mode, key, image);
       tasks.push({
         id,
+        library,
         image,
         prompt: taskPrompt(built),
         build: built.dir,
@@ -362,7 +404,7 @@ export async function grade(container, task) {
   await container.exec(`mkdir -p ${GRADE}`);
   await container.write(`${GRADE}/restore.py`, await readFile(TOOL, "utf8"));
   const ran = await container.exec(
-    `cd ${GRADE} && timeout 1500 python3 restore.py grade ${TESTBED} ${GRADE}/result.json ${task.tests.join(" ")}`,
+    `cd ${GRADE} && timeout 1500 python3 restore.py grade ${TESTBED} ${GRADE}/result.json ${[...deselected(task.library), ...task.tests].join(" ")}`,
     { timeoutMs: 1_600_000 },
   );
   const result = await readJson(container, `${GRADE}/result.json`);
@@ -385,4 +427,4 @@ export async function applyReference(container, task) {
 }
 
 /** For the tests: the library table and what a task is built from. */
-export const _internal = { LIBRARIES, testFiles };
+export const _internal = { LIBRARIES, testFiles, restoredFiles };

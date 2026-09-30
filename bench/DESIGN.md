@@ -60,11 +60,11 @@ shared. Every command takes `--suite <name>`; the store defaults to
   tests included, in an empty checkout. See **The cold-start suite** at the
   end. It exists to measure real-world use: no tests are given, and the pieces
   share interfaces.
-- **`restore`** -- re-implement functions gutted out of a real library, with
-  its own test suite as the acceptance. See **The restore suite** at the end.
-  It tests the one case where the graph saved money (an existing command
-  accepts the work) on real code whose pieces share modules, with the coupling
-  varied.
+- **`restore`** -- re-implement functions gutted out of a real library
+  (python-chess, parso), with its own test suite as the acceptance. See **The
+  restore suite** at the end. It tests the one case where the graph saved
+  money (an existing command accepts the work) on real code whose pieces share
+  modules, with the coupling varied.
 
 ## What a suite must satisfy
 
@@ -1969,52 +1969,106 @@ the gutted functions and the command that runs the tests. Tests and code are
 visible, as they are in a repository where someone asks for the failing tests
 to be fixed.
 
-| library | pin | tests | candidates | image copy |
+| library | pin | tests | candidates | gutted lines at 20 |
 | --- | --- | --- | --- | --- |
-| toolz | `451af60` | 191 in 14 files, 0.4 s | 61 | none |
+| python-chess | `0c6bdac` | 257 in `test.py`, 2.3 s | 101 | 837 spread, 885 cluster |
+| parso | `b26da16` | 1988 in 20 files, 8 s | 84 | 817 spread, 722 cluster |
 
-A candidate is a function or method the tests call, whose body after the
-docstring is at least five lines, and which importing the package does not
-call. Gutting an import-time function breaks every import, so no test could
-run. Two modes fix what is gutted, from a seed:
+A candidate is a function or method the graded tests call, whose body after
+the docstring is at least fifteen lines, and which importing the package does
+not call. Gutting an import-time function breaks every import, so no test
+could run. Every candidate is load-bearing: gutting it alone fails a test
+(measured 2026-09-30, one probe per candidate). Two modes fix what is gutted,
+from a seed:
 
-- **`spread`** round-robins across the package's modules. On toolz the 12
-  functions span 7 modules and fail tests in 9 files (157/183 pass gutted).
+- **`spread`** round-robins across the package's modules: 7 on chess, 14 on
+  parso. On parso that reaches the tokenizer and the grammar, so the gutted
+  checkout passes 21 of 1796 tests: every piece is blocked on the core.
 - **`cluster`** stays in the module with the most candidates and grows along
-  its internal calls. On toolz all 12 are in `functoolz.py` and fail tests in
-  6 files (141/191 pass gutted).
+  its internal calls: `Board` and `BaseBoard` in `chess/__init__.py` (58/257
+  pass gutted), all twenty of parso's error rules in `python/errors.py`
+  (1533/1988 pass gutted).
 
-`BENCH_RESTORE_COUNT` sets how many are gutted (default 12), and is raised
-until `solo-luna` fails, as the bundle size was for polyglot.
+`BENCH_RESTORE_COUNT` sets how many are gutted (default 20). parso's cluster
+module has exactly 20 candidates, so 20 is its ceiling.
 
-**Grading.** The pinned test files are restored, then run with
+**Grading.** Every tracked file outside the package is restored, tests, test
+data and pytest configuration alike, then the pinned test files run with
 `--continue-on-collection-errors`, so one file that cannot import does not
-fail the rest unseen. Each test file is a target; resolved means every test
-passes. The self-test puts the original bodies back and grades both tasks
-resolved. The gutted checkouts grade unresolved, and each holds one commit,
-so no history carries the originals.
+fail the rest unseen. Each test runs under a 60 s limit, so a body that never
+returns fails its test instead of hanging the grade. Each test file is a
+target; resolved means every test passes. The self-test puts the original
+bodies back and grades all four tasks resolved; the gutted checkouts grade
+unresolved. Each checkout holds one commit, so no history carries the
+originals.
+
+python-chess's `EngineTestCase` is deselected in the agent's command, the
+trace and grading. Its UCI tests drive a mock engine through an event loop,
+and a body that raises inside the loop leaves the test awaiting a reply that
+never comes: a gutted checkout hung the suite past 600 s instead of failing.
+
+**Why toolz is out.** The first build gutted twelve toolz functions of five
+lines or more (169 lines). One `solo-luna` smoke cell on `toolz-spread-12`
+resolved all 14 test files for $0.027 in 111 s. That fails criterion 1 and,
+at a third of one sol session's fixed overhead, criterion 2. toolz has only
+18 candidates at fifteen lines, so gutting more of it could not make the task
+larger.
+
+**What separates luna.** The records say where luna fails, and it is not
+missing knowledge. On the polyglot bundles luna wrote 35-46 files in 22-34
+turns, ran 9-12 shell commands, and declared itself done at 9-16 of 29 or
+34; at three a bundle it solved every exercise. On toolz one command reported every
+failure in under a second, and luna ran it until it was green. So a suite
+separates the models when the work is too large, or each piece too hard, for
+luna to converge on its own feedback. The libraries were chosen for that:
+move generation, SAN and FEN parsing, and tablebase probing in chess, and an
+error-recovering tokenizer, diff parser and error finder in parso, 3.4-5.2
+times the gutted code of the toolz build.
 
 **Candidate libraries screened**, all running in the task image with pytest
 alone:
 
 - `more-itertools` is out: the image ships an installed copy under
-  `/usr/lib/python3/dist-packages`.
-- `sortedcontainers` (299 tests, 2.3 s, `src/` layout) is the next to add. It
-  is strongly coupled: `SortedDict` and `SortedSet` are built on
-  `SortedList`.
+  `/usr/lib/python3/dist-packages`. So do `attrs`, `packaging` and `pluggy`.
+- `toolz`: too small and too easy, above.
+- `sortedcontainers` (296 tests, 4.3 s, `src/` layout): 32 candidates at
+  fifteen lines, 29 of them in one module. Strongly coupled, but small.
+- `sqlparse` (506 tests, 2.5 s): 38 candidates, 1368 lines.
+- `mistune` (1158 tests, 3.0 s, `src/` layout): 68 candidates, mostly small
+  regex rules.
+- `pycparser`: its general tests need a C preprocessor the image lacks.
+- `lark`: tracing its tests stopped on a `SyntaxError` in the image; not
+  investigated.
+- `tomlkit`: its compliance tests need a git submodule.
 - `tomli` has too few tests (17).
 
 **Threats.**
 
-- **Recall.** toolz is public and well known, so a model may remember its
-  bodies. That helps every arm. It narrows the gap between luna and sol, and
-  criterion 1 has to be measured, not assumed.
+- **Recall.** Both libraries are public and well known, so a model may
+  remember their bodies. That helps every arm. It narrows the gap between luna
+  and sol, and criterion 1 has to be measured, not assumed.
 - **The names are given.** The prompt lists what to implement, so no arm
   spends turns finding it.
+- **Untracked files.** Grading restores tracked files only; a file the agent
+  adds outside the package, such as a `conftest.py`, runs with the tests.
 
-Unmeasured: no cell has run.
+**`solo-luna`, 2026-09-30**, one cell a task, $0.50 cap and 20 minutes:
+
+| task | tests passing | files passing | cost | time |
+| --- | --- | --- | --- | --- |
+| `chess-spread-20` | 218/257 | 0/1 | $0.057 | 3 min |
+| `chess-cluster-20` | 192/247 | 0/1 | $0.048 | 3 min |
+| `parso-spread-20` | 955/1988 | 1/20 | $0.078 | 4 min |
+| `parso-cluster-20` | 1740/1988 | 17/20 | $0.052 | 3 min |
+
+Every cell settled on its own, under cap and time, and fails as on the
+polyglot bundles: 4-10 test runs, then a summary that names the remaining
+failures ("the task is not yet fully complete"). On `parso-spread-20` it
+re-implemented 16 of the 20. Every tool error was a failing test run or an
+edit that did not match, none a harness fault. Luna's half of criterion 1
+holds on all four; `solo-sol` is unmeasured.
 
 ```bash
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore
-BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell toolz-cluster-12 solo-luna --suite restore --cap 1
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell chess-cluster-20 solo-luna --suite restore --cap 0.5
 ```

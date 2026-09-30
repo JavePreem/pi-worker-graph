@@ -123,27 +123,83 @@ test("a gutted body raises, keeps its docstring, and the module still compiles",
   execFileSync("python3", ["-m", "py_compile", file]);
 });
 
-test("the pinned tests are the test files under the library's test paths", () => {
+const hasPytest = (() => {
+  try {
+    execFileSync("python3", ["-c", "import pytest"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+// Grading runs in the task image, which has pytest; a host may not.
+test("a test that never returns fails on its own and the rest still grade", {
+  skip: !hasPytest && "no pytest on this host",
+}, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bench-restore-"));
+  await writeFile(
+    path.join(dir, "test_wait.py"),
+    "import time\n\ndef test_waits():\n    time.sleep(3600)\n\ndef test_passes():\n    assert True\n",
+  );
+  const out = path.join(dir, "result.json");
+  execFileSync("python3", [TOOL, "grade", dir, out, "test_wait.py"], {
+    env: { ...process.env, RESTORE_TEST_TIMEOUT_S: "1" },
+    timeout: 60_000,
+  });
+  const { groups } = JSON.parse(await readFile(out, "utf8"));
+  assert.equal(groups["test_wait.py"].passed, 1);
+  assert.equal(groups["test_wait.py"].total, 2);
+  assert.match(
+    groups["test_wait.py"].failures[0],
+    /^test_waits: .*ran over 1 s/,
+  );
+});
+
+test("the pinned tests are the listed test files and the test files under the listed directories", () => {
   const files = [
-    "toolz/itertoolz.py",
-    "toolz/tests/test_itertoolz.py",
-    "toolz/tests/__init__.py",
-    "toolz/sandbox/tests/test_core.py",
-    "doc/test_notes.py",
+    "chess/__init__.py",
+    "test.py",
+    "test/test_parser.py",
+    "test/normalizer_issue_files/E10.py",
+    "docs/test_notes.py",
   ];
-  assert.deepEqual(_internal.testFiles(files, _internal.LIBRARIES.toolz), [
-    "toolz/sandbox/tests/test_core.py",
-    "toolz/tests/test_itertoolz.py",
+  const library = { tests: ["test.py", "test"] };
+  assert.deepEqual(_internal.testFiles(files, library), [
+    "test.py",
+    "test/test_parser.py",
+  ]);
+});
+
+test("grading restores every tracked file outside the package", () => {
+  const files = [
+    "parso/grammar.py",
+    "conftest.py",
+    "pytest.ini",
+    "test/data.py",
+  ];
+  assert.deepEqual(_internal.restoredFiles(files, _internal.LIBRARIES.parso), [
+    "conftest.py",
+    "pytest.ini",
+    "test/data.py",
   ]);
 });
 
 test("the prompt names every gutted function and the command that judges them", () => {
   const prompt = taskPrompt({
-    library: "toolz",
-    tests: ["toolz/tests/test_itertoolz.py"],
-    functions: [{ path: "toolz/itertoolz.py", name: "partition_all" }],
+    library: "parso",
+    tests: ["test/test_parser.py"],
+    functions: [{ path: "parso/python/diff.py", name: "DiffParser.update" }],
   });
-  assert.match(prompt, /python3 -m pytest toolz\/tests toolz\/sandbox\/tests/);
-  assert.match(prompt, /toolz\/itertoolz\.py: partition_all/);
+  assert.match(prompt, /python3 -m pytest test\n/);
+  assert.match(prompt, /parso\/python\/diff\.py: DiffParser\.update/);
+  const chess = taskPrompt({
+    library: "chess",
+    tests: ["test.py"],
+    functions: [],
+  });
+  assert.match(
+    chess,
+    /python3 -m pytest test\.py --deselect=test\.py::EngineTestCase\n/,
+  );
   assert.match(preamble, /restored to their original state/);
 });

@@ -1,46 +1,76 @@
 [
   {
-    "task": "toolz-spread-12",
+    "task": "chess-spread-20",
     "outcome": "resolved",
     "resolved": true,
     "states": {
-      "toolz/sandbox/tests/test_core.py": "pass: 4/4 passed",
-      "toolz/sandbox/tests/test_parallel.py": "pass: 1/1 passed",
-      "toolz/tests/test_compatibility.py": "pass: 1/1 passed",
-      "toolz/tests/test_curried.py": "pass: 10/10 passed",
-      "toolz/tests/test_curried_doctests.py": "pass: 1/1 passed",
-      "toolz/tests/test_dicttoolz.py": "pass: 51/51 passed",
-      "toolz/tests/test_functoolz.py": "pass: 39/39 passed",
-      "toolz/tests/test_inspect_args.py": "pass: 17/17 passed",
-      "toolz/tests/test_itertoolz.py": "pass: 51/51 passed",
-      "toolz/tests/test_recipes.py": "pass: 2/2 passed",
-      "toolz/tests/test_serialization.py": "pass: 9/9 passed",
-      "toolz/tests/test_signatures.py": "pass: 3/3 passed",
-      "toolz/tests/test_tlz.py": "pass: 1/1 passed",
-      "toolz/tests/test_utils.py": "pass: 1/1 passed"
+      "test.py": "pass: 247/247 passed"
     },
-    "total_s": 2
+    "total_s": 3
   },
   {
-    "task": "toolz-cluster-12",
+    "task": "chess-cluster-20",
     "outcome": "resolved",
     "resolved": true,
     "states": {
-      "toolz/sandbox/tests/test_core.py": "pass: 4/4 passed",
-      "toolz/sandbox/tests/test_parallel.py": "pass: 1/1 passed",
-      "toolz/tests/test_compatibility.py": "pass: 1/1 passed",
-      "toolz/tests/test_curried.py": "pass: 10/10 passed",
-      "toolz/tests/test_curried_doctests.py": "pass: 1/1 passed",
-      "toolz/tests/test_dicttoolz.py": "pass: 51/51 passed",
-      "toolz/tests/test_functoolz.py": "pass: 39/39 passed",
-      "toolz/tests/test_inspect_args.py": "pass: 17/17 passed",
-      "toolz/tests/test_itertoolz.py": "pass: 51/51 passed",
-      "toolz/tests/test_recipes.py": "pass: 2/2 passed",
-      "toolz/tests/test_serialization.py": "pass: 9/9 passed",
-      "toolz/tests/test_signatures.py": "pass: 3/3 passed",
-      "toolz/tests/test_tlz.py": "pass: 1/1 passed",
-      "toolz/tests/test_utils.py": "pass: 1/1 passed"
+      "test.py": "pass: 247/247 passed"
     },
-    "total_s": 2
+    "total_s": 3
+  },
+  {
+    "task": "parso-spread-20",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "test/test_cache.py": "pass: 9/9 passed",
+      "test/test_diff_parser.py": "pass: 82/82 passed",
+      "test/test_dump_tree.py": "pass: 10/10 passed",
+      "test/test_error_recovery.py": "pass: 17/17 passed",
+      "test/test_file_python_errors.py": "pass: 9/9 passed",
+      "test/test_fstring.py": "pass: 69/69 passed",
+      "test/test_get_code.py": "pass: 13/13 passed",
+      "test/test_grammar.py": "pass: 1/1 passed",
+      "test/test_load_grammar.py": "pass: 21/21 passed",
+      "test/test_normalizer_issues_files.py": "pass: 29/29 passed",
+      "test/test_old_fast_parser.py": "pass: 15/15 passed",
+      "test/test_param_splitting.py": "pass: 11/11 passed",
+      "test/test_parser.py": "pass: 434/434 passed",
+      "test/test_parser_tree.py": "pass: 103/103 passed",
+      "test/test_pep8.py": "pass: 3/3 passed",
+      "test/test_pgen2.py": "pass: 483/483 passed",
+      "test/test_prefix.py": "pass: 22/22 passed",
+      "test/test_python_errors.py": "pass: 414/414 passed",
+      "test/test_tokenize.py": "pass: 208/208 passed",
+      "test/test_utils.py": "pass: 35/35 passed"
+    },
+    "total_s": 6
+  },
+  {
+    "task": "parso-cluster-20",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "test/test_cache.py": "pass: 9/9 passed",
+      "test/test_diff_parser.py": "pass: 82/82 passed",
+      "test/test_dump_tree.py": "pass: 10/10 passed",
+      "test/test_error_recovery.py": "pass: 17/17 passed",
+      "test/test_file_python_errors.py": "pass: 9/9 passed",
+      "test/test_fstring.py": "pass: 69/69 passed",
+      "test/test_get_code.py": "pass: 13/13 passed",
+      "test/test_grammar.py": "pass: 1/1 passed",
+      "test/test_load_grammar.py": "pass: 21/21 passed",
+      "test/test_normalizer_issues_files.py": "pass: 29/29 passed",
+      "test/test_old_fast_parser.py": "pass: 15/15 passed",
+      "test/test_param_splitting.py": "pass: 11/11 passed",
+      "test/test_parser.py": "pass: 434/434 passed",
+      "test/test_parser_tree.py": "pass: 103/103 passed",
+      "test/test_pep8.py": "pass: 3/3 passed",
+      "test/test_pgen2.py": "pass: 483/483 passed",
+      "test/test_prefix.py": "pass: 22/22 passed",
+      "test/test_python_errors.py": "pass: 414/414 passed",
+      "test/test_tokenize.py": "pass: 208/208 passed",
+      "test/test_utils.py": "pass: 35/35 passed"
+    },
+    "total_s": 6
   }
 ]
