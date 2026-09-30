@@ -19,6 +19,7 @@
  */
 const SUITES = {
   coldstart: () => import("./coldstart/suite.mjs"),
+  restore: () => import("./restore/suite.mjs"),
   polyglot: () => import("./polyglot/suite.mjs"),
   promax: () => import("./promax/suite.mjs"),
 };

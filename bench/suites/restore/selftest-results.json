@@ -1,0 +1,46 @@
+[
+  {
+    "task": "toolz-spread-12",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "toolz/sandbox/tests/test_core.py": "pass: 4/4 passed",
+      "toolz/sandbox/tests/test_parallel.py": "pass: 1/1 passed",
+      "toolz/tests/test_compatibility.py": "pass: 1/1 passed",
+      "toolz/tests/test_curried.py": "pass: 10/10 passed",
+      "toolz/tests/test_curried_doctests.py": "pass: 1/1 passed",
+      "toolz/tests/test_dicttoolz.py": "pass: 51/51 passed",
+      "toolz/tests/test_functoolz.py": "pass: 39/39 passed",
+      "toolz/tests/test_inspect_args.py": "pass: 17/17 passed",
+      "toolz/tests/test_itertoolz.py": "pass: 51/51 passed",
+      "toolz/tests/test_recipes.py": "pass: 2/2 passed",
+      "toolz/tests/test_serialization.py": "pass: 9/9 passed",
+      "toolz/tests/test_signatures.py": "pass: 3/3 passed",
+      "toolz/tests/test_tlz.py": "pass: 1/1 passed",
+      "toolz/tests/test_utils.py": "pass: 1/1 passed"
+    },
+    "total_s": 2
+  },
+  {
+    "task": "toolz-cluster-12",
+    "outcome": "resolved",
+    "resolved": true,
+    "states": {
+      "toolz/sandbox/tests/test_core.py": "pass: 4/4 passed",
+      "toolz/sandbox/tests/test_parallel.py": "pass: 1/1 passed",
+      "toolz/tests/test_compatibility.py": "pass: 1/1 passed",
+      "toolz/tests/test_curried.py": "pass: 10/10 passed",
+      "toolz/tests/test_curried_doctests.py": "pass: 1/1 passed",
+      "toolz/tests/test_dicttoolz.py": "pass: 51/51 passed",
+      "toolz/tests/test_functoolz.py": "pass: 39/39 passed",
+      "toolz/tests/test_inspect_args.py": "pass: 17/17 passed",
+      "toolz/tests/test_itertoolz.py": "pass: 51/51 passed",
+      "toolz/tests/test_recipes.py": "pass: 2/2 passed",
+      "toolz/tests/test_serialization.py": "pass: 9/9 passed",
+      "toolz/tests/test_signatures.py": "pass: 3/3 passed",
+      "toolz/tests/test_tlz.py": "pass: 1/1 passed",
+      "toolz/tests/test_utils.py": "pass: 1/1 passed"
+    },
+    "total_s": 2
+  }
+]

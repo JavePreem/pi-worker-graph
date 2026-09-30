@@ -742,13 +742,18 @@ What remains, in order:
       - `jsonpath` on all three arms, as a third specification-only task.
       - A repeat of `solo-sol` and `graph-luna` on `jmespath`, for a first
         look at variance. 875 against 862 is 13 cases in 891.
-   6. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
+   6. Screen the `restore` suite (`bench/DESIGN.md` **The restore suite**):
+      `solo-luna`, `solo-sol` and `graph-luna` on `toolz-spread-12` and
+      `toolz-cluster-12`. It tests whether the test-backed saving survives
+      real code with shared modules, and where coupling hands the win back to
+      solo sol. Built and self-tested; no cell has run.
+   7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the
       polyglot bundles at twenty, grown with the Go, Rust, Java and C++
       exercises) tests that narrower claim. The cold-start tasks measure where
       it fails.
-   7. Settle open decision 4, freeze the preamble, then `init`.
+   8. Settle open decision 4, freeze the preamble, then `init`.
 
    The precondition that stood before those cells still stands: a pilot in
    which every arm scores zero discriminates nothing.

@@ -60,6 +60,11 @@ shared. Every command takes `--suite <name>`; the store defaults to
   tests included, in an empty checkout. See **The cold-start suite** at the
   end. It exists to measure real-world use: no tests are given, and the pieces
   share interfaces.
+- **`restore`** -- re-implement functions gutted out of a real library, with
+  its own test suite as the acceptance. See **The restore suite** at the end.
+  It tests the one case where the graph saved money (an existing command
+  accepts the work) on real code whose pieces share modules, with the coupling
+  varied.
 
 ## What a suite must satisfy
 
@@ -1948,4 +1953,68 @@ setup now get about three times the solo wall-clock and twice its cost.
 ```bash
 node bench/selftest.mjs --suite coldstart
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell jmespath solo-luna --suite coldstart --cap 1
+```
+
+## The restore suite
+
+The graph's only measured saving came from polyglot bundles: many unrelated
+exercises, each with its own tests. Real large tasks are rarely that
+separable. On `jmespath` every node had to edit the same two files, and the
+graph's parallelism went with it. `restore` keeps the tests and adds the
+coupling.
+
+**Tasks.** A pinned library with some functions' bodies replaced by `raise
+NotImplementedError`, and its own test suite left in place. The prompt names
+the gutted functions and the command that runs the tests. Tests and code are
+visible, as they are in a repository where someone asks for the failing tests
+to be fixed.
+
+| library | pin | tests | candidates | image copy |
+| --- | --- | --- | --- | --- |
+| toolz | `451af60` | 191 in 14 files, 0.4 s | 61 | none |
+
+A candidate is a function or method the tests call, whose body after the
+docstring is at least five lines, and which importing the package does not
+call. Gutting an import-time function breaks every import, so no test could
+run. Two modes fix what is gutted, from a seed:
+
+- **`spread`** round-robins across the package's modules. On toolz the 12
+  functions span 7 modules and fail tests in 9 files (157/183 pass gutted).
+- **`cluster`** stays in the module with the most candidates and grows along
+  its internal calls. On toolz all 12 are in `functoolz.py` and fail tests in
+  6 files (141/191 pass gutted).
+
+`BENCH_RESTORE_COUNT` sets how many are gutted (default 12), and is raised
+until `solo-luna` fails, as the bundle size was for polyglot.
+
+**Grading.** The pinned test files are restored, then run with
+`--continue-on-collection-errors`, so one file that cannot import does not
+fail the rest unseen. Each test file is a target; resolved means every test
+passes. The self-test puts the original bodies back and grades both tasks
+resolved. The gutted checkouts grade unresolved, and each holds one commit,
+so no history carries the originals.
+
+**Candidate libraries screened**, all running in the task image with pytest
+alone:
+
+- `more-itertools` is out: the image ships an installed copy under
+  `/usr/lib/python3/dist-packages`.
+- `sortedcontainers` (299 tests, 2.3 s, `src/` layout) is the next to add. It
+  is strongly coupled: `SortedDict` and `SortedSet` are built on
+  `SortedList`.
+- `tomli` has too few tests (17).
+
+**Threats.**
+
+- **Recall.** toolz is public and well known, so a model may remember its
+  bodies. That helps every arm. It narrows the gap between luna and sol, and
+  criterion 1 has to be measured, not assumed.
+- **The names are given.** The prompt lists what to implement, so no arm
+  spends turns finding it.
+
+Unmeasured: no cell has run.
+
+```bash
+BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore
+BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell toolz-cluster-12 solo-luna --suite restore --cap 1
 ```
