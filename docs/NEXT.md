@@ -640,6 +640,45 @@ What remains, in order:
    a long specification. The saving is unmeasured; estimated at $0.4-0.6 on
    that cell.
 
+   **Pi 0.99.1 (bumped 2026-09-30 from 0.85.1).** The development pin, the
+   peer range (`~0.99.1`) and the bench's default `--pi` moved together;
+   `npm run check` passes, on fakes. The changelog from 0.85.1 to 0.99.1 was
+   read for what this package binds to:
+   - `--no-extensions` now also disables Pi's built-in extensions (0.99.0).
+     Built-in tools are a separate switch (`--no-builtin-tools`), so workers
+     keep `read`, `bash`, `edit` and `write`.
+   - JSON mode opens with a `{"type":"session",...}` header; the worker
+     parser ignores unknown record types. The docs warn that `readline`
+     splits records on Unicode separators; ours splits on `\n` only
+     (`src/pi-subprocess.ts:1178`).
+   - Cost-aware cache warming is on by default (`cacheWarming: "streaming"`)
+     and runs only for models that declare a `promptCache` lifetime.
+     `azure-openai-responses` `gpt-5.6-sol` declares none, so bench cells are
+     unaffected; GitHub Copilot's sol does, so an interactive parent blocked
+     in `worker_graph` can pay for warm-ups.
+   - New since 0.85: `agent_before_settle` (an extension can request one more
+     turn before the session settles), `--fork` with `--session-id`, and the
+     session file created at the first user message. D24 builds on all three.
+   - Breaking changes in the changelog (`shouldStopAfterTurn`, `TurnEndEvent`,
+     `SessionEntry`, provider stream inputs, `ToolResultMessage.details`) touch
+     nothing this package uses; the typecheck agrees.
+   - Node `>=22.19.0`; the bench carries 22.19.0.
+   Not yet run live beyond the session probe below. Every bench cell before
+   the bump ran 0.85.1.
+
+   **A killed worker's session continues (probe, Pi 0.99.1, 2026-09-30,
+   $0.003 of luna).** A worker-shaped `pi --mode json -p` run with a session
+   read a file, started `bash`, and was killed mid-command (SIGTERM, then
+   SIGKILL). Its session file ends on the unanswered `bash` call. A second
+   run given new instructions answered from the first run's history without
+   reading the file, both ways: forked (`--fork a-1 --session-id a-2`, the
+   original file left byte-identical) or resumed (`--session-id b-1`). Only
+   the resumed run kept the provider cache: 1471 of 1547 prompt tokens read
+   from it, $0.000073, against none and $0.00041 forked, because Pi keys the
+   cache by session id. A redirect worded "New instructions from your
+   orchestrator: ..." was cut off by Azure's content filter
+   (`Response incomplete: content_filter`); neutral wording passed.
+
    **Each node now reports its wall-clock and its rounds.** Every node's
    entry in the parent's result carries `durationMs`. A checked or reviewed
    node also carries `rounds`: each `check_before`, work, check, review, and
@@ -761,7 +800,15 @@ What remains, in order:
         and two of the other three hunted for an upstream copy. A re-run with
         the first frozen fix stopped at the limit too, 1760/1988, $1.017;
         workers' own imports still wrote `__pycache__`. Fixed in
-        `frozen-bytecode-2-2026-09-30.tgz`; not yet re-run.
+        `frozen-bytecode-2-2026-09-30.tgz`. Re-run: stopped at the limit
+        again, 1961/1988, $0.769, no frozen failures; four one-node graphs
+        each ran out of check rounds.
+   6a. Build D24, interruptible graphs: round events reach the parent while a
+      graph runs, and it can inspect a round or redirect a node. Decided and
+      documented 2026-09-30, not built. The plan, what Pi 0.99.1 offers, the
+      changes by file, the tests, and how to resume are in
+      [`docs/INTERRUPTS.md`](INTERRUPTS.md). Then re-run `graph-luna` on
+      `parso-cluster-20` with it.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the
@@ -795,6 +842,18 @@ What remains, in order:
    and injected orchestrator boundaries.
 
 ## Known defects
+
+### `spendSplit` counts a sol node as worker spend
+
+`bench/analyse.mjs` `spendSplit` sums every node's cost as `nodeCost` and
+takes only a review policy's share (`usage.review`) out as reviewer spend, so
+"nodeShare minus reviewShare is the workers" assumes every node ran on the
+worker profile. A parent can run a node on any profile. On
+`parso-cluster-20-graph-luna-2` (2026-09-30) it ran `diagnose-errors` on the
+`reviewer` profile, which is sol: $0.392 that the split would report as luna.
+The fix is to attribute by the node's profile, which the node's usage does not
+carry today; until then, check `worker_graph` calls in the events for the
+profile of each node before quoting a worker share.
 
 ### A kill inside a mutation strands the run's mutation lock
 

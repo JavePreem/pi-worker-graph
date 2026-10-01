@@ -94,6 +94,11 @@ The graph is immutable after execution starts. Coordination events and directed
 messages are read explicitly rather than injected globally or delivered as live
 steering messages.
 
+D24 (planned) lets the parent interrupt a node's round and restart it with a
+new assignment. The graph's nodes and edges stay what the parent submitted; what
+changes is one node's next round, and only by stopping the round in flight,
+never by steering it.
+
 ### D13 — Pi workers use isolated subprocesses
 
 The MVP runs each worker as a one-shot Pi JSON-mode subprocess. The parent sends
@@ -104,10 +109,14 @@ process-tree cancellation boundary and keeps worker failures isolated from the
 orchestrator. SDK sessions remain a possible post-MVP optimization, not a second
 MVP transport.
 
+Amended by D24 (planned): a work or repair round keeps its Pi session under
+the run's directory, a new one for every round, so a round the parent
+interrupts can be resumed. Nothing else reads it, and it goes with the run.
+
 ### D14 — The peer range claims only the tested Pi version
 
 Pi-facing code is currently tested against `@earendil-works/pi-coding-agent`
-0.85.1, and the peer range is `~0.85.1`, with the tested versions pinned in
+0.99.1, and the peer range is `~0.99.1`, with the tested versions pinned in
 development dependencies. The range was `"*"` while nothing was published,
 following the loosest reading of Pi package conventions. A wildcard admits
 every future release including breaking ones, so it had the manifest promising
@@ -124,6 +133,12 @@ Transport progress contains bounded status and usage metadata, never worker
 transcripts or tool payloads. Final results contain a separately bounded compact
 projection of structured worker reports and label worker-authored fields as
 untrusted data.
+
+Amended by D24 (planned): a second tool, `worker_graph_control`, acts on a
+graph `worker_graph` started, and `worker_graph` returns at round events
+rather than only when the graph ends. Progress still carries no transcript or
+tool payload. A round's tool trace reaches the parent only when it asks for
+that round, bounded, and labeled untrusted like a report.
 
 ### D16 — Retention is bounded without implicit deletion
 
@@ -272,6 +287,12 @@ and a repair still receives only the structured findings. The session lives in
 the run's directory, outside the checkout, and is deleted with the run. With
 no run directory the rounds start fresh, as before.
 
+Amended 2026-09-30 by D24 (planned): a round the parent interrupts is
+resumed, not restarted, when the parent redirects it. The context carried
+forward is the interrupted worker's own, what it read and did in that round,
+and the new assignment is explicit. Every other work and repair round still
+starts fresh.
+
 ## D21. Configured profile names reach the parent through the request context
 
 `worker_graph` requires every task to name a worker profile, and the reviewer
@@ -413,6 +434,60 @@ the task must keep. A weak check is the pattern's worst failure, because it
 accepts wrong work silently, and this catches the vacuous ones for no tokens.
 Frozen paths close the other silent route, a worker editing the tests its check
 runs; the runtime detects that change and never restores it (D5).
+
+## D24. The parent can interrupt a round, not steer it
+
+Decided 2026-09-30; not yet implemented. The plan is
+[`docs/INTERRUPTS.md`](INTERRUPTS.md).
+
+A running graph reports each failed check round to the parent, and the parent
+may stop that node's round and restart it with a new assignment. It cannot
+reach into a round in flight, and nothing polls a worker.
+
+Measured on `parso-cluster-20` (`bench/DESIGN.md` **The restore suite**): four
+one-node graphs of luna workers ran in sequence, each through three or four
+repair rounds of eight to eleven minutes, while the sol parent sat blocked in
+the tool call. Each repair saw the last 2 KiB of the failing check and the
+parent saw nothing until the node failed, so every re-plan started from a
+failure the parent could not see forming.
+
+`worker_graph` now returns at the first round event: a check round that
+failed, or a node that settled. The graph keeps running. The parent then calls
+`worker_graph_control` to wait for the next event, or for the graph to settle;
+to inspect one round's tool trace; to redirect a node; or to abort the graph.
+Waiting is one blocking call per event, not a loop. Events that arrive while
+the parent is deciding are kept for its next call, so none is lost.
+
+Each event carries the round's result line: the last non-empty line of each
+failing command's output, such as pytest's `27 failed, 1961 passed`. That is
+what lets the parent tell a stalled node from a converging one, and it is the
+same for any test runner.
+
+A redirect stops the node's work or repair round and resumes that round's
+session with the parent's assignment, framed by the runtime as the previous
+attempt having been stopped. Resumed rather than forked: Pi keys the
+provider's cache by session, and a probe measured the resumed round reading
+95% of its prompt from the cache and the forked one none (`docs/NEXT.md`).
+The redirect replaces the round it stops, so the check after it counts as
+usual, and the node's check, frozen baseline, and review are unchanged. A
+redirect is refused while the node is running its check, since the next event
+follows it, and a node takes at most four.
+
+A round's trace is one line per tool call, the tool, its target, and whether it
+failed, and the worker's last message, bounded and labeled untrusted. It is
+kept as an immutable file under the run, so a round can be inspected after the
+graph has returned.
+
+A graph now outlives the call that started it, so the parent could end its
+turn with workers still writing the checkout. It cannot: while a graph runs,
+the extension holds the session open at Pi's last boundary before it settles
+and tells the parent the graph is still running. Three such turns in a row
+without a control call abort the graph. The session's shutdown aborts it too,
+so no worker outlives its parent.
+
+The redirect's framing is worded plainly. Azure's content filter cut off a
+probe redirect worded as new instructions from an orchestrator, and passed the
+same request worded neutrally.
 
 ## Open decisions
 

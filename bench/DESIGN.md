@@ -6,8 +6,8 @@ worth keeping. Only its Pi RPC client survives.
 
 ## What the bench says so far
 
-Measured 2026-09-29, one cell per arm on each task, so no figure has a
-variance. The answer to the title depends on what accepts the work.
+Measured 2026-09-29 and 2026-09-30, one cell per arm on each task, so no
+figure has a variance. The answer to the title depends on what accepts the work.
 
 | task | acceptance | `solo-sol` | `graph-luna` | graph / solo cost |
 | --- | --- | --- | --- | --- |
@@ -15,6 +15,8 @@ variance. The answer to the title depends on what accepts the work.
 | polyglot py34 | visible tests | 34/34, $0.87, 3 min | 34/34, $0.30, 8 min | 0.34 |
 | coldstart `mustache` | specification | 135/135, $0.24, 4 min | 135/135, $0.32, 8 min | 1.33 |
 | coldstart `jmespath` | specification | 862/891, $0.67, 4 min | 875 / 848, $3.08 / $1.63, 30+ min | 2.4-4.6 |
+| restore `chess-cluster-20` | visible tests | 247/247, $1.45, 4 min | 247/247, $0.51, 17 min | 0.36 |
+| restore `parso-cluster-20` | visible tests | 1988/1988, $2.13, 7 min | 1961/1988 at the 30 min limit, $0.77 | not resolved |
 
 - **With a test oracle, it costs less at the same quality.** Luna nodes run in
   parallel and the runtime accepts each on its check, which costs no tokens.
@@ -31,6 +33,25 @@ variance. The answer to the title depends on what accepts the work.
   "refine" twice in the same session left it at 862. Tests-first scored 790,
   because the tests became the ceiling. Reviewing the tests cost $1.32 before
   any implementation ran.
+
+Added 2026-09-30, from the `restore` suite: re-implement 20 functions gutted
+from a real library, its own tests the acceptance; `solo-luna` failed all four
+tasks (**The restore suite**).
+
+- **The chess saving came from the check loop, not from fan-out.** Both graphs
+  were one node. Alone, luna ran the tests 4-10 times and stopped with
+  failures left, as on the polyglot bundles; under a check the runtime sent
+  it back until the tests passed.
+- **On parso the loop was not enough within the limit.** Three runs, best
+  1961/1988, each node spending three or four repair rounds of 8-11 minutes
+  while the parent could only wait for it to fail. That is what D24 addresses
+  (`docs/INTERRUPTS.md`). Two of the runs also lost a node to a runtime bug,
+  since fixed (`__pycache__` under a frozen test directory).
+- **Graph parents hunt for the original source.** Told nothing, the sol
+  parent sent whole nodes to search git objects, site-packages and the
+  network for an upstream copy; the solo arms probed for one in 2-6
+  commands. The suite prompt now says none exists.
+- All of these cells ran Pi 0.85.1.
 
 Open: no `solo-luna` cell on `mustache`, so whether its review bought
 anything is unmeasured, and `jsonpath` is unrun. Details and caveats are
@@ -2145,6 +2166,58 @@ Luna $0.494 and sol $0.523 (parent $0.131, reviewer node $0.392). The suite
 prompt now says no other copy exists or can be downloaded: every arm probed
 for one (2-6 commands in each solo cell), but only the graph parent spent
 whole nodes on it. Cells before 2026-09-30 evening ran without that line.
+
+**Third run, with both fixes** (`frozen-bytecode-2-2026-09-30.tgz`, the new
+prompt line), same cap and time: stopped at the limit, 1961/1988 and 17/20
+files, $0.769 (luna $0.528, sol parent $0.241). No node failed on
+`frozen_changed`. Four one-node graphs of luna workers ran in sequence, each
+on the full suite with `test` frozen: three used every check round (3, 4
+and 4) and failed, 8-11 minutes each, and the fourth was cut off by the
+limit. One further call was refused for a check without `maxRounds`. No node
+hunted for an upstream copy.
+
+**What the parent did in the four graph cells**, from the events
+(`handoff/restore/events-*-graph-luna*.json`). Every call ran one node at
+concurrency 1 on the `worker` profile, except one sol `reviewer` node that
+diagnosed; every check ran the whole suite. Round times are check before,
+work, then check and repair pairs.
+
+| cell | call | node | check rounds, frozen | outcome | cost | rounds (s) |
+| --- | --- | --- | --- | --- | --- | --- |
+| chess | 1 | `restore-chess-core` | 2, `test.py` | failed | $0.105 | 24, 168, 6, 197, 4 |
+| chess | 2 | `repair-exact-upstream` | 3, `test.py` | passed | $0.174 | 8, 103, 3, 226, 2, 192, 2 |
+| parso 1 | 1 | `restore-errors` | 4, `test` | frozen_changed | $0.035 | 17, 188 |
+| parso 1 | 2 | `authoritative-restore` | 4, one test file | failed | $0.215 | 2, 178, 2, 118, 1, 208, 1, 124, 1 |
+| parso 1 | 3 | `fetch-upstream` | 3, none | failed | $0.122 | 3, 132, 3, 142, 2, 131, 3 |
+| parso 1 | 4 | `local-source-recovery` | 4, none | cut off | $0.167 | 2, 215, 3, 151, 2, 114 |
+| parso 2 | 1 | `restore-errors` | 3, `test` | failed | $0.332 | 15, 631, 6, 192, 3, 281, 3 |
+| parso 2 | 2 | `diagnose-errors` (sol) | none | succeeded | $0.392 | |
+| parso 2 | 2 | `repair-errors` | 4, `test` | frozen_changed | $0.075 | 4, 221 |
+| parso 2 | 3 | `exact-upstream-restore` | 4, two test files | cut off | $0.087 | 3, 173, 3, 80 |
+| parso 3 | 1 | `restore-errors` (+ sol review, 2 rounds) | 3, `test` | failed | $0.167 | 16, 180, 4, 286, 15, 133, 4 |
+| parso 3 | 2 | `repair-errors` | 4, `test` | failed | $0.190 | 4, 141, 3, 102, 3, 129, 3, 140, 3 |
+| parso 3 | 3 | `finish-errors` | 4, `test` | failed | $0.157 | 3, 102, 3, 103, 3, 175, 3, 115, 3 |
+| parso 3 | 4 | `final-repair` | 4, `test` | cut off | $0.013 | 3, 60 |
+
+The parent took 7-9 turns a cell and read 9-12 files itself before and
+between calls. In parso 3 its first call was refused by the schema (a check
+without `maxRounds`) and resent. The review policy it attached in parso 3
+never ran, because the check failed on every round and a review only follows
+a passing check.
+
+**The parent never saw how many tests were failing.** A failed node's
+blockers are the failing-check findings, and the parent's result compacts
+each blocker to its first 512 bytes (`MAX_REVIEW_TEXT_BYTES`,
+`src/orchestrator.ts:47`). The finding opens with the command and exit status
+and then the last 2 KiB of output, so the 512 bytes hold a few `FAILED` test
+names and cut off pytest's closing `N failed, M passed` line. The repair
+worker is handed the full 2 KiB and does see it. D24's result line is meant
+to carry that count to the parent as a field of its own.
+
+On `parso-cluster-20` the graph lost within the limit: 27 failures left at
+4.3x sol's time, where sol resolved for $2.13 in 7 minutes. The check loop
+kept luna going (1740 alone, 1961 here), but each round closed less of the
+gap than one node's worth of work costs in wall-clock.
 
 ```bash
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore

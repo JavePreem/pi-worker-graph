@@ -285,7 +285,7 @@ async function prepareExecution({ suite, tasks, manifest, arms = [] }) {
 
   const toolchain = await prepareToolchain({
     dir: TOOLCHAIN,
-    piSpec: flag("pi", "@earendil-works/pi-coding-agent@0.85.1"),
+    piSpec: flag("pi", "@earendil-works/pi-coding-agent@0.99.1"),
     packageSpec: flag("package-spec", "pi-worker-graph@latest"),
   });
   console.log(
