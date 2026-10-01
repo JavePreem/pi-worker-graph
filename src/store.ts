@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
 import {
   chmod,
@@ -636,6 +636,154 @@ function coordinationDirectory(stateRoot: string, runId: string): string {
  */
 export function runSessionDirectory(stateRoot: string, runId: string): string {
   return join(runPath(stateRoot, runId), "sessions");
+}
+
+/**
+ * Bounds on one round's trace: what a parent can read of a round it asks
+ * about. A target is a path or the start of a command, never a result.
+ */
+export const ROUND_TRACE_LIMITS = Object.freeze({
+  maxCalls: 200,
+  maxTargetChars: 200,
+  maxBytes: 16 * 1024,
+});
+
+export interface RoundTraceCall {
+  readonly tool: string;
+  readonly target?: string;
+  readonly failed: boolean;
+}
+
+/**
+ * One model round of a node, as its worker ran it: one line per tool call and
+ * the worker's last message. Worker-authored apart from its keys, so whoever
+ * shows it to a model labels it untrusted.
+ */
+export interface RoundTrace {
+  readonly taskId: string;
+  /** 1-based position in the node's rounds. */
+  readonly round: number;
+  readonly kind: "work" | "repair" | "redirect" | "review";
+  readonly stopped?: "redirect" | "abort";
+  readonly calls: readonly RoundTraceCall[];
+  readonly omittedCalls?: number;
+  readonly lastMessage?: string;
+}
+
+const ROUND_TRACE_KINDS = new Set(["work", "repair", "redirect", "review"]);
+const ROUND_TRACE_FIELDS = new Set([
+  "schemaVersion",
+  "taskId",
+  "round",
+  "kind",
+  "stopped",
+  "calls",
+  "omittedCalls",
+  "lastMessage",
+]);
+
+function roundTracePath(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+  round: number,
+): string {
+  if (typeof taskId !== "string" || taskId.length === 0) {
+    throw new RunStoreError("invalid_argument", "Invalid round trace task ID");
+  }
+  if (!Number.isSafeInteger(round) || round < 1) {
+    throw new RunStoreError("invalid_argument", "Invalid round trace round");
+  }
+  // A task ID need not be a file name, so the directory is its digest.
+  const digest = createHash("sha256").update(taskId).digest("hex");
+  return join(
+    runPath(stateRoot, runId),
+    "traces",
+    digest.slice(0, 32),
+    `${round}${RECORD_SUFFIX}`,
+  );
+}
+
+function validateRoundTrace(value: unknown, path: string): RoundTrace {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((field) => !ROUND_TRACE_FIELDS.has(field)) ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    typeof value.taskId !== "string" ||
+    typeof value.round !== "number" ||
+    !Number.isSafeInteger(value.round) ||
+    value.round < 1 ||
+    typeof value.kind !== "string" ||
+    !ROUND_TRACE_KINDS.has(value.kind) ||
+    (value.stopped !== undefined &&
+      value.stopped !== "redirect" &&
+      value.stopped !== "abort") ||
+    !Array.isArray(value.calls) ||
+    value.calls.length > ROUND_TRACE_LIMITS.maxCalls ||
+    !value.calls.every(
+      (call) =>
+        isRecord(call) &&
+        Object.keys(call).every((field) =>
+          ["tool", "target", "failed"].includes(field),
+        ) &&
+        typeof call.tool === "string" &&
+        (call.target === undefined ||
+          (typeof call.target === "string" &&
+            [...call.target].length <= ROUND_TRACE_LIMITS.maxTargetChars)) &&
+        typeof call.failed === "boolean",
+    ) ||
+    (value.omittedCalls !== undefined &&
+      (typeof value.omittedCalls !== "number" ||
+        !Number.isSafeInteger(value.omittedCalls) ||
+        value.omittedCalls < 1)) ||
+    (value.lastMessage !== undefined && typeof value.lastMessage !== "string")
+  ) {
+    return invalidRecord(path, "not a round trace");
+  }
+  const { schemaVersion: _schemaVersion, ...trace } = value;
+  return trace as unknown as RoundTrace;
+}
+
+/**
+ * Publishes one round's trace, once. Exclusive like every immutable record: a
+ * second trace for the same round fails `record_exists` rather than replacing
+ * the first. Refused, not truncated, past `ROUND_TRACE_LIMITS`: the adapter
+ * that captures a trace bounds it, and choosing what to drop is its call.
+ */
+export async function publishRoundTrace(
+  stateRoot: string,
+  runId: string,
+  trace: RoundTrace,
+): Promise<void> {
+  const path = roundTracePath(stateRoot, runId, trace.taskId, trace.round);
+  const record = { schemaVersion: SCHEMA_VERSION, ...trace };
+  validateRoundTrace(record, path);
+  if (Buffer.byteLength(JSON.stringify(record)) > ROUND_TRACE_LIMITS.maxBytes) {
+    throw new RunStoreError(
+      "record_too_large",
+      `Round trace exceeds the ${ROUND_TRACE_LIMITS.maxBytes} byte limit`,
+      path,
+    );
+  }
+  // Only for a task of a run that exists: a trace never creates a run.
+  findTask(await readRun(stateRoot, runId), trace.taskId);
+  await mkdir(dirname(path), { recursive: true, mode: DIRECTORY_MODE });
+  await publishRecord(path, record);
+}
+
+export async function readRoundTrace(
+  stateRoot: string,
+  runId: string,
+  taskId: string,
+  round: number,
+): Promise<RoundTrace> {
+  const path = roundTracePath(stateRoot, runId, taskId, round);
+  findTask(await readRun(stateRoot, runId), taskId);
+  const trace = validateRoundTrace(await readJson(path), path);
+  if (trace.taskId !== taskId || trace.round !== round) {
+    return invalidRecord(path, "round trace identity mismatch");
+  }
+  return trace;
 }
 
 function recordId(fileName: string): string {

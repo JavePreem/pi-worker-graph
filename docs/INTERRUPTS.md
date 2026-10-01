@@ -1,10 +1,10 @@
 # Interruptible graphs (D24): implementation plan
 
-Status 2026-09-30: decided and documented, **not implemented**. The decision is
-D24 in [`DECISIONS.md`](DECISIONS.md), with amendments to D12, D13, D15 and
-D20. The README marks the behaviour below as planned. This page is the plan to
-build it from: what was agreed, what Pi offers, what changes where, how it is
-tested, and how to resume.
+Status 2026-10-01: **built**, on fakes; not yet run live (see **Verification
+after the build**). The decision is D24 in [`DECISIONS.md`](DECISIONS.md),
+with amendments to D12, D13, D15 and D20. This page is the plan it was built
+from; **What the build settled** records where the code answered a question
+the plan left open.
 
 ## Why
 
@@ -322,6 +322,37 @@ next event, redirect a node, or abort it.
   changes only where it asserts the active tool set, which gains
   `worker_graph_control`.
 
+## What the build settled
+
+- **An event's round is the model round its check judged**, the round before
+  the check in the node's rounds, so `inspect` takes it as given.
+- **A node with neither check nor review is not redirectable.** It runs one
+  round, raises no round event, and keeps no session; `redirect` says so. Its
+  round still leaves a trace, as round 1.
+- **Settle events come from wrapping the executor**, not from progress, so
+  they hold for any executor; the status is the one the executor's result
+  implies, and a node cut off by its timeout settles failed, as the runner
+  records it.
+- **Some events do not return.** A node's settle that leaves no other node
+  able to run (every other node settled or behind one that did not succeed)
+  waits for the result instead, and so does any event of a graph that is
+  stopping, by abort or budget. A one-node graph therefore reads as before.
+- **Usage is reported once.** Each result's Pi `usage` is what earlier results
+  of the graph did not report; `details.usage` stays the graph's total.
+- **The guard holds the session while the parent is owed a result**, not only
+  while workers run, so a graph that settles between calls is still
+  delivered. It continues up to three times without a call to either tool,
+  and aborts the graph at the fourth; a cancelled turn (`outcome: "aborted"`)
+  or a boundary that cannot continue aborts at once. An abort appends a
+  message saying so.
+- **Redirect refusals**: during the check or the review; a fifth; an
+  assignment that would take the payload past `maxPayloadBytes`; a settled,
+  unstarted, or unknown node. A redirect accepted as its round was ending
+  still runs, since the parent was told it would.
+- **The bench reads both tools.** `bench/cell.mjs` collects final results from
+  `worker_graph` and `worker_graph_control`; the never-started check reads
+  final results only.
+
 ## Verification after the build
 
 1. `npm run check`, then pack a build into `handoff/builds/` with its hash.
@@ -348,7 +379,13 @@ Prices behind these (Pi's catalog, `azure-openai-responses`, per million
 tokens): `gpt-5.6-sol` $4 input, $20 output, $0.40 cache read, $5 cache write;
 `gpt-5.6-luna` $0.20, $1.20, $0.02, $0.25. Sol is 20x luna, 16.7x on output.
 
-## Where things stand (2026-09-30)
+## Where things stand (2026-10-01)
+
+- D24 built and `npm run check` passing, on fakes, uncommitted. Not yet
+  verified: that `agent_before_settle` fires in RPC mode, and the redirect
+  framing against Azure. Next is **Verification after the build**, step 1.
+
+## Where things stood (2026-09-30)
 
 - Committed through `7afd966`, which holds the bytecode-cache fix
   (`src/check.ts`) and the restore prompt line and grading cache. Uncommitted:

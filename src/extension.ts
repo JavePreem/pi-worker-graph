@@ -13,6 +13,7 @@ import {
 import { isRecord } from "./json.js";
 import {
   registerWorkerGraphOrchestratorTool,
+  WORKER_GRAPH_CONTROL_TOOL_NAME,
   WORKER_GRAPH_TOOL_NAME,
   type WorkerGraphOrchestratorDependencies,
   workerProfilesContext,
@@ -98,6 +99,19 @@ interface WorkerGraphModeState {
   readonly thinkingLevelBeforeMode?: PiSessionThinkingLevel;
 }
 
+/** The tools the mode adds to the parent, and removes again. */
+const GRAPH_TOOLS: ReadonlySet<string> = new Set([
+  WORKER_GRAPH_TOOL_NAME,
+  WORKER_GRAPH_CONTROL_TOOL_NAME,
+]);
+
+/**
+ * How many turns in a row the parent may end with a graph running and no
+ * call to either graph tool before the graph is aborted.
+ */
+const MAX_IDLE_CONTINUATIONS = 3;
+const GRAPH_RUNNING_MESSAGE_TYPE = "worker-graph-running";
+
 function modeToolSnapshot(value: unknown): readonly string[] | undefined {
   if (
     !Array.isArray(value) ||
@@ -113,7 +127,7 @@ function modeToolSnapshot(value: unknown): readonly string[] | undefined {
       tool.trim().length === 0 ||
       tool !== tool.trim() ||
       Buffer.byteLength(tool) > MAX_MODE_NAME_BYTES ||
-      tool === WORKER_GRAPH_TOOL_NAME ||
+      GRAPH_TOOLS.has(tool) ||
       tools.includes(tool)
     ) {
       return undefined;
@@ -448,7 +462,7 @@ export default function registerWorkerGraph(
   const resolved = orchestratorDependencies(dependencies);
   const loadConfiguration =
     resolved.loadConfiguration ?? loadWorkerGraphConfiguration;
-  registerWorkerGraphOrchestratorTool(pi, resolved);
+  const graphs = registerWorkerGraphOrchestratorTool(pi, resolved);
 
   let enabled = false;
   let toolsBeforeMode: readonly string[] | undefined;
@@ -501,7 +515,7 @@ export default function registerWorkerGraph(
       restored?.toolsBeforeMode ??
       toolsBeforeMode ??
       modeToolSnapshot(
-        pi.getActiveTools().filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
+        pi.getActiveTools().filter((name) => !GRAPH_TOOLS.has(name)),
       );
     if (snapshot === undefined) return refuse(UNRESTORABLE_TOOLS_MESSAGE);
 
@@ -526,7 +540,7 @@ export default function registerWorkerGraph(
     const applyTools = () => {
       pi.setActiveTools([
         ...snapshot.filter((name) => !DISABLED_PARENT_TOOLS.has(name)),
-        WORKER_GRAPH_TOOL_NAME,
+        ...GRAPH_TOOLS,
       ]);
     };
 
@@ -627,10 +641,8 @@ export default function registerWorkerGraph(
       return failed;
     }
     const active = pi.getActiveTools();
-    if (active.includes(WORKER_GRAPH_TOOL_NAME)) {
-      pi.setActiveTools(
-        active.filter((name) => name !== WORKER_GRAPH_TOOL_NAME),
-      );
+    if (active.some((name) => GRAPH_TOOLS.has(name))) {
+      pi.setActiveTools(active.filter((name) => !GRAPH_TOOLS.has(name)));
     }
     return failed;
   };
@@ -768,7 +780,60 @@ export default function registerWorkerGraph(
       ctx.ui.notify(restored.refused, "error");
     }
   });
+  /**
+   * A graph outlives the call that started it, so the parent could end its
+   * turn with workers still writing the checkout. It cannot: at Pi's last
+   * boundary before the session settles, a running graph holds it open and
+   * says why. A parent that keeps ending its turn without acting on the
+   * graph has the graph aborted rather than looping, and a cancelled run
+   * aborts it, as cancelling `worker_graph` does.
+   */
+  let idleContinuations = 0;
+  let callsSeen = graphs.calls();
+  pi.on("agent_before_settle", async (event) => {
+    const pending = graphs.pending();
+    const calls = graphs.calls();
+    if (calls !== callsSeen) {
+      callsSeen = calls;
+      idleContinuations = 0;
+    }
+    if (pending === undefined) return {};
+    const name = pending.runId === undefined ? "" : ` ${pending.runId}`;
+    if (
+      event.outcome === "aborted" ||
+      !event.context.canContinue ||
+      idleContinuations >= MAX_IDLE_CONTINUATIONS
+    ) {
+      await graphs.abort();
+      idleContinuations = 0;
+      return {
+        entries: [
+          {
+            type: "custom_message" as const,
+            customType: GRAPH_RUNNING_MESSAGE_TYPE,
+            content: `Worker graph${name} was aborted: the session settled while it was still running. Completed work is in the checkout.`,
+            display: true,
+          },
+        ],
+      };
+    }
+    idleContinuations += 1;
+    return {
+      entries: [
+        {
+          type: "custom_message" as const,
+          customType: GRAPH_RUNNING_MESSAGE_TYPE,
+          content: `Worker graph${name} is still running. Call ${WORKER_GRAPH_CONTROL_TOOL_NAME}: wait for its next event, redirect a node, or abort it.`,
+          display: true,
+        },
+      ],
+      continue: true,
+    };
+  });
+
   pi.on("session_shutdown", async (_event, ctx) => {
+    // No worker outlives the session that started it.
+    await graphs.abort();
     /**
      * A failed restore is discarded rather than notified here. Pi stops the
      * TUI before it emits this event on the interactive quit path, so a
@@ -900,6 +965,8 @@ export default function registerWorkerGraph(
         ctx.ui.notify("Worker-graph mode enabled", "info");
       } else if (action === "off") {
         enabled = false;
+        // Before the tools go: a graph nobody can wait on is stopped.
+        await graphs.abort();
         const restoreFailed = await deactivate(ctx);
         persistModeState();
         // Reported before the confirmation: leaving the mode on a model the

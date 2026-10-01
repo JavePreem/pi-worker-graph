@@ -94,7 +94,7 @@ The graph is immutable after execution starts. Coordination events and directed
 messages are read explicitly rather than injected globally or delivered as live
 steering messages.
 
-D24 (planned) lets the parent interrupt a node's round and restart it with a
+D24 lets the parent interrupt a node's round and restart it with a
 new assignment. The graph's nodes and edges stay what the parent submitted; what
 changes is one node's next round, and only by stopping the round in flight,
 never by steering it.
@@ -109,7 +109,7 @@ process-tree cancellation boundary and keeps worker failures isolated from the
 orchestrator. SDK sessions remain a possible post-MVP optimization, not a second
 MVP transport.
 
-Amended by D24 (planned): a work or repair round keeps its Pi session under
+Amended by D24: a checked or reviewed node's work or repair round keeps its Pi session under
 the run's directory, a new one for every round, so a round the parent
 interrupts can be resumed. Nothing else reads it, and it goes with the run.
 
@@ -134,7 +134,7 @@ transcripts or tool payloads. Final results contain a separately bounded compact
 projection of structured worker reports and label worker-authored fields as
 untrusted data.
 
-Amended by D24 (planned): a second tool, `worker_graph_control`, acts on a
+Amended by D24: a second tool, `worker_graph_control`, acts on a
 graph `worker_graph` started, and `worker_graph` returns at round events
 rather than only when the graph ends. Progress still carries no transcript or
 tool payload. A round's tool trace reaches the parent only when it asks for
@@ -287,7 +287,7 @@ and a repair still receives only the structured findings. The session lives in
 the run's directory, outside the checkout, and is deleted with the run. With
 no run directory the rounds start fresh, as before.
 
-Amended 2026-09-30 by D24 (planned): a round the parent interrupts is
+Amended 2026-09-30 by D24: a round the parent interrupts is
 resumed, not restarted, when the parent redirects it. The context carried
 forward is the interrupted worker's own, what it read and did in that round,
 and the new assignment is explicit. Every other work and repair round still
@@ -437,7 +437,7 @@ runs; the runtime detects that change and never restores it (D5).
 
 ## D24. The parent can interrupt a round, not steer it
 
-Decided 2026-09-30; not yet implemented. The plan is
+Decided 2026-09-30; built 2026-10-01. The plan it was built from is
 [`docs/INTERRUPTS.md`](INTERRUPTS.md).
 
 A running graph reports each failed check round to the parent, and the parent

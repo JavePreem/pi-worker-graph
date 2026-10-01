@@ -57,6 +57,9 @@ export function promptFingerprint(suite, tasks) {
   return hash.digest("hex").slice(0, 12);
 }
 
+/** The tools whose results can carry a graph's final result. */
+const GRAPH_TOOLS = new Set(["worker_graph", "worker_graph_control"]);
+
 /**
  * Whether one `worker_graph` result is a graph in which no worker ever ran.
  *
@@ -341,7 +344,7 @@ function gradeDetail(graded, client, startedAt) {
     // The tool's own result text carries per-task worker accounting, which
     // is what the spend split is computed from later.
     workerGraphResults: client.toolCalls
-      .filter((c) => c.toolName === "worker_graph")
+      .filter((c) => GRAPH_TOOLS.has(c.toolName))
       .map((c) => c.text),
     wallClockMs: Date.now() - startedAt,
     ...(graded.detail === undefined ? {} : { gradeDetail: graded.detail }),
@@ -604,9 +607,12 @@ export async function runCell({
     // them apart. `analyse` deliberately reports a degenerate cell rather than
     // dropping it, so a cell that got here by fault would be counted as a loss
     // against the arm.
+    // Final results only: since D24 a graph's result can come from either
+    // tool, and a result naming a graph still running says nothing yet.
     const results = client.toolCalls
-      .filter((c) => c.toolName === "worker_graph")
-      .map((c) => c.text ?? "");
+      .filter((c) => GRAPH_TOOLS.has(c.toolName))
+      .map((c) => c.text ?? "")
+      .filter((text) => text.includes("<worker_graph_reports_json>"));
     const startupFailures = results.filter(noWorkerStarted).length;
     if (results.length > 0 && startupFailures === results.length) {
       return makeRecord({

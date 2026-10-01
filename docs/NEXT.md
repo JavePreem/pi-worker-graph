@@ -804,9 +804,9 @@ What remains, in order:
         again, 1961/1988, $0.769, no frozen failures; four one-node graphs
         each ran out of check rounds.
    6a. Build D24, interruptible graphs: round events reach the parent while a
-      graph runs, and it can inspect a round or redirect a node. Decided and
-      documented 2026-09-30, not built. The plan, what Pi 0.99.1 offers, the
-      changes by file, the tests, and how to resume are in
+      graph runs, and it can inspect a round or redirect a node. Decided
+      2026-09-30, built 2026-10-01 on fakes, not yet run live. The plan, what
+      the build settled, and the verification still to do are in
       [`docs/INTERRUPTS.md`](INTERRUPTS.md). Then re-run `graph-luna` on
       `parso-cluster-20` with it.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
