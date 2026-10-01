@@ -43,11 +43,6 @@ import {
   TASK_USAGE_LIMITS,
   writeNodeState,
 } from "../src/index.js";
-import {
-  publishRoundTrace,
-  ROUND_TRACE_LIMITS,
-  readRoundTrace,
-} from "../src/store.js";
 import { nodeOutput } from "./fixtures.js";
 
 async function temporaryStateRoot(t: test.TestContext): Promise<string> {
@@ -2269,105 +2264,5 @@ test("reports rather than absorbs a run whose output state disagrees", async (t)
   await rejectsWithCode(
     () => readRunUsage(root, manifest.runId),
     "invalid_record",
-  );
-});
-
-// --- round traces -----------------------------------------------------------
-
-const roundTrace = {
-  taskId: "task",
-  round: 2,
-  kind: "repair" as const,
-  calls: [
-    { tool: "read", target: "src/parse.ts", failed: false },
-    { tool: "bash", target: "npm test", failed: true },
-  ],
-  lastMessage: "Still two failures.",
-};
-
-test("a round trace is read back as it was published", async (t) => {
-  const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await publishRoundTrace(root, manifest.runId, roundTrace);
-  assert.deepEqual(
-    await readRoundTrace(root, manifest.runId, "task", 2),
-    roundTrace,
-  );
-  await rejectsWithCode(
-    () => readRoundTrace(root, manifest.runId, "task", 3),
-    "not_found",
-  );
-});
-
-test("a round trace is immutable once published", async (t) => {
-  const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await publishRoundTrace(root, manifest.runId, roundTrace);
-  await rejectsWithCode(
-    () =>
-      publishRoundTrace(root, manifest.runId, {
-        ...roundTrace,
-        lastMessage: "Rewritten.",
-      }),
-    "record_exists",
-  );
-  assert.equal(
-    (await readRoundTrace(root, manifest.runId, "task", 2)).lastMessage,
-    "Still two failures.",
-  );
-});
-
-test("a round trace past its bounds or for another task is refused", async (t) => {
-  const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await rejectsWithCode(
-    () =>
-      publishRoundTrace(root, manifest.runId, {
-        ...roundTrace,
-        lastMessage: "x".repeat(ROUND_TRACE_LIMITS.maxBytes),
-      }),
-    "record_too_large",
-  );
-  await rejectsWithCode(
-    () =>
-      publishRoundTrace(root, manifest.runId, {
-        ...roundTrace,
-        calls: Array.from({ length: ROUND_TRACE_LIMITS.maxCalls + 1 }, () => ({
-          tool: "read",
-          failed: false,
-        })),
-      }),
-    "invalid_record",
-  );
-  await rejectsWithCode(
-    () =>
-      publishRoundTrace(root, manifest.runId, {
-        ...roundTrace,
-        taskId: "other",
-      }),
-    "unknown_task",
-  );
-});
-
-test("a run's round traces go with the run", async (t) => {
-  const root = await temporaryStateRoot(t);
-  const manifest = await createRun(
-    root,
-    normalizeGraph({ tasks: [{ id: "task" }] }),
-  );
-  await publishRoundTrace(root, manifest.runId, roundTrace);
-  assert.equal(await deleteRun(root, manifest.runId), true);
-  await rejectsWithCode(
-    () => readRoundTrace(root, manifest.runId, "task", 2),
-    "not_found",
   );
 });

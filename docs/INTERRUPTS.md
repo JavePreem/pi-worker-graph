@@ -1,10 +1,10 @@
 # Interruptible graphs (D24): implementation plan
 
-Status 2026-10-01: **built**, on fakes; not yet run live (see **Verification
-after the build**). The decision is D24 in [`DECISIONS.md`](DECISIONS.md),
-with amendments to D12, D13, D15 and D20. This page is the plan it was built
-from; **What the build settled** records where the code answered a question
-the plan left open.
+Status 2026-10-01: **built, measured, and reverted.** It was built in
+`eef24ba` and reverted after three cells an arm showed it a regression on
+`parso-cluster-20` (D24 in [`DECISIONS.md`](DECISIONS.md) says why). This
+page is kept as the record of the plan, what the build settled, and what was
+measured; nothing on it describes current behaviour.
 
 ## Why
 
@@ -343,8 +343,11 @@ next event, redirect a node, or abort it.
   while workers run, so a graph that settles between calls is still
   delivered. It continues up to three times without a call to either tool,
   and aborts the graph at the fourth; a cancelled turn (`outcome: "aborted"`)
-  or a boundary that cannot continue aborts at once. An abort appends a
-  message saying so.
+  aborts at once. An abort appends a message saying so. The guard does not
+  read `event.context.canContinue`: at this boundary the context ends on the
+  parent's reply, so it is false until the guard's own message is appended
+  (`agent-session.js` `_buildBoundaryContext`, Pi 0.99.1). Entries other
+  handlers proposed are kept, since Pi chains them.
 - **Redirect refusals**: during the check or the review; a fifth; an
   assignment that would take the payload past `maxPayloadBytes`; a settled,
   unstarted, or unknown node. A redirect accepted as its round was ending
@@ -381,9 +384,43 @@ tokens): `gpt-5.6-sol` $4 input, $20 output, $0.40 cache read, $5 cache write;
 
 ## Where things stand (2026-10-01)
 
-- D24 built and `npm run check` passing, on fakes, uncommitted. Not yet
-  verified: that `agent_before_settle` fires in RPC mode, and the redirect
-  framing against Azure. Next is **Verification after the build**, step 1.
+- D24 built in `eef24ba`. Build for cells:
+  `handoff/builds/interrupts-2-2026-10-01.tgz` (hash in `SHA256SUMS`);
+  `interrupts-2026-10-01.tgz` has the settle-guard bug below and is not for
+  cells.
+- **Redirect framing, live** (Azure luna, Pi 0.99.1, $0.0016): a checked
+  node's work round was stopped mid-`bash` (`sleep 60`) through its node
+  control. The redirect round resumed the same session (one session file,
+  the second user message framed), read 3330 tokens from the cache on its
+  first turn, passed no content filter, and the node succeeded on its check.
+- **Settle guard in RPC mode, live** (luna parent and workers, $0.0034): the
+  first probe found the guard aborting every graph, because it read
+  `event.context.canContinue`, which is false at this boundary until an entry
+  is appended. Fixed, with the guard also keeping earlier handlers' entries.
+  Re-run: the parent ended its turn with a node running, the guard held it
+  once, the parent called `wait` and received the final result, both nodes
+  succeeded.
+- **First cells, one each** (`bench/DESIGN.md` **Pi 0.99.1 and D24**):
+  parso with D24 timed out (last check 1927/1988, $0.892, 22 parent turns);
+  chess with D24 resolved ($0.376, no regression against $0.514); parso on
+  0.99.1 without D24 resolved ($0.404, 5 parent turns). Against **What would
+  count as success**: it did not work on parso (no resolution, and the one
+  redirect went from 168 to 173 failures), and it did not regress chess. One
+  cell per arm cannot separate D24 from Pi or from run-to-run spread.
+- **What the cells showed about the design.** Events fire at round
+  boundaries, so the parent's redirect landed 7 s into the next repair: in
+  practice it replaced that repair's assignment rather than interrupting
+  work. The extra parent turns cost money ($0.28 on parso), not time; the
+  parent spent under a minute of each cell outside the graph tools.
+- **Repeats, three cells an arm** (`bench/DESIGN.md` **Repeats,
+  2026-10-01**): on parso, without D24 3/3 resolved at $0.404-0.523 in
+  18-21 minutes; with D24 2/3 at $0.771-1.418 in 29-34 minutes. The ranges do
+  not overlap (p = 0.05 one-sided). With D24 the second node failed every
+  time and a third was needed; five redirects, no redirected node passed.
+  D24 as built is a regression on parso. Chess says nothing either way.
+- **Reverted 2026-10-01**: `src/`, `test/`, `bench/cell.mjs` and the README
+  are back at `bb735b5`'s runtime. The builds stay in `handoff/builds/` for
+  any re-test.
 
 ## Where things stood (2026-09-30)
 

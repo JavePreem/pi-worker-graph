@@ -377,15 +377,9 @@ test("keeps the parent graph tool inactive until explicitly enabled", async (t) 
   parentSession(t);
   const session = modeSession({ active: ["read", "edit", "write"] });
 
-  assert.deepEqual(session.active, [
-    "read",
-    "edit",
-    "write",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "edit", "write", "worker_graph"]);
   await session.start();
-  assert.deepEqual(session.tools, ["worker_graph", "worker_graph_control"]);
+  assert.deepEqual(session.tools, ["worker_graph"]);
   assert.deepEqual(session.commands, ["swarm"]);
   assert.deepEqual(session.flags, ["swarm"]);
   assert.deepEqual(session.active, ["read", "edit", "write"]);
@@ -416,21 +410,13 @@ test("startup mode suppresses parent write tools and restores its snapshot", asy
   const suppressed = ["read", "bash", "edit", "write"];
 
   await session.start();
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
 
   session.active = ["read", "custom", "worker_graph"];
   await session.swarm("off");
   assert.deepEqual(session.active, suppressed);
   await session.swarm("on");
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
   await session.swarm("status");
 
   assert.deepEqual(session.entries, [
@@ -454,12 +440,7 @@ test("restores branch-scoped mode state on resume and tree navigation", async (t
   const enabled = modeEntry(true, ["read", "bash", "edit", "write", "custom"]);
 
   await session.start([enabled]);
-  assert.deepEqual(session.active, [
-    "read",
-    "custom",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "custom", "worker_graph"]);
 
   await session.tree([enabled, modeEntry(false)]);
   assert.deepEqual(session.active, ["read", "bash", "edit", "write", "custom"]);
@@ -471,11 +452,7 @@ test("the startup flag does not undo an explicit off across the session tree", a
   const suppressed = ["read", "bash", "edit", "write"];
 
   await session.start();
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
 
   await session.swarm("off");
   assert.deepEqual(session.active, suppressed);
@@ -484,11 +461,7 @@ test("the startup flag does not undo an explicit off across the session tree", a
   assert.deepEqual(session.active, suppressed);
 
   await session.start();
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
 });
 
 test("refuses to enable a mode whose tool snapshot could not be restored", async (t) => {
@@ -931,11 +904,7 @@ test("moves the parent onto the configured orchestrator model and back", async (
   await session.swarm("on");
   assert.deepEqual(session.model, ORCHESTRATOR_MODEL);
   assert.equal(session.thinkingLevel, "high");
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
 
   await session.swarm("off");
   assert.deepEqual(session.model, STARTING_MODEL);
@@ -1083,11 +1052,7 @@ test("puts back a model the configuration no longer names", async (t) => {
   await session.start([recorded]);
   assert.deepEqual(session.model, STARTING_MODEL);
   assert.equal(session.thinkingLevel, "medium");
-  assert.deepEqual(session.active, [
-    "read",
-    "worker_graph",
-    "worker_graph_control",
-  ]);
+  assert.deepEqual(session.active, ["read", "worker_graph"]);
   assert.deepEqual(session.notifications, []);
 });
 
@@ -1455,186 +1420,4 @@ test("a configuration caught mid-save keeps the last names that were read", asyn
   // reviving a renamed profile would recreate the rejection this prevents.
   assert.match(block.content, /- author: /u);
   assert.doesNotMatch(block.content, /- writer: /u);
-});
-
-// --- a graph that outlives its call -----------------------------------------
-
-interface GraphSession {
-  readonly settle: (
-    fields?: Record<string, unknown>,
-  ) => Promise<{ continue?: boolean; entries?: { content: string }[] }>;
-  readonly shutdown: () => Promise<void>;
-  readonly start: () => Promise<unknown>;
-  readonly control: (params: Record<string, unknown>) => Promise<unknown>;
-  readonly started: Promise<void>;
-  readonly aborted: () => boolean;
-}
-
-async function graphSession(t: test.TestContext): Promise<GraphSession> {
-  parentSession(t);
-  const stateRoot = await mkdtemp(join(tmpdir(), "pi-worker-graph-"));
-  t.after(() => rm(stateRoot, { recursive: true, force: true }));
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-  const tools = new Map<
-    string,
-    {
-      execute: (
-        id: string,
-        params: unknown,
-        signal: undefined,
-        onUpdate: undefined,
-        ctx: unknown,
-      ) => Promise<unknown>;
-    }
-  >();
-  let active: string[] = [];
-  let aborted = false;
-  let markStarted: () => void = () => {};
-  const started = new Promise<void>((resolve) => {
-    markStarted = resolve;
-  });
-  registerWorkerGraph(
-    {
-      registerTool(tool: { name: string }) {
-        tools.set(tool.name, tool as never);
-      },
-      registerCommand() {},
-      registerFlag() {},
-      getFlag: () => false,
-      getActiveTools: () => [...active],
-      setActiveTools(names: string[]) {
-        active = [...names];
-      },
-      on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
-        handlers.set(event, handler);
-      },
-    } as never,
-    {
-      getAgentDirectory: () => stateRoot,
-      loadConfiguration: async () =>
-        ({
-          stateRoot,
-          maxRetainedRuns: 64,
-          profiles: {
-            writer: {
-              provider: "test-provider",
-              model: "test-model",
-              thinkingLevel: "medium",
-              tools: ["read"],
-            },
-          },
-        }) as never,
-      createExecutor: () => async (input) => {
-        markStarted();
-        await new Promise((resolve) =>
-          input.signal.addEventListener("abort", resolve, { once: true }),
-        );
-        aborted = true;
-        return { output: nodeOutput("Stopped") };
-      },
-    },
-  );
-  const ctx = { cwd: stateRoot };
-  const handler = (event: string) => {
-    const found = handlers.get(event);
-    if (!found) throw new Error(`${event} was not registered`);
-    return found;
-  };
-  const tool = (name: string) => {
-    const found = tools.get(name);
-    if (!found) throw new Error(`${name} was not registered`);
-    return found;
-  };
-  return {
-    settle: async (fields = {}) =>
-      (await handler("agent_before_settle")(
-        {
-          type: "agent_before_settle",
-          entries: [],
-          continue: false,
-          outcome: "completed",
-          context: { canContinue: true },
-          ...fields,
-        },
-        ctx,
-      )) as never,
-    shutdown: async () => {
-      await handler("session_shutdown")({}, ctx);
-    },
-    start: () =>
-      tool("worker_graph").execute(
-        "graph-id",
-        { tasks: [{ id: "task", profile: "writer", assignment: "Work" }] },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    control: (params) =>
-      tool("worker_graph_control").execute(
-        "control-id",
-        params,
-        undefined,
-        undefined,
-        ctx,
-      ),
-    started,
-    aborted: () => aborted,
-  };
-}
-
-test("a session cannot settle while its graph runs, and stops asking after three idle turns", async (t) => {
-  const session = await graphSession(t);
-  assert.deepEqual(await session.settle(), {}, "no graph, nothing held");
-
-  const graph = session.start();
-  await session.started;
-  for (let turn = 0; turn < 2; turn += 1) {
-    const held = await session.settle();
-    assert.equal(held.continue, true);
-    assert.match(
-      held.entries?.[0]?.content ?? "",
-      /^Worker graph [0-9a-f-]{36} is still running\. Call worker_graph_control/u,
-    );
-  }
-  // Acting on the graph, even with a refused redirect, resets the count.
-  await session.control({
-    action: "redirect",
-    taskId: "nope",
-    assignment: "Anything",
-  });
-  for (let turn = 0; turn < 3; turn += 1) {
-    assert.equal((await session.settle()).continue, true);
-  }
-  const released = await session.settle();
-  assert.equal(released.continue, undefined);
-  assert.match(released.entries?.[0]?.content ?? "", /was aborted/u);
-  assert.equal(session.aborted(), true);
-  assert.equal(
-    ((await graph) as { details: { status: string } }).details.status,
-    "aborted",
-  );
-  assert.deepEqual(
-    await session.settle(),
-    {},
-    "settled once the graph is gone",
-  );
-});
-
-test("a cancelled turn aborts the graph rather than continuing", async (t) => {
-  const session = await graphSession(t);
-  const graph = session.start();
-  await session.started;
-  const settled = await session.settle({ outcome: "aborted" });
-  assert.equal(settled.continue, undefined);
-  assert.equal(session.aborted(), true);
-  await graph;
-});
-
-test("shutting the session down aborts a running graph", async (t) => {
-  const session = await graphSession(t);
-  const graph = session.start();
-  await session.started;
-  await session.shutdown();
-  assert.equal(session.aborted(), true);
-  await graph;
 });

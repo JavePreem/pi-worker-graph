@@ -2219,6 +2219,95 @@ On `parso-cluster-20` the graph lost within the limit: 27 failures left at
 kept luna going (1740 alone, 1961 here), but each round closed less of the
 gap than one node's worth of work costs in wall-clock.
 
+**Pi 0.99.1 and D24, 2026-10-01.** Graph-luna cells on Pi 0.99.1, one per
+row, same caps and 30-minute limit. "D24" is `interrupts-2-2026-10-01.tgz`
+(`eef24ba` plus the settle-guard fix); "no D24" is
+`pi099-no-d24-2026-10-01.tgz`, packed from `bb735b5`: the same runtime as
+the 0.85.1 cells, with the 0.99.1 pin. The parent column is sol; the rest is
+luna in nodes.
+
+| cell | build | outcome | graded | cost | parent | time | graphs, nodes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| parso | D24 | time (30 min) | 0/20 files; best check 1927/1988 | $0.892 | $0.356, 22 turns | 30 min | 3, 3 |
+| chess | D24 | resolved | 247/247 | $0.376 | $0.127, 10 turns | 14 min | 1, 1 |
+| parso | no D24 | resolved | 1988/1988 | $0.404 | $0.072, 5 turns | 18 min | 2, 2 |
+
+The first graph to resolve parso is the one without D24, at 0.19x solo sol
+($2.13). With one cell a row nothing here separates the arms: the three
+0.85.1 parso cells ended at 1760, 1874 and 1961 on the same configuration.
+
+- **Wall-clock is the workers'.** In the five graph cells measured (parso 3,
+  chess on 0.85.1, and the three above), the parent spent at least 95% of
+  the cell inside the graph tools: under a minute of its own model time and
+  reading. Model rounds took 100-290 s
+  (one outlier 631 s), checks 1-8 s. A cell's 30 minutes hold about eleven
+  model rounds.
+- **Every graph had one node at concurrency 1**, in all seven graph cells.
+  The 20 functions sit in one file under one whole-suite check, so a split
+  node's check would fail on the other nodes' functions; the parent never
+  split.
+- **What D24 bought on parso.** Round events showed the count every round:
+  298, 211, 168, 173 | 149, 130, 103, 100 | 86, 61. The parent inspected
+  three rounds, redirected once and waited ten times. The redirect stopped a
+  repair round 7 s after it started, so it replaced the next repair rather
+  than interrupting work, and the round after it went from 168 to 173. The
+  parent then re-planned from the failed node as before. 17 extra parent
+  turns over the no-D24 cell cost $0.28; they did not cost time.
+- **What D24 bought on chess.** One node, four check runs (61, 38, 7, pass),
+  three inspects, no redirect. The 0.85.1 cell needed two graphs for $0.514;
+  which of Pi and D24 made the difference is not measured.
+- **Rounds start by re-orienting.** In the six traces the parents inspected
+  (31-67 calls a round), the first edit came at call 14-20. Each round opened
+  with `git status`/`git diff`, re-read the target file, and in all six
+  probed for an upstream copy or its history (`find /`, `pip download`, `curl` to
+  raw.githubusercontent.com, `git log --all`), despite the prompt line saying
+  none exists. Repairs are fresh sessions (D20), so every round pays this.
+**Repeats, 2026-10-01**, both arms to three cells a task on Pi 0.99.1, arms
+interleaved. Parso repeats got 60 minutes, since the first D24 cell hit 30;
+chess kept 30. Caps as before.
+
+| cell | build | outcome | cost | time | parent | graphs |
+| --- | --- | --- | --- | --- | --- | --- |
+| parso D24 2 | D24 | resolved | $1.418 | 33.5 min | $0.243, 17 turns | 3 (one a sol `diagnose` node, $0.584) |
+| parso D24 3 | D24 | resolved | $0.771 | 28.8 min | $0.225, 19 turns | 3 |
+| parso no D24 2 | no D24 | resolved | $0.523 | 20.5 min | $0.102, 5 turns | 2 |
+| parso no D24 3 | no D24 | resolved | $0.430 | 19.1 min | $0.076, 5 turns | 2 |
+| chess no D24 1 | no D24 | resolved | $0.473 | 20.3 min | $0.080, 4 turns | 2 |
+| chess no D24 2 | no D24 | resolved | $0.403 | 13.9 min | $0.098, 4 turns | 2 |
+| chess D24 2 | D24 | spend cap | $1.565 | 17.7 min | $0.152, 8 turns | 3; 226/248 graded |
+
+**The reading, three cells an arm.** On parso, without D24: 3/3 resolved,
+$0.404-0.523, 18-21 minutes, 5 parent turns each. With D24: 2/3 resolved
+(the third stopped at the 30-minute limit it then had), $0.771-1.418,
+29-34 minutes for the two that resolved, 17-22 parent turns. The ranges do
+not overlap on cost or time; for three against three that is the most
+extreme of 20 orderings, so p = 0.05 one-sided. D24 as built is a
+regression on parso.
+
+- **Where the difference is.** Every parso cell's first node failed after
+  its four checks. Without D24 the second node passed every time; with D24
+  the second failed every time and a third node was needed, which is the
+  extra ten minutes. The parent's own turns add $0.15-0.28; the rest is the
+  extra node.
+- **Redirects did not help.** Five redirects over three D24 parso cells,
+  each landing 6-7 s into a repair, i.e. replacing it. No redirected node
+  passed. Where the next count is known it went 168 to 173 and 235 to 227
+  (the round before had dropped by 30).
+- **Why the second node fails with D24 is not measured.** Candidates: the
+  parent's redirects take the node's last repairs from the runtime's
+  check-output repair, and the parent plans the next node from events
+  rather than from the failed node's report. The records cannot tell these
+  apart.
+- **Chess is no evidence either way.** D24 resolved once ($0.376) and once
+  hit the cap ($1.565) because the parent split the task into four nodes
+  under sol reviews and no checks, so its first graph raised no D24 event;
+  without D24, $0.473 and $0.403.
+
+- **A cell graded at the limit takes the checkout as the clock left it.**
+  The D24 parso cell graded 0/20 files because its last, aborted repair left
+  `parso/python/errors.py` with a syntax error (line 394), so no test file
+  collected. Its last check had passed 1927/1988.
+
 ```bash
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell chess-cluster-20 solo-luna --suite restore --cap 0.5

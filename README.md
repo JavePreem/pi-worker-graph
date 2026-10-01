@@ -256,13 +256,6 @@ in order, with its own duration, usage, and the number of blockers or failing
 commands it left open. That shows the parent whether a review is converging.
 When the result is short of room, rounds are dropped before the report.
 
-Each failed check run after work is also an event for the parent while the graph runs
-(see **Orchestrator tool**, and [`docs/INTERRUPTS.md`](docs/INTERRUPTS.md)):
-the round it judged, and the last non-empty line of each
-failing command's output, such as pytest's `27 failed, 1961 passed`. It lets
-the parent tell a node that is converging from one that has stalled, whatever
-the test runner.
-
 A check runs before every review, so a reviewer only judges work that passed
 its check, and a review's repair is checked again. A checked node that
 succeeded passed its check on the work it reported; that is evidence the
@@ -271,11 +264,9 @@ runtime produced, not a worker's claim, and it costs no tokens to judge.
 ## Pi worker adapter
 
 `createPiSubprocessExecutor()` selects an explicitly named worker profile for
-each task. It starts one Pi JSON-mode child per round in the target checkout,
+each task. It starts one ephemeral Pi JSON-mode child in the target checkout,
 disables discovered extensions, skills, prompts, and session persistence, and
-applies a strict built-in tool allowlist plus the child-only report tool.
-With a run directory, each work or repair round of a checked or reviewed node keeps its own Pi session there, a new one per round,
-so a round the parent redirects can be resumed. Task
+applies a strict built-in tool allowlist plus the child-only report tool. Task
 assignments and edge context are written to stdin and never added to child-process
 arguments.
 
@@ -351,12 +342,6 @@ The adapter projects bounded progress snapshots containing only task identity,
 phase, allowlisted tool name, and numeric usage. Worker text, tool arguments,
 tool results, and stderr are never included. Progress callbacks are capped and
 cannot alter worker execution if an observer throws.
-
-Each model round's tool calls, a node's single round included, are kept as a trace under the run: one line
-per call with the tool, its target (a path, or the first 200 characters of a
-command), and whether it failed, plus the worker's last message, at most 200
-calls and 16 KiB. A trace is written once, when its round ends, and reaches the
-parent only when it asks for that round.
 
 ## Worker coordination
 
@@ -509,8 +494,7 @@ Load the package and activate orchestration explicitly:
 ```
 
 The `--swarm` extension flag enables the mode at startup. While the mode is
-off, the `worker_graph` and `worker_graph_control` tools are excluded from the
-active tool set. Enabling the
+off, the `worker_graph` tool is excluded from the active tool set. Enabling the
 mode snapshots the active tools, disables the built-in `bash`, `edit`, and
 `write` tools in the parent, and persists the mode state in the Pi session.
 Turning it off restores the exact snapshot. When the configuration names an
@@ -523,39 +507,11 @@ restores whatever the target branch recorded, so `/swarm off` is never undone
 by the flag that started the session. A tool set the extension could not read
 back — more than 256 tools, or a tool name longer than 256 bytes — refuses to
 enable the mode rather than suppressing parent tools it could not restore after
-a reload. While a graph runs, the tool streams bounded status. Worker
-transcripts never enter the parent model context; projected report fields are
-marked as untrusted data inside a labeled block that worker text cannot close.
-
-`worker_graph` returns at the first round event, a failed check run or a node
-that settled, and the graph keeps running (D24,
-[`docs/INTERRUPTS.md`](docs/INTERRUPTS.md)). Its result lists the events so
-far and each node's status. A node's settle that leaves nothing else able to
-run does not return early, and nor does an event of a graph that is being
-aborted: the result follows them. Once the graph has settled, the result is
-what it always was: node statuses, aggregate usage, and a compact bounded
-projection of worker reports. Each result reports to the session only the
-usage the previous ones did not. The parent then calls `worker_graph_control`
-with one action:
-
-- `wait`: block until the next round event, or with `until: "settled"` until
-  the graph has settled. Events that arrived in the meantime come back with
-  it, so none is lost.
-- `inspect`: return one round's tool trace, by task and round number.
-- `redirect`: stop a node's work or repair round and resume its session with a
-  new assignment, which the runtime frames as the previous attempt having been
-  stopped. It replaces the round it stops: the check after it counts toward
-  the node's rounds as usual, and the check, frozen paths, and review stay
-  as they were. It is refused while the node runs its check or its review,
-  for a node with neither (it runs one round), and past four per node.
-- `abort`: stop the graph. Completed work stays in the checkout.
-
-Nothing polls a worker and nothing reaches into a round in flight: the parent
-acts only at the events, and only by stopping a round. While a graph runs, the
-session cannot settle. At Pi's last boundary before it would, the extension
-tells the parent that the graph is still running and continues the turn; three
-such turns in a row without a control call abort the graph. Shutting the
-session down aborts it too, so no worker outlives its parent.
+a reload. While a graph runs, the tool streams bounded status and returns
+deterministic node statuses, aggregate usage, and a compact bounded projection
+of worker reports. Worker transcripts never enter the parent model context;
+projected report fields are marked as untrusted data inside a labeled block
+that worker text cannot close.
 
 Only one graph may run in a parent session at a time. Include validation as a
 dependent worker task. After reviewing the shared checkout with the remaining

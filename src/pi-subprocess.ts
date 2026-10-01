@@ -16,7 +16,6 @@ import {
   CHECK_LIMITS,
   fingerprintPaths,
   isContainedPath,
-  resultLine,
   runCheck,
 } from "./check.js";
 import type { TaskExecutionFailureCode } from "./execution-failure.js";
@@ -35,12 +34,7 @@ import type {
   TaskExecutorTask,
 } from "./run.js";
 import { RUN_GRAPH_LIMITS } from "./run.js";
-import type { RoundTrace, RoundTraceCall } from "./store.js";
-import {
-  publishRoundTrace,
-  ROUND_TRACE_LIMITS,
-  runSessionDirectory,
-} from "./store.js";
+import { runSessionDirectory } from "./store.js";
 import type { TaskUsage } from "./usage.js";
 import { TASK_USAGE_LIMITS } from "./usage.js";
 
@@ -200,13 +194,7 @@ export interface PiCheckTrace {
  * check, which spends nothing, and on a round whose telemetry was unusable.
  */
 export interface PiRoundTrace {
-  readonly kind:
-    | "check_before"
-    | "work"
-    | "check"
-    | "review"
-    | "repair"
-    | "redirect";
+  readonly kind: "check_before" | "work" | "check" | "review" | "repair";
   readonly durationMs: number;
   readonly blockers: number;
   readonly usage?: PiWorkerUsage;
@@ -225,43 +213,11 @@ export interface PiWorkerProgress {
   readonly rounds?: readonly PiRoundTrace[];
 }
 
-/**
- * A checked node's check failed after work. Runtime-authored apart from
- * `lines`, which are the end of what the failing commands printed.
- */
-export interface PiRoundEvent {
-  readonly runId: string;
-  readonly taskId: string;
-  /** The model round the check judged: its 1-based position in the rounds. */
-  readonly round: number;
-  /** Check runs after work so far, against the check's `maxRounds`. */
-  readonly checks: number;
-  readonly maxChecks: number;
-  /** Each failing command's `resultLine`. */
-  readonly lines: readonly string[];
-  readonly usage: PiWorkerUsage;
-}
-
-/** What a parent may do to a checked or reviewed node while it runs. */
-export interface PiNodeControl {
-  /**
-   * Stops the node's work or repair round and resumes its session with
-   * `assignment`. Answers `undefined` when accepted, otherwise why not.
-   */
-  redirect(assignment: string): string | undefined;
-}
-
 export interface PiSubprocessExecutorOptions {
   readonly profiles: Readonly<Record<string, PiWorkerProfile>>;
   readonly command?: string;
   readonly extensionPath?: string;
   readonly onProgress?: (progress: PiWorkerProgress) => void;
-  readonly onRoundEvent?: (event: PiRoundEvent) => void;
-  readonly onNodeControl?: (
-    runId: string,
-    taskId: string,
-    control: PiNodeControl,
-  ) => void;
 }
 
 /**
@@ -278,17 +234,6 @@ export interface PiSubprocessExecutorOptions {
 export const REVIEW_LIMITS = Object.freeze({
   maxRounds: 4,
 });
-
-/** How many times a parent may redirect one node. */
-export const MAX_REDIRECTS = 4;
-
-/**
- * Worded plainly on purpose: a probe redirect worded as new instructions from
- * an orchestrator was cut off by Azure's content filter, and the same request
- * worded this way passed.
- */
-const REDIRECT_FRAMING =
-  "The previous attempt was stopped. Continue with this assignment:";
 
 export interface PiReviewPolicy {
   /** Reviewer worker profile. Explicit: there is no reviewer default. */
@@ -312,8 +257,6 @@ interface NormalizedExecutorOptions {
   readonly baseArgs: readonly string[];
   readonly extensionPath: string;
   readonly onProgress: ((progress: PiWorkerProgress) => void) | undefined;
-  readonly onRoundEvent: ((event: PiRoundEvent) => void) | undefined;
-  readonly onNodeControl: PiSubprocessExecutorOptions["onNodeControl"];
 }
 
 interface ProcessDependencies {
@@ -562,14 +505,6 @@ function normalizeOptions(
     extensionPath,
     onProgress:
       typeof options.onProgress === "function" ? options.onProgress : undefined,
-    onRoundEvent:
-      typeof options.onRoundEvent === "function"
-        ? options.onRoundEvent
-        : undefined,
-    onNodeControl:
-      typeof options.onNodeControl === "function"
-        ? options.onNodeControl
-        : undefined,
   });
 }
 
@@ -956,81 +891,12 @@ function batchCallsReportWithSiblings(content: unknown): boolean {
 }
 
 /**
- * A Pi session a child keeps under the run: a reviewer's across its rounds
- * (`reviewSession`), and each work or repair round's own, which only a
- * redirect resumes (`workerSession`).
+ * A Pi session a child resumes rather than starting empty. Only a node's
+ * reviewer has one: see `reviewSession`.
  */
 interface PiChildSession {
   readonly directory: string;
   readonly id: string;
-}
-
-/** What one child did, captured from its event stream for its round trace. */
-interface CapturedTrace {
-  readonly calls: readonly RoundTraceCall[];
-  readonly omittedCalls: number;
-  readonly lastMessage?: string;
-}
-
-const MAX_TRACE_MESSAGE_BYTES = 4 * 1024;
-
-function leadingBytes(value: string, maximum: number): string {
-  if (Buffer.byteLength(value) <= maximum) return value;
-  let kept = "";
-  let bytes = 0;
-  for (const character of value) {
-    const size = Buffer.byteLength(character);
-    if (bytes + size > maximum) break;
-    kept += character;
-    bytes += size;
-  }
-  return kept;
-}
-
-/**
- * The tool call's target: a path, or the start of a command. Never its
- * result, which can be any size and is the worker's to read, not the parent's.
- */
-function traceTarget(args: unknown): string | undefined {
-  if (!isRecord(args)) return undefined;
-  const target =
-    typeof args.path === "string"
-      ? args.path
-      : typeof args.command === "string"
-        ? args.command
-        : undefined;
-  if (target === undefined) return undefined;
-  return [...target].slice(0, ROUND_TRACE_LIMITS.maxTargetChars).join("");
-}
-
-/**
- * A round's trace within `ROUND_TRACE_LIMITS`, dropping its oldest calls
- * first: the latest are what show where a round was heading.
- */
-function boundedTrace(
-  fields: Omit<RoundTrace, "calls" | "omittedCalls">,
-  captured: CapturedTrace,
-): RoundTrace {
-  let calls = captured.calls.slice(-ROUND_TRACE_LIMITS.maxCalls);
-  let omitted = captured.omittedCalls + captured.calls.length - calls.length;
-  const build = (): RoundTrace => ({
-    ...fields,
-    calls,
-    ...(omitted === 0 ? {} : { omittedCalls: omitted }),
-    ...(captured.lastMessage === undefined
-      ? {}
-      : { lastMessage: captured.lastMessage }),
-  });
-  // The store adds its schema version, so a margin keeps the record in bound.
-  const fits = () =>
-    Buffer.byteLength(JSON.stringify(build())) <=
-    ROUND_TRACE_LIMITS.maxBytes - 64;
-  while (calls.length > 0 && !fits()) {
-    const drop = Math.max(1, Math.ceil(calls.length / 8));
-    calls = calls.slice(drop);
-    omitted += drop;
-  }
-  return build();
 }
 
 async function runNormalizedPiWorkerProcess(
@@ -1038,7 +904,6 @@ async function runNormalizedPiWorkerProcess(
   options: NormalizedExecutorOptions,
   dependencies: ProcessDependencies = {},
   session?: PiChildSession,
-  onTrace?: (trace: CapturedTrace) => void,
 ): Promise<TaskExecutionResult> {
   const payload = parseWorkerTaskPayload(input.payload);
   const profile = options.profiles.get(payload.profile);
@@ -1159,11 +1024,6 @@ async function runNormalizedPiWorkerProcess(
     let pendingUsage: { readonly value: unknown } | undefined;
     let progressEvents = 0;
     let terminalProgressEmitted = false;
-    // The latest calls only: a trace keeps the end of a round, not its start.
-    const calls: { tool: string; target?: string; failed: boolean }[] = [];
-    const callsById = new Map<string, { failed: boolean }>();
-    let omittedCalls = 0;
-    let lastMessage: string | undefined;
 
     const startedAt = Date.now();
     const emitProgress = (
@@ -1252,21 +1112,6 @@ async function runNormalizedPiWorkerProcess(
         isRecord(event.message) &&
         event.message.role === "assistant"
       ) {
-        const text = Array.isArray(event.message.content)
-          ? event.message.content
-              .filter(
-                (item): item is { type: "text"; text: string } =>
-                  isRecord(item) &&
-                  item.type === "text" &&
-                  typeof item.text === "string",
-              )
-              .map((item) => item.text)
-              .join("\n")
-              .trim()
-          : "";
-        if (text.length > 0) {
-          lastMessage = leadingBytes(text, MAX_TRACE_MESSAGE_BYTES);
-        }
         commitAssistantUsage(event.message.usage);
         if (event.message.stopReason === "error") providerFailed = true;
         if (batchCallsReportWithSiblings(event.message.content)) {
@@ -1278,30 +1123,11 @@ async function runNormalizedPiWorkerProcess(
         typeof event.toolName === "string" &&
         isProgressTool(event.toolName)
       ) {
-        const target = traceTarget(event.args);
-        const call = {
-          tool: event.toolName,
-          ...(target === undefined ? {} : { target }),
-          failed: false,
-        };
-        calls.push(call);
-        if (calls.length > ROUND_TRACE_LIMITS.maxCalls) {
-          calls.shift();
-          omittedCalls += 1;
-        }
-        if (typeof event.toolCallId === "string") {
-          callsById.set(event.toolCallId, call);
-        }
         if (pendingUsage !== undefined) commitAssistantUsage();
         emitProgress("tool_started", { tool: event.toolName });
         return;
       }
       if (event.type !== "tool_execution_end") return;
-      if (typeof event.toolCallId === "string") {
-        const call = callsById.get(event.toolCallId);
-        callsById.delete(event.toolCallId);
-        if (call !== undefined && event.isError === true) call.failed = true;
-      }
       if (pendingUsage !== undefined) commitAssistantUsage();
       if (
         typeof event.toolName === "string" &&
@@ -1413,15 +1239,6 @@ async function runNormalizedPiWorkerProcess(
       // group. Collect them before reporting the task as finished, unless the
       // escalation already swept the group.
       if (!forceSent) terminateProcessTree(child, true);
-      try {
-        onTrace?.({
-          calls: calls.map((call) => Object.freeze({ ...call })),
-          omittedCalls,
-          ...(lastMessage === undefined ? {} : { lastMessage }),
-        });
-      } catch {
-        // A trace is observability: it must never alter worker execution.
-      }
 
       // Cancellation outranks everything, then any latched stream-integrity
       // failure, because neither leaves the report trustworthy. Beyond that a
@@ -1815,31 +1632,7 @@ async function runPiReviewCycle(
   const policy = payload.review;
   const check = payload.check;
   if (policy === undefined && check === undefined) {
-    // One round and nothing to redirect it on, so no session either: only
-    // its trace is kept, as round 1.
-    let captured: CapturedTrace | undefined;
-    try {
-      const result = await runNormalizedPiWorkerProcess(
-        input,
-        options,
-        dependencies,
-        undefined,
-        (trace) => {
-          captured = trace;
-        },
-      );
-      await publishTrace(input, 1, "work", captured);
-      return result;
-    } catch (error) {
-      await publishTrace(
-        input,
-        1,
-        "work",
-        captured,
-        input.signal.aborted ? "abort" : undefined,
-      );
-      throw error;
-    }
+    return await runNormalizedPiWorkerProcess(input, options, dependencies);
   }
 
   // A cycle's total is only as complete as its least-accounted round. One
@@ -1890,17 +1683,6 @@ async function runPiReviewCycle(
    * carries — handing it out would let an observer rewrite the node's spend.
    */
   let terminalEmitted = false;
-  // What the node is doing, for a redirect that arrives outside a work or
-  // repair round, and that round's stop switch while one runs.
-  let phase: "check" | "review" | "settled" =
-    check === undefined ? "review" : "check";
-  let active:
-    | {
-        readonly controller: AbortController;
-        assignment?: string;
-      }
-    | undefined;
-  let redirects = 0;
   let trace: PiCheckTrace | undefined;
   const startedAt = Date.now();
   const rounds: PiRoundTrace[] = [];
@@ -1920,7 +1702,6 @@ async function runPiReviewCycle(
     );
   };
   const notify = (status: "succeeded" | "failed" | "aborted"): void => {
-    phase = "settled";
     if (options.onProgress === undefined || terminalEmitted) return;
     terminalEmitted = true;
     const progress = Object.freeze({
@@ -2035,29 +1816,22 @@ async function runPiReviewCycle(
   /**
    * Runs one model round and traces it, whichever way it ends: a round that
    * throws is traced with the spend its failure carried before the cycle
-   * settles on it. Its tool trace is published under the run either way.
+   * settles on it.
    */
   const runRound = async (
-    kind: "work" | "repair" | "review" | "redirect",
+    kind: "work" | "repair" | "review",
     next: PiWorkerTaskPayload,
     session?: PiChildSession,
-    signal: AbortSignal = input.signal,
   ): Promise<TaskExecutionResult> => {
     const since = Date.now();
-    const round = rounds.length + 1;
-    let captured: CapturedTrace | undefined;
     try {
       const result = await runNormalizedPiWorkerProcess(
-        { ...withPayload(input, next), signal },
+        withPayload(input, next),
         roundProgress(options, running, kind === "work"),
         dependencies,
         session,
-        (stream) => {
-          captured = stream;
-        },
       );
       traceRound(kind, since, result.output.blockers.length, result.usage);
-      await publishTrace(input, round, kind, captured);
       return result;
     } catch (error) {
       traceRound(
@@ -2066,101 +1840,11 @@ async function runPiReviewCycle(
         0,
         error instanceof TaskExecutionFailure ? error.usage : undefined,
       );
-      await publishTrace(
-        input,
-        round,
-        kind,
-        captured,
-        input.signal.aborted
-          ? "abort"
-          : signal.aborted
-            ? "redirect"
-            : undefined,
-      );
       throw error;
     }
   };
 
-  /**
-   * A work or repair round the parent may stop. A redirect replaces it with a
-   * round that resumes the stopped round's own session under the parent's
-   * assignment, and that round's report stands in for the stopped one's: the
-   * check after it counts toward the node's rounds as usual.
-   */
-  const workRound = async (
-    kind: "work" | "repair",
-    next: PiWorkerTaskPayload,
-  ): Promise<TaskExecutionResult> => {
-    const session = await workerSession(input, rounds.length + 1);
-    let roundKind: "work" | "repair" | "redirect" = kind;
-    let roundPayload = next;
-    for (;;) {
-      const current: { controller: AbortController; assignment?: string } = {
-        controller: new AbortController(),
-      };
-      active = current;
-      let result: TaskExecutionResult | undefined;
-      try {
-        result = await runRound(
-          roundKind,
-          roundPayload,
-          session,
-          AbortSignal.any([input.signal, current.controller.signal]),
-        );
-      } catch (error) {
-        if (current.assignment === undefined || input.signal.aborted) {
-          throw error;
-        }
-        spend(
-          error instanceof TaskExecutionFailure ? error.usage : undefined,
-          false,
-        );
-      } finally {
-        if (active === current) active = undefined;
-      }
-      if (current.assignment === undefined && result !== undefined) {
-        return result;
-      }
-      // A redirect accepted as the round was ending still runs: the parent
-      // was told it would.
-      if (result !== undefined) spend(result.usage, false);
-      roundKind = "redirect";
-      roundPayload = redirectPayload(payload, current.assignment ?? "");
-    }
-  };
-
-  options.onNodeControl?.(input.runId, input.taskId, {
-    redirect(assignment) {
-      if (phase === "settled") return "This node has settled.";
-      const current = active;
-      if (current === undefined) {
-        return phase === "review"
-          ? "This node's reviewer is running, and a review round cannot be redirected; the next round event follows it."
-          : "This node is running its check; the next round event follows it.";
-      }
-      if (current.assignment !== undefined) {
-        return "A redirect of this round is already in progress.";
-      }
-      if (redirects >= MAX_REDIRECTS) {
-        return `This node has used its ${MAX_REDIRECTS} redirects.`;
-      }
-      if (
-        typeof assignment !== "string" ||
-        assignment.trim().length === 0 ||
-        Buffer.byteLength(
-          JSON.stringify(redirectPayload(payload, assignment)),
-        ) > RUN_GRAPH_LIMITS.maxPayloadBytes
-      ) {
-        return `The assignment must be non-empty and keep the node's payload within ${RUN_GRAPH_LIMITS.maxPayloadBytes} bytes.`;
-      }
-      redirects += 1;
-      current.assignment = assignment;
-      current.controller.abort();
-      return undefined;
-    },
-  });
-
-  let work = await workRound("work", stripReview(payload)).catch(failed(false));
+  let work = await runRound("work", stripReview(payload)).catch(failed(false));
   spend(work.usage, false);
 
   const repair = async (
@@ -2176,7 +1860,7 @@ async function runPiReviewCycle(
     ) {
       return false;
     }
-    work = await workRound("repair", next).catch(failed(false));
+    work = await runRound("repair", next).catch(failed(false));
     spend(work.usage, false);
     return true;
   };
@@ -2213,7 +1897,6 @@ async function runPiReviewCycle(
         }
       }
       checks += 1;
-      phase = "check";
       const checkStarted = Date.now();
       const outcomes = await runCheck(
         check,
@@ -2231,22 +1914,6 @@ async function runPiReviewCycle(
         outcome: findings.length === 0 ? "passed" : "failed",
       };
       if (findings.length > 0) {
-        try {
-          options.onRoundEvent?.(
-            Object.freeze({
-              runId: input.runId,
-              taskId: input.taskId,
-              // The round before this check is the model round it judged.
-              round: rounds.length - 1,
-              checks,
-              maxChecks: check.maxRounds,
-              lines: Object.freeze(findings.map(resultLine)),
-              usage: withReview(running),
-            }),
-          );
-        } catch {
-          // Observability must never alter worker execution.
-        }
         if (
           checks >= check.maxRounds ||
           !(await repair("check", findings, checks))
@@ -2262,7 +1929,6 @@ async function runPiReviewCycle(
     if (policy === undefined) return settle(work);
 
     reviews += 1;
-    phase = "review";
     if (reviews === 1 && session !== undefined) {
       // A directory that cannot be made costs the cache, not the review.
       const directory = session.directory;
@@ -2327,74 +1993,6 @@ function reviewSession(input: TaskExecutionInput): PiChildSession | undefined {
     directory: runSessionDirectory(input.runStateRoot, input.runId),
     id: `review-${digest.slice(0, 32)}`,
   };
-}
-
-/**
- * The session one work or repair round keeps under the run, a new one per
- * round, so a redirect can resume the round it stops. Every round still
- * starts fresh; nothing but a redirect ever opens one again. Without a run
- * directory, or one that cannot be made, the round runs without a session
- * and a redirect starts fresh.
- */
-async function workerSession(
-  input: TaskExecutionInput,
-  round: number,
-): Promise<PiChildSession | undefined> {
-  if (input.runStateRoot === undefined) return undefined;
-  const digest = createHash("sha256").update(input.taskId).digest("hex");
-  const directory = runSessionDirectory(input.runStateRoot, input.runId);
-  return await mkdir(directory, { recursive: true, mode: 0o700 }).then(
-    () => ({ directory, id: `work-${digest.slice(0, 32)}-${round}` }),
-    () => undefined,
-  );
-}
-
-/**
- * Publishes one round's trace under the run. A trace that cannot be written
- * costs the parent that round's inspection, never the node.
- */
-async function publishTrace(
-  input: TaskExecutionInput,
-  round: number,
-  kind: RoundTrace["kind"],
-  captured: CapturedTrace | undefined,
-  stopped?: RoundTrace["stopped"],
-): Promise<void> {
-  if (input.runStateRoot === undefined || captured === undefined) return;
-  await publishRoundTrace(
-    input.runStateRoot,
-    input.runId,
-    boundedTrace(
-      {
-        taskId: input.taskId,
-        round,
-        kind,
-        ...(stopped === undefined ? {} : { stopped }),
-      },
-      captured,
-    ),
-  ).catch(() => {});
-}
-
-/**
- * The round that replaces one a parent stopped: the parent's assignment under
- * the runtime's framing, with the task's own criteria and check as before.
- */
-function redirectPayload(
-  payload: PiWorkerTaskPayload,
-  assignment: string,
-): PiWorkerTaskPayload {
-  return Object.freeze({
-    profile: payload.profile,
-    assignment: `${REDIRECT_FRAMING}\n\n${assignment}`,
-    ...(payload.acceptanceCriteria === undefined
-      ? {}
-      : { acceptanceCriteria: payload.acceptanceCriteria }),
-    ...(payload.expectedPaths === undefined
-      ? {}
-      : { expectedPaths: payload.expectedPaths }),
-    ...(payload.check === undefined ? {} : { check: payload.check }),
-  });
 }
 
 function stripReview(payload: PiWorkerTaskPayload): PiWorkerTaskPayload {

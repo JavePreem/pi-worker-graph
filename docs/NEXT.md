@@ -803,12 +803,17 @@ What remains, in order:
         `frozen-bytecode-2-2026-09-30.tgz`. Re-run: stopped at the limit
         again, 1961/1988, $0.769, no frozen failures; four one-node graphs
         each ran out of check rounds.
-   6a. Build D24, interruptible graphs: round events reach the parent while a
+   6a. Reverted 2026-10-01. Was: build D24, interruptible graphs: round events reach the parent while a
       graph runs, and it can inspect a round or redirect a node. Decided
-      2026-09-30, built 2026-10-01 on fakes, not yet run live. The plan, what
-      the build settled, and the verification still to do are in
-      [`docs/INTERRUPTS.md`](INTERRUPTS.md). Then re-run `graph-luna` on
-      `parso-cluster-20` with it.
+      2026-09-30, built 2026-10-01, probed live and run in one cell per task
+      (`bench/DESIGN.md` **Pi 0.99.1 and D24**): parso unresolved with it,
+      chess resolved, and parso resolved on 0.99.1 without it ($0.404, the
+      first graph resolution of that task). Repeated to three cells an arm:
+      a regression on parso (2.3x the cost, 1.5x the time, against 3/3
+      resolved without it); chess inconclusive. Reverted; the no-D24
+      baseline (`pi099-no-d24-2026-10-01.tgz`, three cells a task) is what
+      the next change is measured against. Plan and status:
+      [`docs/INTERRUPTS.md`](INTERRUPTS.md).
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the

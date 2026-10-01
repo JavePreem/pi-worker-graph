@@ -94,11 +94,6 @@ The graph is immutable after execution starts. Coordination events and directed
 messages are read explicitly rather than injected globally or delivered as live
 steering messages.
 
-D24 lets the parent interrupt a node's round and restart it with a
-new assignment. The graph's nodes and edges stay what the parent submitted; what
-changes is one node's next round, and only by stopping the round in flight,
-never by steering it.
-
 ### D13 — Pi workers use isolated subprocesses
 
 The MVP runs each worker as a one-shot Pi JSON-mode subprocess. The parent sends
@@ -108,10 +103,6 @@ persistence, and loads only the child report extension. This provides a clear
 process-tree cancellation boundary and keeps worker failures isolated from the
 orchestrator. SDK sessions remain a possible post-MVP optimization, not a second
 MVP transport.
-
-Amended by D24: a checked or reviewed node's work or repair round keeps its Pi session under
-the run's directory, a new one for every round, so a round the parent
-interrupts can be resumed. Nothing else reads it, and it goes with the run.
 
 ### D14 — The peer range claims only the tested Pi version
 
@@ -133,12 +124,6 @@ Transport progress contains bounded status and usage metadata, never worker
 transcripts or tool payloads. Final results contain a separately bounded compact
 projection of structured worker reports and label worker-authored fields as
 untrusted data.
-
-Amended by D24: a second tool, `worker_graph_control`, acts on a
-graph `worker_graph` started, and `worker_graph` returns at round events
-rather than only when the graph ends. Progress still carries no transcript or
-tool payload. A round's tool trace reaches the parent only when it asks for
-that round, bounded, and labeled untrusted like a report.
 
 ### D16 — Retention is bounded without implicit deletion
 
@@ -287,12 +272,6 @@ and a repair still receives only the structured findings. The session lives in
 the run's directory, outside the checkout, and is deleted with the run. With
 no run directory the rounds start fresh, as before.
 
-Amended 2026-09-30 by D24: a round the parent interrupts is
-resumed, not restarted, when the parent redirects it. The context carried
-forward is the interrupted worker's own, what it read and did in that round,
-and the new assignment is explicit. Every other work and repair round still
-starts fresh.
-
 ## D21. Configured profile names reach the parent through the request context
 
 `worker_graph` requires every task to name a worker profile, and the reviewer
@@ -435,10 +414,35 @@ accepts wrong work silently, and this catches the vacuous ones for no tokens.
 Frozen paths close the other silent route, a worker editing the tests its check
 runs; the runtime detects that change and never restores it (D5).
 
-## D24. The parent can interrupt a round, not steer it
+## D24. The parent can interrupt a round, not steer it (reverted)
 
-Decided 2026-09-30; built 2026-10-01. The plan it was built from is
-[`docs/INTERRUPTS.md`](INTERRUPTS.md).
+Decided 2026-09-30, built 2026-10-01 (`eef24ba`), measured, and reverted the
+same day. D12, D13, D15 and D20 stand as written. The plan is
+[`docs/INTERRUPTS.md`](INTERRUPTS.md); the cells are in `bench/DESIGN.md`
+**Pi 0.99.1 and D24** and **Repeats, 2026-10-01**.
+
+**Why it was reverted.** Three `parso-cluster-20` graph-luna cells an arm on
+Pi 0.99.1: without D24 3/3 resolved, $0.404-0.523 in 18-21 minutes, 5
+parent turns each; with it 2/3, $0.771-1.418 in 29-34 minutes, 17-22 parent
+turns. The ranges do not overlap. Chess was inconclusive. The parent used
+what D24 gave it, and that is where the cost came from:
+
+- It knew less than the worker it steered: one count per check against the
+  worker's failing output and code, so its redirects were advice the worker
+  could have written.
+- Woken on every check with a redirect at hand, it intervened on nodes that
+  were converging: four of five redirects followed a falling count. Events
+  fire at round boundaries, so each redirect replaced a runtime repair
+  rather than interrupting work, and none did better than one.
+- Seeing large counts, it framed the next node as rework ("do not assume its
+  logic is right... rewrite") in two of three cells, where without D24 all
+  three said to continue and preserve. That second node then failed every
+  time with D24 and passed every time without; this last mechanism is
+  consistent with the records, not proven by them.
+
+What would test what is left of the idea: the same events without redirect,
+to separate the interventions from what visibility does to planning. The
+text below is the decision as it was made.
 
 A running graph reports each failed check round to the parent, and the parent
 may stop that node's round and restart it with a new assignment. It cannot

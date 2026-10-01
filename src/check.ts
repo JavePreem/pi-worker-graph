@@ -123,30 +123,6 @@ function runCommand(
   });
 }
 
-const MAX_RESULT_LINE_BYTES = 256;
-
-/**
- * The last non-empty line of a failing command's finding, at most 256 bytes:
- * the end of its output tail, where test runners print their summary, or the
- * exit status when it printed nothing. It is what tells a parent whether a
- * node's failures are falling, whatever the test runner.
- */
-export function resultLine(finding: string): string {
-  const line =
-    finding
-      .split(/\r?\n/u)
-      .map((candidate) => candidate.trim())
-      .filter((candidate) => candidate.length > 0)
-      .at(-1) ?? "";
-  if (Buffer.byteLength(line) <= MAX_RESULT_LINE_BYTES) return line;
-  let kept = "";
-  for (const character of line) {
-    if (Buffer.byteLength(kept + character) > MAX_RESULT_LINE_BYTES) break;
-    kept += character;
-  }
-  return kept;
-}
-
 /**
  * Runs every check command in order and returns each one's outcome, in the
  * same order: a finding for a failing command, `undefined` for a passing one.
