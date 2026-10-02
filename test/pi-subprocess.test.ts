@@ -1396,7 +1396,7 @@ function sessionOf(args: readonly string[]): string {
   return `${dir} ${id}`;
 }
 
-test("a node's reviewer resumes one session across its rounds, under the run", async () => {
+test("a node's worker and reviewer each resume one session across their rounds, under the run", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-worker-graph-review-session-"));
   try {
     const { result, prompts, argv } = await runFakeCycle(
@@ -1415,18 +1415,31 @@ test("a node's reviewer resumes one session across its rounds, under the run", a
     );
     await result;
     const sessions = argv.map(sessionOf);
-    // Work and repair stay isolated; only the reviewer carries context.
-    assert.equal(sessions[0], "no-session");
-    assert.equal(sessions[2], "no-session");
+    const under = join(root, "runs", RUN_ID, "sessions");
+    assert.match(
+      sessions[0] as string,
+      new RegExp(`^${under} work-[0-9a-f]{32}$`, "u"),
+    );
+    assert.equal(sessions[2], sessions[0], "the repair continues the work");
     assert.match(
       sessions[1] as string,
-      new RegExp(
-        `^${join(root, "runs", RUN_ID, "sessions")} review-[0-9a-f]{32}$`,
-        "u",
-      ),
+      new RegExp(`^${under} review-[0-9a-f]{32}$`, "u"),
     );
     assert.equal(sessions[3], sessions[1], "the same session both rounds");
-    assert.ok(existsSync(join(root, "runs", RUN_ID, "sessions")));
+    assert.notEqual(sessions[0], sessions[1], "the two never share one");
+    assert.ok(existsSync(under));
+    // The repair sends only what is new into the worker's own context.
+    const repair = prompts[2] as string;
+    assert.match(repair, /^WORKER GRAPH REPAIR\n/u);
+    assert.match(repair, /reviewer rejected the previous attempt/u);
+    assert.match(
+      repair,
+      /REVIEW FINDINGS\n1\. Missing null check in parse\(\)/u,
+    );
+    assert.match(repair, /Re-read a file before editing it/u);
+    assert.match(repair, /worker_graph_report exactly once/u);
+    assert.doesNotMatch(repair, /ASSIGNMENT JSON/u);
+    assert.doesNotMatch(repair, /Implement the requested change/u);
     assert.doesNotMatch(
       prompts[1] as string,
       /continues your own earlier review/u,
@@ -1437,9 +1450,9 @@ test("a node's reviewer resumes one session across its rounds, under the run", a
   }
 });
 
-test("a reviewer with nowhere to keep a session reviews fresh each round", async () => {
+test("a node with nowhere to keep its sessions runs every round fresh", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-worker-graph-review-session-"));
-  // A file where the run directory would be, so the session cannot be made.
+  // A file where the run directory would be, so the sessions cannot be made.
   mkdirSync(join(root, "runs"));
   writeFileSync(join(root, "runs", RUN_ID), "not a directory");
   try {
@@ -1465,6 +1478,14 @@ test("a reviewer with nowhere to keep a session reviews fresh each round", async
         "no-session",
         "no-session",
       ]);
+      // A fresh repair carries the whole assignment, having no context to
+      // continue from.
+      const repair = prompts[2] as string;
+      assert.match(repair, /ASSIGNMENT JSON/u);
+      assert.match(repair, /Implement the requested change/u);
+      // Inside the assignment JSON, so its line breaks are escaped.
+      assert.match(repair, /REVIEW FINDINGS\\n1\. Fix it/u);
+      assert.doesNotMatch(repair, /WORKER GRAPH REPAIR/u);
       assert.doesNotMatch(
         prompts[3] as string,
         /continues your own earlier review/u,
@@ -2063,16 +2084,20 @@ async function runCheckedCycle(
   onProgress?: (progress: PiWorkerProgress) => void,
   prepare: (checkout: string) => void = () => {},
   deadline?: number,
+  runStateRoot?: string,
 ): Promise<{
   readonly result: Promise<TaskExecutionResult>;
   readonly prompts: string[];
+  readonly argv: (readonly string[])[];
 }> {
   const checkout = mkdtempSync(join(tmpdir(), "pi-worker-graph-check-"));
   t.after(() => rmSync(checkout, { recursive: true, force: true }));
   prepare(checkout);
   const prompts: string[] = [];
+  const argv: (readonly string[])[] = [];
   let round = 0;
-  const spawnProcess = (() => {
+  const spawnProcess = ((_command: string, args: readonly string[]) => {
+    argv.push(args);
     const index = round++;
     const report = reports[index];
     if (report === undefined) {
@@ -2101,6 +2126,7 @@ async function runCheckedCycle(
         ...input(controller.signal, payload as never),
         workingDirectory: checkout,
         ...(deadline === undefined ? {} : { deadline }),
+        ...(runStateRoot === undefined ? {} : { runId: RUN_ID, runStateRoot }),
       },
       onProgress === undefined
         ? reviewedOptions
@@ -2108,6 +2134,7 @@ async function runCheckedCycle(
       { spawnProcess, terminateProcessTree: () => {} },
     ),
     prompts,
+    argv,
   };
 }
 
@@ -2171,6 +2198,45 @@ test("a failing check sends its output to a repair round and checks again", asyn
   assert.match(repair, /CHECK FAILURES/u);
   assert.match(repair, /expected 4, got 5/u);
   assert.match(repair, /Implement the requested change/u);
+});
+
+test("a check's repair continues the worker's own session with the failing output", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pi-worker-graph-work-session-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { result, prompts, argv } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["echo 'expected 4, got 5'; test -f done"], 2),
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+    new AbortController(),
+    undefined,
+    () => {},
+    undefined,
+    root,
+  );
+  const settled = await result;
+  assert.equal(settled.output.summary, "Repaired");
+  const sessions = argv.map(sessionOf);
+  assert.match(
+    sessions[0] as string,
+    new RegExp(
+      `^${join(root, "runs", RUN_ID, "sessions")} work-[0-9a-f]{32}$`,
+      "u",
+    ),
+  );
+  assert.equal(sessions[1], sessions[0], "the repair continues the work");
+  const repair = prompts[1] as string;
+  assert.match(repair, /^WORKER GRAPH REPAIR\n/u);
+  assert.match(repair, /check commands after the previous attempt/u);
+  assert.match(repair, /check round 1\./u);
+  assert.match(repair, /CHECK FAILURES\n1\. Check command failed/u);
+  assert.match(repair, /expected 4, got 5/u);
+  assert.doesNotMatch(repair, /ASSIGNMENT JSON/u);
+  assert.doesNotMatch(repair, /Implement the requested change/u);
+  // The first round's prompt is the whole task, as for any fresh worker.
+  assert.match(prompts[0] as string, /ASSIGNMENT JSON/u);
 });
 
 test("a failed check's round carries each failing command's last line", async (t) => {

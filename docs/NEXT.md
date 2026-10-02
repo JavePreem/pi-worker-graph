@@ -105,6 +105,11 @@ adapter. Automated tests remain provider-free:
   round limit is reached, with a still-rejected node failing rather than
   publishing work review refused, every round's spend summed into the node's one
   attempt, and the graph left frozen because rounds are not nodes;
+- a node's rounds resuming that node's own Pi sessions under the run: the
+  worker's across its work and repair rounds, so a repair sends only the
+  findings into the context that already holds the assignment and the work,
+  and the reviewer's across its reviews; without a run directory every round
+  starts fresh;
 - an optional per-node check (D23): shell commands the runtime runs itself from
   the checkout root after the worker reports, repairing on failure with a
   bounded output tail, before any review; run once before the worker to show
@@ -825,9 +830,11 @@ What remains, in order:
       and H (variant) in `handoff/builds/`, both smoke-tested live 2026-10-01
       ($0.012: rounds after every check, result lines recorded, H's repair
       carried all 150 FAILED lines where G's carried 31, and the lines stay
-      out of the parent's text). Cells started 2026-10-02: h-1, g-1, g-2,
-      h-2 run, H-3 skipped (H cannot win), G-3 to go (`bench/DESIGN.md` **Repair-tail cells so
-      far**).
+      out of the parent's text). Cells run 2026-10-02: h-1, g-1, g-2, h-2,
+      g-3; H-3 skipped (H cannot win). Judged by the pre-registration: H
+      does not win, H is not worse, and the falling/levelled branch is a
+      tie, so the next variable is the maintainer's call (`bench/DESIGN.md`
+      **Repair-tail experiment, judged 2026-10-02**).
       Outcome, thresholds and what each result decides are pre-registered in
       `bench/DESIGN.md` **Repair-tail experiment, pre-registered
       2026-10-02**: node 1 passing within four runs is the primary outcome,
@@ -1012,10 +1019,10 @@ need the store to say what happened; nothing does that yet.
 
 ## Decisions still needed
 
-Retention cleanup and worker-session resumption semantics remain deferred until
-their runtime layers are implemented. Review is now partly settled: D20 gives a
-node its own work-review-repair cycle, and decides that a repair is a fresh
-attempt rather than a resumed child session. Whether execution also pauses at
+Retention cleanup remains deferred until its runtime layer is implemented.
+Review is now partly settled: D20 gives a node its own work-review-repair
+cycle, and as amended on 2026-10-02 every round of a node resumes that node's
+own session, the worker's and the reviewer's. Whether execution also pauses at
 review barriers between frontiers is independent and still open. Broader Pi
 compatibility can be claimed only after testing versions beyond the current
 0.85.1 development pin, and the peer range in `package.json` now declares only

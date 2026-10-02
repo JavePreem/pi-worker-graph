@@ -2388,11 +2388,38 @@ six are in). Node 1's counts: before work, then after each check.
 | g-1 | G | resolved | $0.544 | 22.4 min | 2 nodes, 6 parent turns | failed: 455; 283, 248, 455, 199 |
 | g-2 | G | 60-minute limit, 1934/1988 | $1.375 | 65.4 min | 4 nodes, 9 parent turns | failed: 455; 244, 215, 202, 175 |
 | h-2 | H | resolved | $0.721 | 29.8 min | 3 nodes, 9 parent turns | failed: 455; 270, 219, 191, 169 |
+| g-3 | G | resolved | $0.721 | 27.7 min | 3 nodes, 9 parent turns | failed: 455; 263, 254, 243, 231 |
 
 - g-1's third check, 455, is the whole suite failing again, as before work;
   its cause is not read.
 - g-2's second graph was a `diagnose` node, $0.616; its third graph's
   `repair-errors` hit the 30-minute node limit with its last repair cut off.
+- g-3's second node, `repair-error-semantics`, went 231 before work, then
+  273, 139, 45, 8, and failed at its fourth run while still falling (82%
+  off on its last repair). Its first check is broken by the amendment's
+  rule (273 at or above its 231 before). The third node passed from 8 in
+  two runs, $0.129. Every cell's package hash matches its arm's tarball
+  (`packageVersion`).
+
+**Repair-tail experiment, judged 2026-10-02**, by the pre-registration and
+its amendment, five cells in and h-3 skipped.
+
+- **Primary outcome: H does not win.** Node 1 passed within four runs in 0
+  of 2 H cells and 0 of 3 G cells.
+- **H is not worse.** H's median node 1 last count is 169; G's is 199
+  (199, 175, 231).
+- **The falling/levelled branch is a tie.** g-1 is undetermined (a broken
+  check at its third run). g-2's last repair took 13% off (202 to 175):
+  still falling. g-3's took 4.9% off (243 to 231): levelled off. One
+  determined cell each way, so the branch is inconclusive and the next
+  variable is the maintainer's call.
+- **Recorded, not judged.** The 12 KiB tail is discarded as a variable on
+  node 1. Across the five cells node 1 always failed at 169-231 and the
+  cell's spread came from what followed: a `diagnose` node and a timed-out
+  node in g-2 ($1.375, 65 min), six nodes in h-1 ($1.200, 44 min), against
+  $0.54-0.72 and 22-30 min where the parent planned one or two plain
+  continuation nodes. g-3's second node, cut off at 8 failures while
+  falling 82% a round, is the case D25 (build I) addresses; unmeasured.
 
 **Harness: two cells of one task and arm cannot run at once.** `bench.mjs
 cell` fixes repetition 0 (`bench/bench.mjs:408`), so both cells derive the

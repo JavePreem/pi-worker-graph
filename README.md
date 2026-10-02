@@ -215,13 +215,15 @@ its dependents, rather than publishing work a reviewer refused.
 The cycle lives in the Pi adapter rather than the graph runner, so the graph
 stays frozen: rounds are not nodes, the node keeps one immutable terminal
 output, and the node's existing timeout bounds the whole cycle rather than any
-single round. A repair is a fresh child process carrying the reviewer's
-structured findings, never a resumed session. The reviewer is the exception:
-every review round of a node resumes the reviewer's own Pi session, kept in the
-run's directory outside the checkout and deleted with the run. It keeps the
+single round. Every model round of a node resumes that node's own Pi sessions,
+kept in the run's directory outside the checkout and deleted with the run: the
+worker's across its work and repair rounds, the reviewer's across its reviews.
+A repair therefore sends only the findings into the worker's own context,
+where the assignment and the work already are, rather than starting a fresh
+worker that re-reads the checkout before its first edit. Resuming keeps the
 provider's prompt cache warm, so a later round reads what the first one read
-instead of paying for it again. In the cells measured, a resumed round cost
-22-80% less than the first. Both the worker profile and the
+instead of paying for it again. In the cells measured, a resumed review round
+cost 22-80% less than the first. Both the worker profile and the
 reviewer profile are resolved during whole-graph validation, before any worker
 starts, so an unresolvable reviewer is not discovered by spending a worker
 first. Findings are bounded on count and size, and overflow fails the node
@@ -233,8 +235,9 @@ A graph task may carry a `check`: one to eight shell commands and a round limit
 of 1 through 4. The worker is told the commands. After it reports, the runtime
 runs every command itself, in order, from the checkout root, with no model
 involved; the check passes when each exits 0. A failing run with a round left
-is followed by a repair worker that sees each failing command, its exit status,
-and the last 2 KiB of its output, and then the check runs again. A failing
+is followed by a repair: the worker's own session continues with each failing
+command, its exit status, and the last 2 KiB of its output, and then the check
+runs again. A failing
 run past the last round still earns a repair when it improves on the run
 before it: fewer commands failing, or lower failure counts in their output
 (the last line reporting any, such as pytest's `27 failed`). That goes on up

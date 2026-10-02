@@ -302,10 +302,10 @@ registers them, and advertises them in the assignment only then. Secrets are not
 added to child arguments, prompts, environment metadata persisted by the
 runtime, or graph state.
 
-The MVP transport is a one-shot Pi JSON-mode subprocess behind the execution
-adapter. It runs without session persistence or discovered extensions, skills,
-and prompt templates; only an explicit built-in tool allowlist and the child
-report extension are active. Repository context files remain enabled as trusted
+The transport is one Pi JSON-mode subprocess per round behind the execution
+adapter, resuming the node's own session kept under the run (D20). It runs
+without discovered extensions, skills, and prompt templates; only an explicit
+built-in tool allowlist and the child report extension are active. Repository context files remain enabled as trusted
 worker instructions. Task content is sent over stdin rather than argv.
 The adapter owns process-group cancellation, forced cleanup, event-stream
 framing bounds, and bounded exit classification. It projects capped progress

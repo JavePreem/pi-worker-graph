@@ -902,19 +902,28 @@ function batchCallsReportWithSiblings(content: unknown): boolean {
 }
 
 /**
- * A Pi session a child resumes rather than starting empty. Only a node's
- * reviewer has one: see `reviewSession`.
+ * A Pi session a child resumes rather than starting empty: a node's worker
+ * across its work and repair rounds, its reviewer across its reviews. See
+ * `nodeSessions`.
  */
 interface PiChildSession {
   readonly directory: string;
   readonly id: string;
 }
 
+/**
+ * Runs one Pi child to its report.
+ *
+ * `continuation`, when given, is the whole prompt of a round that resumes a
+ * session: the session already holds the task prompt and the work, so the
+ * round sends only what is new.
+ */
 async function runNormalizedPiWorkerProcess(
   input: TaskExecutionInput,
   options: NormalizedExecutorOptions,
   dependencies: ProcessDependencies = {},
   session?: PiChildSession,
+  continuation?: string,
 ): Promise<TaskExecutionResult> {
   const payload = parseWorkerTaskPayload(input.payload);
   const profile = options.profiles.get(payload.profile);
@@ -930,11 +939,9 @@ async function runNormalizedPiWorkerProcess(
     throw new TaskExecutionFailure("invalid_assignment");
   }
   const coordinationStateRoot = input.runStateRoot;
-  const prompt = workerPrompt(
-    input,
-    payload,
-    coordinationStateRoot !== undefined,
-  );
+  const prompt =
+    continuation ??
+    workerPrompt(input, payload, coordinationStateRoot !== undefined);
   if (Buffer.byteLength(prompt) > MAX_WORKER_PROMPT_BYTES) {
     throw new TaskExecutionFailure("invalid_assignment");
   }
@@ -1504,6 +1511,32 @@ function repairPayload(
 }
 
 /**
+ * The prompt of a repair that resumes the worker's own session. The session
+ * already holds the assignment, the contract and the work, so only what is
+ * new goes in: why the attempt was rejected, and the findings. Re-reading
+ * before an edit is restated because another worker may have changed a file
+ * since this session last read it.
+ */
+function repairContinuation(
+  source: keyof typeof REPAIR_SOURCES,
+  findings: readonly string[],
+  round: number,
+): string {
+  const { reason, heading } = REPAIR_SOURCES[source];
+  return [
+    "WORKER GRAPH REPAIR",
+    reason(round),
+    "",
+    heading,
+    ...findings.map((finding, index) => `${index + 1}. ${finding}`),
+    "",
+    "Your work from the previous attempt is still in the checkout. Re-read a file before editing it: another worker may have changed it since you last read it.",
+    `As your final action, call ${REPORT_TOOL_NAME} exactly once with the complete structured report. Any blocker fails the task.`,
+    "",
+  ].join("\n");
+}
+
+/**
  * The report a node fails with when its check still fails on its last round:
  * the work report, with the failing checks as its blockers. They replace the
  * worker's own, which described an attempt the check has since judged.
@@ -1868,6 +1901,7 @@ async function runPiReviewCycle(
     kind: "work" | "repair" | "review",
     next: PiWorkerTaskPayload,
     session?: PiChildSession,
+    continuation?: string,
   ): Promise<TaskExecutionResult> => {
     const since = Date.now();
     try {
@@ -1876,6 +1910,7 @@ async function runPiReviewCycle(
         roundProgress(options, running, kind === "work"),
         dependencies,
         session,
+        continuation,
       );
       traceRound(kind, since, result.output.blockers.length, result.usage);
       return result;
@@ -1893,9 +1928,14 @@ async function runPiReviewCycle(
   // From the start of the latest work or repair round, and the longest a
   // round and the check after it have taken: a repair started with less than
   // that left before the deadline would likely be cut off with no report.
+  // Made before the first round, so the work round's context is there for
+  // every repair after it.
+  const sessions = await nodeSessions(input);
   let roundStarted = Date.now();
   let slowest = 0;
-  let work = await runRound("work", stripReview(payload)).catch(failed(false));
+  let work = await runRound("work", stripReview(payload), sessions?.work).catch(
+    failed(false),
+  );
   spend(work.usage, false);
 
   const repair = async (
@@ -1912,7 +1952,17 @@ async function runPiReviewCycle(
       return false;
     }
     roundStarted = Date.now();
-    work = await runRound("repair", next).catch(failed(false));
+    // Into the worker's own session when the node has one, sending only the
+    // findings; otherwise a fresh worker with the whole repair payload.
+    work = await (sessions === undefined
+      ? runRound("repair", next)
+      : runRound(
+          "repair",
+          next,
+          sessions.work,
+          repairContinuation(source, findings, round),
+        )
+    ).catch(failed(false));
     spend(work.usage, false);
     return true;
   };
@@ -1924,7 +1974,6 @@ async function runPiReviewCycle(
   // check has passed, and a review's repair is checked again.
   let checks = 0;
   let reviews = 0;
-  let session = policy === undefined ? undefined : reviewSession(input);
   for (;;) {
     if (check !== undefined && trace !== undefined) {
       // Checked before the commands run, so a test the worker edited cannot
@@ -1997,23 +2046,15 @@ async function runPiReviewCycle(
     if (policy === undefined) return settle(work);
 
     reviews += 1;
-    if (reviews === 1 && session !== undefined) {
-      // A directory that cannot be made costs the cache, not the review.
-      const directory = session.directory;
-      session = await mkdir(directory, { recursive: true, mode: 0o700 }).then(
-        () => session,
-        () => undefined,
-      );
-    }
     const review = await runRound(
       "review",
       reviewPayload(
         payload,
         policy,
         reviews,
-        session !== undefined && reviews > 1,
+        sessions !== undefined && reviews > 1,
       ),
-      session,
+      sessions?.review,
     ).catch(failed(true));
     spend(review.usage, true);
 
@@ -2038,29 +2079,43 @@ async function runPiReviewCycle(
 }
 
 /**
- * The session a node's reviewer keeps across its rounds, or none.
+ * The sessions a node's rounds resume, or none.
  *
  * Every round used to start a fresh process with a fresh session, and Pi keys
  * the provider's prompt cache by session, so each round re-read the checkout
- * and the documents it judges against and wrote all of it to the cache again:
- * measured at about 27k cache-written tokens a round, 44% of a sol reviewer's
- * spend. Resuming keeps the prefix and the key, so a later round reads that
- * context from the cache instead.
+ * and the documents it works from and wrote all of it to the cache again:
+ * about 27k cache-written tokens a review round, 44% of a sol reviewer's
+ * spend, and in a worker's repair rounds 14-20 tool calls of re-orientation
+ * before the first edit. Resuming keeps the prefix and the key, so a later
+ * round reads that context from the cache instead.
  *
- * It carries only the reviewer's own earlier rounds: what it read and what it
- * found, which its next round is judging anyway. The worker it reviews stays
- * isolated, and every repair still starts fresh. The session lives with the
- * run, outside the checkout, and goes when the run does; without a run
- * directory there is nowhere to keep it, and rounds start fresh as before.
+ * The worker's session carries only its own work: what it read, changed, and
+ * was told failed. The reviewer's carries only its own reading and findings.
+ * Neither sees the other's, and a repair still receives only structured
+ * findings. The sessions live with the run, outside the checkout, and go when
+ * the run does; without a run directory there is nowhere to keep them, and
+ * every round starts fresh. A directory that cannot be made costs the cache,
+ * not the node.
  */
-function reviewSession(input: TaskExecutionInput): PiChildSession | undefined {
+async function nodeSessions(
+  input: TaskExecutionInput,
+): Promise<
+  { readonly work: PiChildSession; readonly review: PiChildSession } | undefined
+> {
   if (input.runStateRoot === undefined) return undefined;
   // Pi accepts only a plain identifier, and a task ID need not be one.
-  const digest = createHash("sha256").update(input.taskId).digest("hex");
-  return {
-    directory: runSessionDirectory(input.runStateRoot, input.runId),
-    id: `review-${digest.slice(0, 32)}`,
-  };
+  const digest = createHash("sha256")
+    .update(input.taskId)
+    .digest("hex")
+    .slice(0, 32);
+  const directory = runSessionDirectory(input.runStateRoot, input.runId);
+  return await mkdir(directory, { recursive: true, mode: 0o700 }).then(
+    () => ({
+      work: { directory, id: `work-${digest}` },
+      review: { directory, id: `review-${digest}` },
+    }),
+    () => undefined,
+  );
 }
 
 function stripReview(payload: PiWorkerTaskPayload): PiWorkerTaskPayload {

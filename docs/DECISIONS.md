@@ -272,6 +272,23 @@ and a repair still receives only the structured findings. The session lives in
 the run's directory, outside the checkout, and is deleted with the run. With
 no run directory the rounds start fresh, as before.
 
+Amended 2026-10-02: a node's **worker** resumes one Pi session across its
+work and repair rounds too, so a repair is no longer a fresh attempt. In the
+parso cells every repair round opened cold: 14-20 tool calls of `git status`,
+re-reading the target file and probing for an upstream copy before its first
+edit, at 100-290 s a round, and the rounds were the cell's wall-clock
+(`bench/DESIGN.md` **Pi 0.99.1 and D24**); a killed worker's session resumed
+with 95% of its prompt read from the cache (`docs/NEXT.md`). A repair now
+sends only what is new into the worker's own session, why the attempt was
+rejected and the findings, with the assignment and the contract already in
+context. The isolation argument above is unchanged: the context carried is
+the worker's own work, the reviewer's session stays its own, and nothing
+crosses between them. Without a run directory every round starts fresh, as
+before. Whether a round that has stopped improving should instead restart
+fresh is open: the second node of a graph passed every time on one build (F)
+and failed on three cells of the next two (G-2, H-1, H-2), so a fresh start on
+a flat count is a hypothesis for a cell, not a default. Not measured live.
+
 ## D21. Configured profile names reach the parent through the request context
 
 `worker_graph` requires every task to name a worker profile, and the reviewer
