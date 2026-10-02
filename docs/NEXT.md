@@ -812,8 +812,24 @@ What remains, in order:
       a regression on parso (2.3x the cost, 1.5x the time, against 3/3
       resolved without it); chess inconclusive. Reverted; the no-D24
       baseline (`pi099-no-d24-2026-10-01.tgz`, three cells a task) is what
-      the next change is measured against. Plan and status:
-      [`docs/INTERRUPTS.md`](INTERRUPTS.md).
+      the next change is measured against. Next design: conditional
+      escalation to the stronger model on evidence of a stall,
+      [`docs/ESCALATION.md`](ESCALATION.md), parked. First: every failed
+      check now records its result lines in the tool result's `details`
+      (`checkResults`), kept from the parent, so cells carry per-check
+      counts, including the check before work, and a progress update after
+      every check keeps them for a cell cut off before its graph returns.
+      Then one experiment with one variable: the failure tail a repair sees,
+      2 KiB widened to 12 KiB per command (32 KiB per check; a report
+      blocker may hold 16 KiB, a repair payload 64 KiB). Builds G (control)
+      and H (variant) in `handoff/builds/`, both smoke-tested live 2026-10-01
+      ($0.012: rounds after every check, result lines recorded, H's repair
+      carried all 150 FAILED lines where G's carried 31, and the lines stay
+      out of the parent's text). The cells themselves are not yet run.
+      Outcome, thresholds and what each result decides are pre-registered in
+      `bench/DESIGN.md` **Repair-tail experiment, pre-registered
+      2026-10-02**: node 1 passing within four runs is the primary outcome,
+      since H's wider findings also reach the parent in node 1's report.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the

@@ -891,7 +891,15 @@ export function registerWorkerGraphOrchestratorTool(
                 overBudget.abort();
               }
             }
-            if (emittedUpdates >= MAX_TOOL_UPDATES) return;
+            // An update carrying a node's rounds is always sent: it is how a
+            // cell cut off before the graph returns keeps its check counts,
+            // and a node sends one per check run, so they stay bounded.
+            if (
+              emittedUpdates >= MAX_TOOL_UPDATES &&
+              progress.rounds === undefined
+            ) {
+              return;
+            }
             emittedUpdates += 1;
             const usage = aggregateUsage(updates);
             onUpdate?.({
@@ -949,14 +957,37 @@ export function registerWorkerGraphOrchestratorTool(
         // and lives for this result, not in run state. Only a terminal event
         // carries one; the latest event of a node cut off mid-run does not.
         const traces = new Map<string, NodeTrace>();
+        // Each failed check's result lines go to `details` only, which Pi
+        // keeps out of the model's context: for measuring how nodes converge,
+        // not for the parent to steer by (D24).
+        const checkResults: {
+          readonly taskId: string;
+          readonly round: number;
+          readonly result: readonly string[];
+        }[] = [];
         for (const update of updates.values()) {
           if (update.phase !== "finished") continue;
+          update.rounds?.forEach((round, index) => {
+            if (round.result !== undefined) {
+              checkResults.push({
+                taskId: update.taskId,
+                round: index + 1,
+                result: round.result,
+              });
+            }
+          });
           traces.set(update.taskId, {
             ...(update.check === undefined ? {} : { check: update.check }),
             ...(update.durationMs === undefined
               ? {}
               : { durationMs: update.durationMs }),
-            ...(update.rounds === undefined ? {} : { rounds: update.rounds }),
+            ...(update.rounds === undefined
+              ? {}
+              : {
+                  rounds: update.rounds.map(
+                    ({ result: _result, ...round }) => round,
+                  ),
+                }),
           });
         }
         const nodes = await collectNodeReviews(
@@ -980,6 +1011,7 @@ export function registerWorkerGraphOrchestratorTool(
             nodes,
             usage,
             ...(budgetStop === undefined ? {} : { budgetStop }),
+            ...(checkResults.length === 0 ? {} : { checkResults }),
           },
           usage: piUsage(usage),
         };

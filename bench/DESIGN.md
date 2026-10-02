@@ -2312,3 +2312,51 @@ regression on parso.
 BENCH_HEADROOM_WAIT_S=0 node bench/selftest.mjs --suite restore
 BENCH_PROVIDER=azure-openai-responses node bench/bench.mjs cell chess-cluster-20 solo-luna --suite restore --cap 0.5
 ```
+
+**Repair-tail experiment, pre-registered 2026-10-02.** Builds G (control) and
+H (one change: the failure tail a check finding carries, 2 KiB to 12 KiB per
+command, 32 KiB per check), three `parso-cluster-20` graph-luna cells each,
+arms alternating, 60-minute limit, $2.25 cap a cell. Written before any cell
+ran.
+
+- **What the premise rests on.** Per-check counts exist only for the three
+  D24 cells, where redirects replaced some repairs. Counts across repairs
+  with no redirect between them: 298, 211, 168; 149, 130, 103, 100; 283,
+  249, 259; 152, 99, 70; 265, 235; 167, 143, 116. Median change per repair
+  -28. A new node's first count against the last count before it: -24,
+  -107, -60 (second nodes), -14, -65, -107 (third nodes); clearly better
+  than a repair in four of six, not every time. Without D24 (build F) every
+  first node failed its four checks and every second node passed; with
+  D24's three, the first node never passed in six cells.
+- **G is a measurement as well as the control.** It gives the first repair
+  curve without redirects; nothing above says whether repairs level off
+  there.
+- **H changes two things.** The same findings go into the failed node's
+  report (`checkFailure`, `src/pi-subprocess.ts:1514`), so H's parent sees
+  up to 16 KiB where G's sees 2 KiB and may write the second node
+  differently. Node 1 up to its report is identical in both arms but for
+  the repair prompt; everything after it is confounded.
+- **A wider tail is not all failures.** pytest lists failures in collection
+  order and every tail the parent saw was dominated by one parametrised
+  test, `test_python_exception_matches`, so a repair always sees the last
+  ones. 12 KiB is still the end of the list; how many of roughly 250 it
+  holds on parso is not measured. The worker can also run pytest itself.
+- **Primary outcome: does node 1 pass its check within four runs.**
+  Baseline 0 of 6. H wins if node 1 passes in at least two of three H cells
+  and at most one of three G cells. A node 1 cut off counts as not passed.
+- **Secondary, node 1 only:** its last count and its change per repair, H
+  against G.
+- **Recorded, not judged:** cell cost, time, the parent's turns, later
+  nodes.
+- **Decision.**
+  - H wins: the 12 KiB tail goes into the runtime.
+  - H worse (its median node 1 last count above G's): discard H and read
+    what the larger report did to the parent.
+  - Otherwise, if G's node 1 was still falling at its last check (that
+    repair took at least 10% off the count before it) in two of three
+    cells: repairs run out of rounds; raise `CHECK_LIMITS.maxRounds` next.
+  - Otherwise, G's node 1 levelled off (under 10%) in two of three cells:
+    test the instruction next, the repair prompt without "Fix the findings
+    and nothing else" (`src/pi-subprocess.ts:1493`), as its own variable.
+- **Power.** Three cells an arm detect only a large effect; a null here
+  rules out a large effect, not any effect.

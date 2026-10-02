@@ -254,7 +254,11 @@ Every node's entry also carries its wall-clock as `durationMs`. A checked or
 reviewed node also carries `rounds`: each check, work, review, and repair step
 in order, with its own duration, usage, and the number of blockers or failing
 commands it left open. That shows the parent whether a review is converging.
-When the result is short of room, rounds are dropped before the report.
+When the result is short of room, rounds are dropped before the report. A
+failed check's round also records the last output line of each failing
+command, such as pytest's `27 failed, 1961 passed`; it goes to the result's
+`details` as `checkResults`, which Pi does not send to the model, so it
+measures how nodes converge without steering the parent.
 
 A check runs before every review, so a reviewer only judges work that passed
 its check, and a review's repair is checked again. A checked node that

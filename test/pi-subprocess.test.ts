@@ -2169,6 +2169,58 @@ test("a failing check sends its output to a repair round and checks again", asyn
   assert.match(repair, /Implement the requested change/u);
 });
 
+test("a failed check's round carries each failing command's last line", async (t) => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["printf 'trace\\n3 failed, 7 passed\\n'; test -f done"], 2),
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+    new AbortController(),
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const rounds =
+    seen.find((progress) => progress.phase === "finished")?.rounds ?? [];
+  const checks = rounds.filter((round) => round.kind === "check");
+  assert.deepEqual(checks[0]?.result, ["3 failed, 7 passed"]);
+  assert.equal(checks[1]?.result, undefined, "a passing check has none");
+  // The check before any work records where the node started.
+  assert.deepEqual(rounds[0]?.kind, "check_before");
+  assert.deepEqual(rounds[0]?.result, ["3 failed, 7 passed"]);
+});
+
+test("each check run reports the rounds so far before the node settles", async (t) => {
+  const seen: PiWorkerProgress[] = [];
+  const { result } = await runCheckedCycle(
+    t,
+    [nodeOutput("First attempt"), nodeOutput("Repaired")],
+    checkedPayload(["printf '2 failed\\n'; test -f done"], 2),
+    (round, checkout) => {
+      if (round === 1) writeFileSync(join(checkout, "done"), "");
+    },
+    new AbortController(),
+    (progress) => seen.push(progress),
+  );
+  await result;
+  const interim = seen.filter(
+    (progress) =>
+      progress.phase !== "finished" && progress.rounds !== undefined,
+  );
+  // Before work, after the work round's check, after the repair's check.
+  assert.deepEqual(
+    interim.map((progress) => progress.rounds?.map((round) => round.kind)),
+    [
+      ["check_before"],
+      ["check_before", "work", "check"],
+      ["check_before", "work", "check", "repair", "check"],
+    ],
+  );
+  assert.ok(interim.every((progress) => progress.phase === "turn_completed"));
+});
+
 test("a check still failing on its last round fails the node with its output", async (t) => {
   const { result, prompts } = await runCheckedCycle(
     t,

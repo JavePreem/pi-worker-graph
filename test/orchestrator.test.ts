@@ -385,6 +385,49 @@ test("names each task's wall-clock and rounds beside its report", async (t) => {
   assert.deepEqual(result.details.nodes[0]?.rounds, rounds);
 });
 
+test("a failed check's result lines reach the details, never the parent's text", async (t) => {
+  const paths = await fixture(t);
+  const line = "27 failed, 1961 passed";
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "finished",
+      status: "succeeded",
+      usage: {
+        turns: 1,
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      rounds: [
+        { kind: "work", durationMs: 40, blockers: 0 },
+        { kind: "check", durationMs: 2, blockers: 1, result: [line] },
+        { kind: "repair", durationMs: 30, blockers: 0 },
+        { kind: "check", durationMs: 2, blockers: 0 },
+      ],
+    });
+    return { output: nodeOutput() };
+  });
+
+  const result = await tool.execute(
+    "call-id",
+    { tasks: [{ id: "task", profile: "writer", assignment: "Work" }] },
+    undefined,
+    undefined,
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.equal((result.content[0]?.text ?? "").includes(line), false);
+  assert.equal(JSON.stringify(result.details.nodes).includes(line), false);
+  assert.deepEqual(
+    (result.details as unknown as { checkResults: unknown }).checkResults,
+    [{ taskId: "task", round: 2, result: [line] }],
+  );
+});
+
 function spentUsage(total: number) {
   return {
     turns: 1,
@@ -604,6 +647,49 @@ test("caps parent tool updates while retaining the latest usage", async (t) => {
   assert.equal(updates, 256);
   assert.equal(result.details.usage.turns, 400);
   assert.equal(result.usage.input, 400);
+});
+
+test("an update carrying a node's rounds is sent past the update cap", async (t) => {
+  const paths = await fixture(t);
+  const usage = {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  const tool = captureTool(paths.agentDirectory, (options) => async (input) => {
+    for (let index = 0; index < 300; index += 1) {
+      options.onProgress?.({
+        taskId: input.taskId,
+        phase: "turn_completed",
+        usage,
+      });
+    }
+    options.onProgress?.({
+      taskId: input.taskId,
+      phase: "turn_completed",
+      usage,
+      rounds: [
+        { kind: "check", durationMs: 1, blockers: 1, result: ["9 failed"] },
+      ],
+    });
+    return { output: nodeOutput() };
+  });
+  const updates: unknown[] = [];
+
+  await tool.execute(
+    "call-id",
+    { tasks: [{ id: "task", profile: "writer", assignment: "Work" }] },
+    undefined,
+    (update) => updates.push(update),
+    { cwd: paths.workingDirectory },
+  );
+
+  assert.equal(updates.length, 257);
+  assert.match(JSON.stringify(updates.at(-1)), /9 failed/u);
 });
 
 test("worker text cannot forge the report block boundary", async (t) => {

@@ -123,6 +123,28 @@ function runCommand(
   });
 }
 
+const MAX_RESULT_LINE_BYTES = 256;
+
+/**
+ * The last non-empty line of a failing command's finding, at most 256 bytes:
+ * the end of its output tail, where test runners print their summary, or the
+ * exit status when it printed nothing.
+ */
+export function resultLine(finding: string): string {
+  const line =
+    finding
+      .split(/\r?\n/u)
+      .map((candidate) => candidate.trim())
+      .filter((candidate) => candidate.length > 0)
+      .at(-1) ?? "";
+  let kept = "";
+  for (const character of line) {
+    if (Buffer.byteLength(kept + character) > MAX_RESULT_LINE_BYTES) break;
+    kept += character;
+  }
+  return kept;
+}
+
 /**
  * Runs every check command in order and returns each one's outcome, in the
  * same order: a finding for a failing command, `undefined` for a passing one.

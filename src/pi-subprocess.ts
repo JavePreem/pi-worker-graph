@@ -16,6 +16,7 @@ import {
   CHECK_LIMITS,
   fingerprintPaths,
   isContainedPath,
+  resultLine,
   runCheck,
 } from "./check.js";
 import type { TaskExecutionFailureCode } from "./execution-failure.js";
@@ -198,6 +199,12 @@ export interface PiRoundTrace {
   readonly durationMs: number;
   readonly blockers: number;
   readonly usage?: PiWorkerUsage;
+  /**
+   * A check run, before or after work, with failing commands: each one's
+   * `resultLine`, such as pytest's `27 failed, 1961 passed`. Kept for measuring how a node
+   * converges; the orchestrator keeps it out of the parent's context.
+   */
+  readonly result?: readonly string[];
 }
 
 export interface PiWorkerProgress {
@@ -209,7 +216,10 @@ export interface PiWorkerProgress {
   readonly check?: PiCheckTrace;
   /** Terminal events only: the whole node's wall-clock. */
   readonly durationMs?: number;
-  /** Terminal events of checked or reviewed nodes only. */
+  /**
+   * Checked or reviewed nodes only: the rounds so far, on the terminal event
+   * and on the event after each check run.
+   */
   readonly rounds?: readonly PiRoundTrace[];
 }
 
@@ -1691,6 +1701,7 @@ async function runPiReviewCycle(
     since: number,
     blockers: number,
     usage?: TaskUsage,
+    result?: readonly string[],
   ): void => {
     rounds.push(
       Object.freeze({
@@ -1698,8 +1709,30 @@ async function runPiReviewCycle(
         durationMs: Date.now() - since,
         blockers,
         ...(usage === undefined ? {} : { usage: immutableUsage(usage) }),
+        ...(result === undefined || result.length === 0
+          ? {}
+          : { result: Object.freeze([...result]) }),
       }),
     );
+  };
+  /**
+   * The rounds so far, after a check run: a node cut off before it settles
+   * still leaves its counts in the record. Guarded like `notify`.
+   */
+  const reportRounds = (): void => {
+    if (options.onProgress === undefined || terminalEmitted) return;
+    try {
+      options.onProgress(
+        Object.freeze({
+          taskId: input.taskId,
+          phase: "turn_completed" as const,
+          usage: withReview(running),
+          rounds: Object.freeze([...rounds]),
+        }),
+      );
+    } catch {
+      // Observability must never alter worker execution.
+    }
   };
   const notify = (status: "succeeded" | "failed" | "aborted"): void => {
     if (options.onProgress === undefined || terminalEmitted) return;
@@ -1787,7 +1820,16 @@ async function runPiReviewCycle(
     const before = await runCheck(check, input.workingDirectory, input.signal);
     if (input.signal.aborted) return cancelled();
     const findings = unjudgeableFindings(check, before);
-    traceRound("check_before", checkStarted, findings.length);
+    traceRound(
+      "check_before",
+      checkStarted,
+      findings.length,
+      undefined,
+      before
+        .filter((finding): finding is string => finding !== undefined)
+        .map(resultLine),
+    );
+    reportRounds();
     trace = {
       failingBefore: before.filter((finding) => finding !== undefined).length,
       commands: check.commands.length,
@@ -1907,7 +1949,14 @@ async function runPiReviewCycle(
       const findings = outcomes.filter(
         (finding): finding is string => finding !== undefined,
       );
-      traceRound("check", checkStarted, findings.length);
+      traceRound(
+        "check",
+        checkStarted,
+        findings.length,
+        undefined,
+        findings.map(resultLine),
+      );
+      reportRounds();
       trace = {
         ...trace,
         runs: checks,
