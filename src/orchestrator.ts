@@ -151,8 +151,7 @@ const workerTaskSchema = Type.Object(
           maxRounds: Type.Integer({
             minimum: 1,
             maximum: CHECK_LIMITS.maxRounds,
-            description:
-              "How many times the commands may run after the work. Each failing run that has a round left is followed by a repair that sees the failing output, then another run.",
+            description: `How many times the commands may run after the work. Each failing run that has a round left is followed by a repair that sees the failing output, then another run. A run that still improves on the one before it, with fewer commands failing or lower failure counts in their output, earns another repair past this limit, up to ${CHECK_LIMITS.maxRuns} runs and while the task's time allows one.`,
           }),
           before: Type.Optional(
             Type.Union([Type.Literal("fail"), Type.Literal("pass")], {

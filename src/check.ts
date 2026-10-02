@@ -16,6 +16,11 @@ import { isAbsolute, join } from "node:path";
  * review policy counts review passes: a check of 2 admits work, check,
  * repair, check. The run before the work is not a round.
  *
+ * A node whose failures are still falling when its rounds run out keeps
+ * repairing, up to `maxRuns` runs in all (`improved`): a fixed limit ends
+ * converging work and hands it to a new node, which starts cold and costs the
+ * parent a re-plan.
+ *
  * The output tail is what a repair round and a failed node's report see of a
  * failing command. It is a tail because test runners end on their summary, and
  * a worker that needs more can run the command itself — the repair names it.
@@ -24,6 +29,7 @@ export const CHECK_LIMITS = Object.freeze({
   maxCommands: 8,
   maxCommandBytes: 1024,
   maxRounds: 4,
+  maxRuns: 12,
   outputTailBytes: 2 * 1024,
   maxFrozenPaths: 32,
   maxFrozenPathBytes: 4 * 1024,
@@ -143,6 +149,48 @@ export function resultLine(finding: string): string {
     kept += character;
   }
   return kept;
+}
+
+const FAILURE_COUNT = /(\d+)\s+(?:failed|failing|failures?|errors?)\b/giu;
+
+/**
+ * The failures a failing command's output reports, from the last line that
+ * reports any: pytest's `27 failed, 3 errors`, cargo's `2 failed`, mocha's
+ * `4 failing`, tsc's `Found 12 errors`. Undefined when no line does.
+ */
+export function failureCount(finding: string): number | undefined {
+  for (const line of finding.split(/\r?\n/u).reverse()) {
+    const counts = [...line.matchAll(FAILURE_COUNT)];
+    if (counts.length > 0) {
+      return counts.reduce((sum, match) => sum + Number(match[1]), 0);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a check run did better than the run before it, outcome by outcome
+ * as `runCheck` returns them: fewer commands failing, or as many failing with
+ * lower failure counts in all. A run whose failures cannot be counted has not
+ * shown it improved.
+ */
+export function improved(
+  before: readonly (string | undefined)[],
+  after: readonly (string | undefined)[],
+): boolean {
+  const failing = (outcomes: readonly (string | undefined)[]) =>
+    outcomes.filter((finding): finding is string => finding !== undefined);
+  const was = failing(before);
+  const now = failing(after);
+  if (now.length !== was.length) return now.length < was.length;
+  const total = (findings: readonly string[]) =>
+    findings.reduce<number | undefined>((sum, finding) => {
+      const count = failureCount(finding);
+      return sum === undefined || count === undefined ? undefined : sum + count;
+    }, 0);
+  const then = total(was);
+  const later = total(now);
+  return then !== undefined && later !== undefined && later < then;
 }
 
 /**

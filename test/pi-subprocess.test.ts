@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { CHECK_LIMITS, failureCount, improved } from "../src/check.js";
 import { TaskExecutionFailure } from "../src/execution-failure.js";
 import type {
   NodeOutput,
@@ -2061,6 +2062,7 @@ async function runCheckedCycle(
   controller: AbortController = new AbortController(),
   onProgress?: (progress: PiWorkerProgress) => void,
   prepare: (checkout: string) => void = () => {},
+  deadline?: number,
 ): Promise<{
   readonly result: Promise<TaskExecutionResult>;
   readonly prompts: string[];
@@ -2098,6 +2100,7 @@ async function runCheckedCycle(
       {
         ...input(controller.signal, payload as never),
         workingDirectory: checkout,
+        ...(deadline === undefined ? {} : { deadline }),
       },
       onProgress === undefined
         ? reviewedOptions
@@ -2146,6 +2149,7 @@ test("a worker is told the check commands it has to pass", async (t) => {
   await result;
   assert.match(prompts[0] as string, /"checkCommands":\["test -f done"\]/u);
   assert.match(prompts[0] as string, /succeeds only if each one exits 0/u);
+  assert.match(prompts[0] as string, /keep working while any of them fails/u);
   assert.doesNotMatch(prompts[0] as string, /review/iu);
 });
 
@@ -2233,6 +2237,101 @@ test("a check still failing on its last round fails the node with its output", a
   assert.equal(settled.output.blockers.length, 1, "only the failing command");
   assert.match(settled.output.blockers[0] as string, /Exit code: 3/u);
   assert.match(settled.output.blockers[0] as string, /spec: 3 failing/u);
+});
+
+// A check whose output reports a failure count the scripted rounds lower:
+// before any work it reports 99, and round `i` leaves `counts[i]`.
+const countingCheck = [
+  'n=$(cat count 2>/dev/null || echo 99); echo "$n failed"; test "$n" = 0',
+];
+const leaveCounts =
+  (counts: readonly number[]) => (round: number, checkout: string) =>
+    writeFileSync(join(checkout, "count"), String(counts[round]));
+
+test("a check still improving past its rounds keeps repairing", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("Work"), nodeOutput("Repair 1"), nodeOutput("Repair 2")],
+    checkedPayload(countingCheck, 1),
+    leaveCounts([5, 2, 0]),
+  );
+  const settled = await result;
+  assert.equal(prompts.length, 3, "work, then two repairs past one round");
+  assert.equal(settled.output.summary, "Repair 2");
+  assert.deepEqual(settled.output.blockers, []);
+});
+
+test("a check that stops improving past its rounds fails the node", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("Work"), nodeOutput("Repair 1")],
+    checkedPayload(countingCheck, 1),
+    leaveCounts([5, 5]),
+  );
+  const settled = await result;
+  assert.equal(prompts.length, 2);
+  assert.match(settled.output.blockers[0] as string, /5 failed/u);
+});
+
+test("an improving check stops at the most runs a node may make", async (t) => {
+  const runs = CHECK_LIMITS.maxRuns;
+  const counts = Array.from({ length: runs }, (_, round) => runs - round);
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    counts.map((_, round) => nodeOutput(`Round ${round}`)),
+    checkedPayload(countingCheck, 1),
+    leaveCounts(counts),
+  );
+  const settled = await result;
+  assert.equal(prompts.length, runs);
+  assert.match(settled.output.blockers[0] as string, /1 failed/u);
+});
+
+test("an improving check is not repaired past its rounds without time for it", async (t) => {
+  const { result, prompts } = await runCheckedCycle(
+    t,
+    [nodeOutput("Work")],
+    checkedPayload(countingCheck, 1),
+    leaveCounts([5]),
+    new AbortController(),
+    undefined,
+    () => {},
+    Date.now(),
+  );
+  const settled = await result;
+  assert.equal(prompts.length, 1);
+  assert.match(settled.output.blockers[0] as string, /5 failed/u);
+});
+
+test("failure counts are read from the last line of output that reports any", () => {
+  const finding = (output: string) =>
+    `Check command failed: x\nExit code: 1\nLast 2048 bytes of output:\n${output}`;
+  assert.equal(
+    failureCount(finding("E  1 failed\n= 27 failed, 3 errors, 1961 passed =")),
+    30,
+  );
+  assert.equal(
+    failureCount(finding("test result: FAILED. 5 passed; 2 failed")),
+    2,
+  );
+  assert.equal(failureCount(finding("  4 failing\n\nDone")), 4);
+  assert.equal(failureCount(finding("Found 12 errors in 3 files.")), 12);
+  assert.equal(failureCount(finding("FAIL\tpkg\t0.01s")), undefined);
+});
+
+test("a check run improves on fewer failing commands or lower counts", () => {
+  const failing = (count: number) => `Check command failed: x\n${count} failed`;
+  assert.equal(
+    improved([failing(9), failing(1)], [failing(9), undefined]),
+    true,
+  );
+  assert.equal(improved([failing(9)], [failing(8)]), true);
+  assert.equal(improved([failing(9)], [failing(9)]), false);
+  assert.equal(improved([undefined], [failing(1)]), false);
+  assert.equal(
+    improved(["Check command failed: x"], ["Check command failed: x"]),
+    false,
+  );
 });
 
 test("a check runs before the review, and the review sees passing work", async (t) => {

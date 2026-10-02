@@ -15,6 +15,7 @@ import type { CheckPolicy } from "./check.js";
 import {
   CHECK_LIMITS,
   fingerprintPaths,
+  improved,
   isContainedPath,
   resultLine,
   runCheck,
@@ -697,7 +698,7 @@ function workerPrompt(
     ...(payload.check === undefined
       ? []
       : [
-          "After you report, the runtime runs every checkCommands entry from the checkout root, and this task succeeds only if each one exits 0. Run them yourself before reporting.",
+          "After you report, the runtime runs every checkCommands entry from the checkout root, and this task succeeds only if each one exits 0. Run them yourself before reporting, and keep working while any of them fails: report a blocker only for something you cannot fix, never for a failure you have not fixed yet.",
         ]),
     `As your final action, call ${REPORT_TOOL_NAME} exactly once with the complete structured report.`,
     "Do not finish with free-form text. Report blockers honestly when the assignment cannot be completed.",
@@ -1815,9 +1816,12 @@ async function runPiReviewCycle(
   // the frozen paths are fingerprinted. Both are free, and a check that cannot
   // judge would otherwise accept work it never examined.
   let frozenBefore: ReadonlyMap<string, string> | undefined;
+  // The last check run's outcomes, for judging whether the next one improved.
+  let previous: readonly (string | undefined)[] = [];
   if (check !== undefined) {
     const checkStarted = Date.now();
     const before = await runCheck(check, input.workingDirectory, input.signal);
+    previous = before;
     if (input.signal.aborted) return cancelled();
     const findings = unjudgeableFindings(check, before);
     traceRound(
@@ -1886,6 +1890,11 @@ async function runPiReviewCycle(
     }
   };
 
+  // From the start of the latest work or repair round, and the longest a
+  // round and the check after it have taken: a repair started with less than
+  // that left before the deadline would likely be cut off with no report.
+  let roundStarted = Date.now();
+  let slowest = 0;
   let work = await runRound("work", stripReview(payload)).catch(failed(false));
   spend(work.usage, false);
 
@@ -1902,13 +1911,15 @@ async function runPiReviewCycle(
     ) {
       return false;
     }
+    roundStarted = Date.now();
     work = await runRound("repair", next).catch(failed(false));
     spend(work.usage, false);
     return true;
   };
 
   // Unbounded on purpose: every pass either returns or runs a repair, and
-  // repairs are bounded by the rounds of the check and the review together.
+  // repairs are bounded by the rounds of the check (at most `maxRuns`) and the
+  // review together.
   // A check runs before every review, so a review only ever judges work the
   // check has passed, and a review's repair is checked again.
   let checks = 0;
@@ -1962,11 +1973,19 @@ async function runPiReviewCycle(
         runs: checks,
         outcome: findings.length === 0 ? "passed" : "failed",
       };
+      slowest = Math.max(slowest, Date.now() - roundStarted);
+      const progressed = improved(previous, outcomes);
+      previous = outcomes;
       if (findings.length > 0) {
-        if (
-          checks >= check.maxRounds ||
-          !(await repair("check", findings, checks))
-        ) {
+        // Past its rounds, a check that is still improving earns another
+        // repair, while runs and time remain for one.
+        const another =
+          checks < check.maxRounds ||
+          (progressed &&
+            checks < CHECK_LIMITS.maxRuns &&
+            (input.deadline === undefined ||
+              Date.now() + slowest < input.deadline));
+        if (!another || !(await repair("check", findings, checks))) {
           return settle({
             ...work,
             output: checkFailure(work.output, findings),

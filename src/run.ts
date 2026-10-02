@@ -113,6 +113,12 @@ export interface TaskExecutionInput {
   /** Present for adapters that expose run-scoped coordination to workers. */
   readonly runStateRoot?: string;
   readonly signal: AbortSignal;
+  /**
+   * When the task's timeout aborts it, in epoch milliseconds: an executor
+   * deciding whether to start more work can leave a result rather than be
+   * cut off with none.
+   */
+  readonly deadline?: number;
 }
 
 export interface TaskExecutionResult {
@@ -419,7 +425,7 @@ function withUsage(
 
 function executeTask(
   executor: TaskExecutor,
-  input: Omit<TaskExecutionInput, "signal">,
+  input: Omit<TaskExecutionInput, "signal" | "deadline">,
   parentSignal: AbortSignal,
   timeoutMs: number,
 ): Promise<SettledTask> {
@@ -428,6 +434,7 @@ function executeTask(
     const executionInput: TaskExecutionInput = {
       ...input,
       signal: controller.signal,
+      deadline: Date.now() + timeoutMs,
     };
     let settled = false;
     let timedOut = false;

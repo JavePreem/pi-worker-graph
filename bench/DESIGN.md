@@ -2360,3 +2360,45 @@ ran.
     and nothing else" (`src/pi-subprocess.ts:1493`), as its own variable.
 - **Power.** Three cells an arm detect only a large effect; a null here
   rules out a large effect, not any effect.
+- **Amendment, 2026-10-02, after h-1, g-1 and g-2, before h-2, h-3 and
+  g-3.** g-1's node 1 had a check as bad as its check before work (455),
+  the whole suite failing, so its last repair (455 to 199) measured
+  recovery, not convergence. A check whose count is at least the node's
+  check-before count is *broken*.
+  - The primary outcome is unchanged.
+  - Per-repair changes leave out any repair that starts or ends at a
+    broken check.
+  - For the still-falling or levelled-off branch, a G cell whose node 1
+    has a broken check at its third or fourth run is undetermined. The
+    branch goes by the majority of the determined G cells; a tie or none
+    determined leaves it inconclusive, and the next variable is the
+    maintainer's call.
+- **h-3 skipped, 2026-10-02, by the maintainer.** After h-1 and h-2, node 1
+  had failed in both H cells, so H cannot win; H's median node 1 last count
+  is 169 whatever h-3 shows, at most G's (175 or more), so "H worse" cannot
+  hold. h-3 could change no branch. g-3 still decides the falling or
+  levelled-off branch.
+
+**Repair-tail cells so far** (raw; judged by the pre-registration once all
+six are in). Node 1's counts: before work, then after each check.
+
+| cell | build | outcome | cost | time | nodes, parent | node 1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| h-1 | H | resolved | $1.200 | 44.5 min | 6 nodes, 11 parent turns | failed: 455; 255, 217, 172, 169 |
+| g-1 | G | resolved | $0.544 | 22.4 min | 2 nodes, 6 parent turns | failed: 455; 283, 248, 455, 199 |
+| g-2 | G | 60-minute limit, 1934/1988 | $1.375 | 65.4 min | 4 nodes, 9 parent turns | failed: 455; 244, 215, 202, 175 |
+| h-2 | H | resolved | $0.721 | 29.8 min | 3 nodes, 9 parent turns | failed: 455; 270, 219, 191, 169 |
+
+- g-1's third check, 455, is the whole suite failing again, as before work;
+  its cause is not read.
+- g-2's second graph was a `diagnose` node, $0.616; its third graph's
+  `repair-errors` hit the 30-minute node limit with its last repair cut off.
+
+**Harness: two cells of one task and arm cannot run at once.** `bench.mjs
+cell` fixes repetition 0 (`bench/bench.mjs:408`), so both cells derive the
+same container, broker and network names, and the second's cleanup of
+leftovers (`bench/egress.mjs:149`) removes the first's broker. The first
+cell then settles with no provider turn, `no-agent-turn`, $0. Stopping
+`bench.mjs` by signal also leaves the cell's containers running, still
+spending; remove them by name.
+

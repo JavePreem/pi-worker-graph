@@ -825,7 +825,9 @@ What remains, in order:
       and H (variant) in `handoff/builds/`, both smoke-tested live 2026-10-01
       ($0.012: rounds after every check, result lines recorded, H's repair
       carried all 150 FAILED lines where G's carried 31, and the lines stay
-      out of the parent's text). The cells themselves are not yet run.
+      out of the parent's text). Cells started 2026-10-02: h-1, g-1, g-2,
+      h-2 run, H-3 skipped (H cannot win), G-3 to go (`bench/DESIGN.md` **Repair-tail cells so
+      far**).
       Outcome, thresholds and what each result decides are pre-registered in
       `bench/DESIGN.md` **Repair-tail experiment, pre-registered
       2026-10-02**: node 1 passing within four runs is the primary outcome,

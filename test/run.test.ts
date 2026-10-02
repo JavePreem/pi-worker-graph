@@ -1133,3 +1133,22 @@ test("fails a task whose executor reports unusable usage", async (t) => {
   );
   assert.equal(output.usage, undefined);
 });
+
+test("each task is given the deadline its timeout aborts it at", async (t) => {
+  const stateRoot = await temporaryStateRoot(t);
+  let deadline: number | undefined;
+  const executor: TaskExecutor = async (input) => {
+    deadline = input.deadline;
+    return { output: nodeOutput() };
+  };
+  const before = Date.now();
+  await runGraph({
+    stateRoot,
+    graph: { tasks: [{ id: "task" }] },
+    workingDirectory: stateRoot,
+    executor,
+    taskTimeoutMs: 5_000,
+  });
+  assert.ok(deadline !== undefined);
+  assert.ok(deadline >= before + 5_000 && deadline <= Date.now() + 5_000);
+});

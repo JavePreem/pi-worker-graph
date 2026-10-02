@@ -493,6 +493,33 @@ The redirect's framing is worded plainly. Azure's content filter cut off a
 probe redirect worded as new instructions from an orchestrator, and passed the
 same request worded neutrally.
 
+## D25. A check that is still improving keeps its node repairing
+
+`maxRounds` stays the number of check runs a node always gets. Past it, a
+failing run that improves on the run before it earns another repair: fewer
+commands failing, or as many with lower failure counts in their output. The
+count is read from the last output line reporting one (`27 failed`,
+`4 failing`, `Found 12 errors`), so no runner needs configuring; a command
+whose output reports none can only improve by passing. The extension stops at
+12 runs, and before a repair the node's deadline (now in the executor's input)
+would likely cut off: the slowest round and check so far must fit. A node cut
+off by its timeout reports nothing, and one that stops on a failed check
+reports its failures.
+
+Why: on parso every first node failed its four checks in nine cells, most
+still falling (244, 215, 202, 175), and the cost and time spread between
+cells came from what the parent planned after that failure (a sol
+`diagnose` node, a node run into its timeout), not from node 1
+(`bench/DESIGN.md` **Repair-tail cells so far**). A wider failure tail did
+not change node 1 (build H).
+
+With it, the worker prompt tells a checked worker to keep working while a
+command fails and to report a blocker only for what it cannot fix: workers
+reported after 2-3 minutes with the suite known failing.
+
+Not measured live. Both change what a round costs and how many rounds run;
+the comparison is node 1's pass rate and cell spread against G.
+
 ## Open decisions
 
 1. Whether advisory path and symbol claims belong in the MVP or a follow-up.

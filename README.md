@@ -234,8 +234,14 @@ of 1 through 4. The worker is told the commands. After it reports, the runtime
 runs every command itself, in order, from the checkout root, with no model
 involved; the check passes when each exits 0. A failing run with a round left
 is followed by a repair worker that sees each failing command, its exit status,
-and the last 2 KiB of its output, and then the check runs again. A node whose
-check still fails on its last round fails with those failures as its blockers.
+and the last 2 KiB of its output, and then the check runs again. A failing
+run past the last round still earns a repair when it improves on the run
+before it: fewer commands failing, or lower failure counts in their output
+(the last line reporting any, such as pytest's `27 failed`). That goes on up
+to 12 runs, and only while the node's timeout leaves room for its slowest
+round so far. A node whose check stops improving, or runs out, fails with its
+failures as its blockers. The worker is told to keep working while a command
+fails, and to report a blocker only for what it cannot fix.
 
 Before the worker starts, the check runs once to show it can judge the task.
 With `before: "fail"`, the default and the shape for new behaviour, every
