@@ -935,3 +935,81 @@ test("the fingerprint moves with any drawn task's prompt, not with their order",
     base,
   );
 });
+
+const loopTask = {
+  ...task,
+  check: { commands: ["python3 -m pytest test"], frozen: ["test"] },
+};
+
+const loopResult = (outcome = "settled") => ({
+  outcome,
+  stats: {
+    cost: 0.4,
+    tokens: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, total: 4 },
+  },
+  loop: {
+    outcome,
+    attempts: [
+      {
+        runId: "r1",
+        status: "succeeded",
+        check: { outcome: "passed" },
+        rounds: [{ kind: "work" }],
+      },
+    ],
+  },
+});
+
+test("a loop arm runs its node with no session, on the task's own check", async () => {
+  const seen = [];
+  const record = await runCell({
+    suite,
+    task: loopTask,
+    cell: { task: "i1", arm: "loop-luna", repetition: 1 },
+    manifest,
+    deps: deps({
+      openAgentSession: async () => {
+        throw new Error("a loop arm has no parent session");
+      },
+      runLoop: async (_container, options) => {
+        seen.push(options);
+        return loopResult();
+      },
+    }),
+  });
+  assert.equal(record.class, "resolved");
+  assert.equal(record.costUsd, 0.4);
+  assert.equal(record.preconditions.met, true);
+  assert.deepEqual(record.preconditions.graphSizes, [1]);
+  assert.equal(record.detail.loopAttempts.length, 1);
+  assert.equal(seen[0].task.check, loopTask.check);
+  assert.deepEqual(Object.keys(seen[0].profiles), ["worker"]);
+  assert.equal(seen[0].profiles.worker.model, "gpt-5.6-luna");
+});
+
+test("a loop arm stopped at its deadline is graded and not scored", async () => {
+  const record = await runCell({
+    suite,
+    task: loopTask,
+    cell: { task: "i1", arm: "loop-luna", repetition: 1 },
+    manifest,
+    deps: deps({ runLoop: async () => loopResult("timeout") }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "timeout");
+  assert.equal(record.costUsd, 0.4);
+  assert.equal(record.detail.loopAttempts.length, 1);
+});
+
+test("a loop arm on a task with no check is not attempted", async () => {
+  const container = fakeContainer();
+  const record = await runCell({
+    suite,
+    task,
+    cell: { task: "i1", arm: "loop-luna", repetition: 1 },
+    manifest,
+    deps: deps({ start: async () => container }),
+  });
+  assert.equal(record.class, "not-attempted");
+  assert.equal(record.outcome, "task has no check");
+});

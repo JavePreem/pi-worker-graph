@@ -266,6 +266,13 @@ interface CollectedNode {
 interface WorkerGraphNodeReview {
   readonly taskId: string;
   readonly status: string;
+  /**
+   * Runtime-authored, from the request: the worker profile the task ran on.
+   * A parent may run a node on any configured profile, so without it a
+   * node's spend reads as the worker's. A reviewed node's reviewer share is
+   * under `usage.review`, and each model round in `rounds` names its own.
+   */
+  readonly profile?: string;
   readonly report?: CompactWorkerReport;
   /**
    * Present when the worker retained supplemental text beside its report.
@@ -645,10 +652,12 @@ function omittedReview(
   node: NodeStateRecord,
   record?: NodeOutputRecord,
   trace?: NodeTrace,
+  profile?: string,
 ): WorkerGraphNodeReview {
   return {
     taskId: node.taskId,
     status: node.status,
+    ...(profile === undefined ? {} : { profile }),
     ...(record?.artifact === undefined
       ? {}
       : { artifactBytes: record.artifact.bytes }),
@@ -674,6 +683,7 @@ async function collectNodeReviews(
   stateRoot: string,
   readOutput: typeof readNodeOutput,
   traces: ReadonlyMap<string, NodeTrace>,
+  profiles: ReadonlyMap<string, string>,
 ): Promise<readonly WorkerGraphNodeReview[]> {
   const collected = await Promise.all(
     result.nodes.map(async (node): Promise<CollectedNode> => {
@@ -693,15 +703,22 @@ async function collectNodeReviews(
     const remaining = collected
       .slice(index + 1)
       .map((entry) =>
-        omittedReview(entry.node, entry.record, traces.get(entry.node.taskId)),
+        omittedReview(
+          entry.node,
+          entry.record,
+          traces.get(entry.node.taskId),
+          profiles.get(entry.node.taskId),
+        ),
       );
     const fits = (candidate: WorkerGraphNodeReview) =>
       reviewBytes([...reviews, candidate, ...remaining]) <=
       MAX_RESULT_REPORT_BYTES;
     const trace = traces.get(node.taskId);
+    const profile = profiles.get(node.taskId);
     const base: WorkerGraphNodeReview = {
       taskId: node.taskId,
       status: node.status,
+      ...(profile === undefined ? {} : { profile }),
       ...(record?.artifact === undefined
         ? {}
         : { artifactBytes: record.artifact.bytes }),
@@ -737,7 +754,7 @@ async function collectNodeReviews(
     // The report outranks the rounds: it is what the parent plans from.
     const { rounds: _rounds, ...unrounded } = summary;
     reviews.push(
-      fits(unrounded) ? unrounded : omittedReview(node, record, trace),
+      fits(unrounded) ? unrounded : omittedReview(node, record, trace, profile),
     );
   }
   return Object.freeze(reviews);
@@ -989,11 +1006,17 @@ export function registerWorkerGraphOrchestratorTool(
                 }),
           });
         }
+        // From the request rather than the store: the profile is what the
+        // parent asked for, and a node that never ran still has one.
+        const profiles = new Map(
+          graph.tasks.map((task) => [task.id.trim(), task.payload.profile]),
+        );
         const nodes = await collectNodeReviews(
           result,
           configuration.stateRoot,
           readOutput,
           traces,
+          profiles,
         );
         const budgetStop =
           budget === undefined || budgetSpent === undefined

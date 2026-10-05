@@ -550,7 +550,10 @@ rather than counted as work that was free.
 The `worker_graph` tool result carries the same numbers per node, so an
 orchestrator can see which worker was expensive rather than only what the graph
 cost in total. Its aggregate comes from live progress instead of the store, so
-it still accounts for a task whose output could not be persisted.
+it still accounts for a task whose output could not be persisted. Each node's
+entry also names the worker profile it ran on, and each model round in its
+`rounds` names its own, so spend is attributed to a model rather than assumed
+to be the worker's: a parent may run a node on any configured profile.
 
 Token counts come from the provider's telemetry; cost is Pi's pricing of those
 tokens, so it is only as good as Pi's pricing table. Treat cost as an estimate

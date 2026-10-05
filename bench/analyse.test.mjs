@@ -145,6 +145,40 @@ test("the reviewer's share is split out of the node share, not added to it", () 
   assert.equal(Number((split.nodeShare - split.reviewShare).toFixed(4)), 0.1);
 });
 
+test("the worker share is attributed by each node's profile, not assumed", () => {
+  const text = JSON.stringify([
+    {
+      profile: "worker",
+      usage: { cost: { total: 0.2 }, review: { cost: { total: 0.15 } } },
+    },
+    // A node the parent ran on the reviewer profile: sol, not the arm's
+    // worker, however the node is named.
+    { profile: "reviewer", usage: { cost: { total: 0.4 } } },
+  ]);
+  const split = spendSplit({
+    costUsd: 2,
+    detail: { workerGraphResults: [text] },
+  });
+  assert.equal(split.nodeShare, 0.3);
+  assert.equal(split.reviewShare, 0.075);
+  assert.equal(split.workerCostUsd, 0.05);
+  assert.equal(split.otherProfileCostUsd, 0.4);
+  assert.equal(split.unattributedCostUsd, 0);
+  assert.equal(split.workerShare, 0.025);
+});
+
+test("a record whose nodes predate the profile field has no worker share", () => {
+  const text = JSON.stringify([{ usage: { cost: { total: 0.2 } } }]);
+  const split = spendSplit({
+    costUsd: 1,
+    detail: { workerGraphResults: [text] },
+  });
+  assert.equal(split.unattributedCostUsd, 0.2);
+  // Unknown, not zero: the node side is still readable, only who spent it.
+  assert.equal(split.nodeShare, 0.2);
+  assert.equal(split.workerShare, null);
+});
+
 test("a reviewer share above the node share is a finding, not a data point", () => {
   const text = JSON.stringify({
     nodes: [

@@ -2680,6 +2680,12 @@ test("a reviewed node's terminal event traces every round in order", async () =>
       ["review", 0],
     ],
   );
+  // Each model round names the profile it ran on, so its spend is
+  // attributable to a model.
+  assert.deepEqual(
+    rounds.map((round) => round.profile),
+    ["writer", "reviewer", "writer", "reviewer"],
+  );
   for (const round of rounds) {
     assert.equal(round.usage?.cost.total, 0.03);
     assert.ok(round.durationMs >= 0);
@@ -2717,8 +2723,14 @@ test("a checked node traces its checks beside its rounds, spending nothing on th
       ["check", 0],
     ],
   );
-  for (const round of rounds.filter((r) => r.kind.startsWith("check")))
+  for (const round of rounds.filter((r) => r.kind.startsWith("check"))) {
     assert.equal(round.usage, undefined);
+    assert.equal(round.profile, undefined, "a check runs on no profile");
+  }
+  assert.deepEqual(
+    rounds.filter((r) => !r.kind.startsWith("check")).map((r) => r.profile),
+    ["writer", "writer"],
+  );
 });
 
 test("an unchecked worker's terminal event carries its wall-clock", async () => {

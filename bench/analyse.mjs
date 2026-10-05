@@ -11,6 +11,7 @@
  * statistics: between-task difficulty swamps the effect under test, so an
  * unpaired task is noise rather than information.
  */
+import { WORKER_PROFILE } from "./arms.mjs";
 import { cellKey, completeTasks } from "./queue.mjs";
 
 /** Records keyed by cell, for the tasks every arm has finished. */
@@ -180,20 +181,33 @@ export function spendSplit(record) {
   if (!Array.isArray(texts) || texts.length === 0) return null;
   let nodeCost = 0;
   let reviewCost = 0;
+  // The node side less the reviewer's share, by the profile each node ran
+  // on: the arm's worker profile, another profile, or a node from a build
+  // before nodes named one.
+  let workerCost = 0;
+  let otherProfileCost = 0;
+  let unattributedCost = 0;
   let read = false;
   for (const text of texts) {
     for (const node of parseWorkerReports(text)) {
       const cost = node?.usage?.cost?.total;
-      if (typeof cost === "number") {
-        nodeCost += cost;
-        read = true;
-      }
       // A share of the cost above, not something beside it. The package
       // reports it because a node runs a worker and a reviewer on different
       // profiles and settles them into one attempt; a node with no reviewer
       // reports no share and contributes nothing here.
       const review = node?.usage?.review?.cost?.total;
       if (typeof review === "number") reviewCost += review;
+      if (typeof cost !== "number") continue;
+      nodeCost += cost;
+      read = true;
+      // "nodeShare minus reviewShare is the workers'" assumed every node ran
+      // on the worker profile. A parent can run a node on any profile:
+      // `parso-cluster-20-graph-luna-2` ran a sol `diagnose-errors` node on
+      // the reviewer profile, $0.392 that reading would have called luna.
+      const own = cost - (typeof review === "number" ? review : 0);
+      if (node?.profile === WORKER_PROFILE) workerCost += own;
+      else if (typeof node?.profile === "string") otherProfileCost += own;
+      else unattributedCost += own;
     }
   }
   if (!read) return null;
@@ -205,14 +219,24 @@ export function spendSplit(record) {
   return {
     nodeCostUsd: Number(nodeCost.toFixed(4)),
     reviewCostUsd: Number(reviewCost.toFixed(4)),
+    workerCostUsd: Number(workerCost.toFixed(4)),
+    otherProfileCostUsd: Number(otherProfileCost.toFixed(4)),
+    unattributedCostUsd: Number(unattributedCost.toFixed(4)),
     totalCostUsd: total,
     // Worker and reviewer together.
     nodeShare: share === null ? null : Number(share.toFixed(4)),
     // The reviewer's part of that, as a share of the same session total, so
     // the two are directly comparable. This is what tells "the saving was
     // eaten by the reviewer" from "eaten by the parent": subtract it from
-    // nodeShare and what is left is the workers.
+    // nodeShare and what is left is every node's own rounds.
     reviewShare: review === null ? null : Number(review.toFixed(4)),
+    // The arm's workers' own part, by profile. Null when a node predates the
+    // profile field: nodeShare minus reviewShare then bounds it from above
+    // but cannot say which model spent it.
+    workerShare:
+      share === null || unattributedCost > COST_EPSILON
+        ? null
+        : Number((workerCost / total).toFixed(4)),
     // A share above 1 is arithmetically impossible and means the two sides
     // disagree, so it is surfaced rather than averaged into a headline. Seen
     // on the first live cell: nodes summed to $2.05 against a session total of
@@ -257,6 +281,10 @@ export function spendSplitReport(manifest, records) {
       // the workers' share.
       meanNodeShare: meanShare(splits, "nodeShare"),
       meanReviewShare: meanShare(splits, "reviewShare"),
+      // The arm's workers' own part, over the cells whose nodes name their
+      // profile; a cell with a node that does not is left out, not read as
+      // the worker's.
+      meanWorkerShare: meanShare(splits, "workerShare"),
     };
   }
   return out;

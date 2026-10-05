@@ -288,6 +288,12 @@ before. Whether a round that has stopped improving should instead restart
 fresh is open: the second node of a graph passed every time on one build (F)
 and failed on three cells of the next two (G-2, H-1, H-2), so a fresh start on
 a flat count is a hypothesis for a cell, not a default. Not measured live.
+The cost runs the other way too: every turn of a resumed round re-reads the
+session's whole prefix from the cache, so a round's tokens grow with the
+rounds before it, and over a D25-extended node the saving in wall-clock can
+come with more token spend than fresh rounds. Pre-registered with its
+fallback (resume for the first repairs, then fresh) in `bench/DESIGN.md`
+**Worker-session ladder, pre-registered 2026-10-02**.
 
 ## D21. Configured profile names reach the parent through the request context
 
@@ -536,6 +542,17 @@ reported after 2-3 minutes with the suite known failing.
 
 Not measured live. Both change what a round costs and how many rounds run;
 the comparison is node 1's pass rate and cell spread against G.
+
+What the five G/H cells say for it (2026-10-02, `bench/DESIGN.md` **What
+the repair-tail cells say**): node 1 removes about 190 of 455 failures in
+its work round and a median 27 a repair, so four runs leave 169–231 and
+zero is 7–9 repairs away, which the 12-run ceiling holds only if the rate
+holds. The rate decays within a node (−9, −11, −12 in g-3), and `improved`
+admits a round that takes off 1–3%, so an extended node may spend rounds on
+small gains. One repair in six made the suite worse, which ends the
+extension. The large drops came at cumulative round six to eight, inside a
+second node; whether they come at the same round inside one extended node is
+what a cell on build I would show. No cell is scheduled as of 2026-10-02.
 
 ## Open decisions
 

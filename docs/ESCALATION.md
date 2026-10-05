@@ -21,19 +21,20 @@ and D24**, **Repeats, 2026-10-01**):
   against solo sol's $2.13). The sol parent's share was 15-20% of those cells
   and did nothing a fixed loop could not: one node, the test command the task
   prompt gave, and one "continue" re-plan.
-- **Why nodes failed is not settled.** In the three D24 parso cells, the only
-  ones with per-check counts, every first and second node failed its four
-  checks (`CHECK_LIMITS.maxRounds`). Two rose on their last known check (168
-  to 173 across a redirect, 249 to 259 across a repair), one barely fell
-  (103 to 100), and three have no fourth count. Four of six new nodes'
-  first rounds dropped sharply (259 to 152, 227 to 167, 70 to 5, 116 to 9),
-  two barely (173 to 149, 100 to 86); the median repair took 28 off. So "ran out of rounds while improving" is at most four of
-  six and confirmed for one; "repairs level off and a fresh work round does
-  better" fits the counts as well. A repair carries the full assignment plus
-  a 2 KiB failure tail and the instruction "Fix the findings and nothing
-  else" (`src/pi-subprocess.ts:1493`, in `repairPayload` at `:1475`); a new node's work round carries a new
-  parent-written assignment and no tail, so the two readings are
-  confounded.
+- **Why node 1 fails is now read from five cells without redirects**
+  (G/H, 2026-10-02, `bench/DESIGN.md` **What the repair-tail cells say**).
+  It is arithmetic: the work round removes about 190 of 455 failures, a
+  repair a median 27, so four runs leave 169–231. The rate decays within a
+  node, and one repair in six makes the suite worse. A new node's first
+  round is no better than a repair (median −25 against −27); the large
+  drops come in the second node's own repairs, at cumulative round six to
+  eight, which fits "more rounds" as well as "a new assignment". A wider
+  failure tail (12 KiB) changed nothing in node 1. So on this task a
+  failed node 1 is not evidence of a capability ceiling; it is a round
+  limit sized for a smaller task, with the open question whether the rate
+  recovers inside an extended node (D25) or only in a fresh one. The
+  repair prompt is `repairPayload` (`src/pi-subprocess.ts`), still "Fix
+  the findings and nothing else".
 - **Drawing on sol where workers were converging cost more and helped
   nothing.** D24 woke the parent on every check; it intervened on nodes that
   were improving, with less information than the worker had, and parso got
@@ -141,6 +142,11 @@ re-planning after a failure. It stops paying to watch converging work.
 1. **Improving nodes continue** (the mechanism without escalation), on the
    no-D24 baseline of three cells a task. Prediction: parso stops needing a
    second node, so cheaper and faster. This tests the out-of-rounds reading.
+   The no-parent arm, `loop-luna` (`bench/DESIGN.md` **Arms**; built
+   2026-10-02, not run), belongs here too: the parent's own first node with
+   no sol parent at all, run again while it fails with work done. If it matches
+   `graph-luna` on parso, the parent's 15-20% buys nothing on such tasks
+   and every draw on sol has to be conditional.
 2. **Find tasks where luna stalls and sol succeeds**, from solo cells. Parso
    and chess are not such tasks; on them escalation can only add cost.
 3. **Escalation** on those tasks, against solo sol and plain graph-luna. It

@@ -831,14 +831,56 @@ What remains, in order:
       ($0.012: rounds after every check, result lines recorded, H's repair
       carried all 150 FAILED lines where G's carried 31, and the lines stay
       out of the parent's text). Cells run 2026-10-02: h-1, g-1, g-2, h-2,
-      g-3; H-3 skipped (H cannot win). Judged by the pre-registration: H
+      g-3; H-3 skipped (H cannot win). Judged by the pre-registration
+      (`bench/DESIGN.md` **Repair-tail experiment, judged 2026-10-02**): H
       does not win, H is not worse, and the falling/levelled branch is a
-      tie, so the next variable is the maintainer's call (`bench/DESIGN.md`
-      **Repair-tail experiment, judged 2026-10-02**).
-      Outcome, thresholds and what each result decides are pre-registered in
-      `bench/DESIGN.md` **Repair-tail experiment, pre-registered
-      2026-10-02**: node 1 passing within four runs is the primary outcome,
-      since H's wider findings also reach the parent in node 1's report.
+      tie. The wider tail is discarded as a variable. What the cells say
+      (**What the repair-tail cells say, 2026-10-02**): node 1 fails by
+      arithmetic (about 190 of 455 removed by the work round, about 27 a
+      repair, 169–231 left after four runs, and the rate decays); a new
+      node's first round is no better than a repair, while the large drops
+      come at cumulative round six to eight; cell cost and time are decided
+      by the parent's plan after node 1 (a sol `diagnose` node or a six-node
+      split doubles both); one repair in six regresses the full suite; and
+      second-node outcomes swing more between cells than any variable
+      tested. No further cells are scheduled as of 2026-10-02. When they
+      resume, the order is 6c.
+   6b. Probed 2026-10-02 at no spend, before building it: a coverage-guided
+      check split, per-node checks of the tests that reach only that node's
+      functions, run in parallel. Not available on `restore`: on all four
+      tasks the failing tests form one component over the gutted functions
+      (every parso-cluster test reaches the same four core functions), so no
+      parallel node could carry a complete check. The one-node graphs were
+      the right shape there; the lever is the loop and the cost of a round,
+      not fan-out (`bench/DESIGN.md` **Attribution probe, 2026-10-02**).
+   6c. Order when cells resume, reviewed 2026-10-02:
+      - **The ladder.** G to I (D25), then I to K (worker sessions with
+        profile attribution; K is J plus accounting only), three parso
+        cells each, one variable at a time, judged on node 1. K's token
+        cost is pre-registered beside its pass rate (`bench/DESIGN.md`
+        **Worker-session ladder, pre-registered 2026-10-02**).
+      - **The no-parent arm, `loop-luna`** (`bench/DESIGN.md` **Arms**).
+        Built 2026-10-02 in the harness, no runtime change
+        (`bench/loop-runner.mjs`): the parent's own first node, run again
+        while it fails with work done. Tested with fakes only; never run in
+        a container. About three luna cells, an estimated $0.60, on the
+        ladder's winning build. It settles whether the sol parent's 15-20%
+        of a parso cell buys anything.
+      - **Escalation screening**: tasks where luna stalls and sol succeeds
+        (`docs/ESCALATION.md` **How it would be measured**, step 2).
+      - After the ladder, as its own build: a repair whose count rose says
+        so. `improved` (`src/check.ts`) already ends a D25 extension on a
+        rise, but within `maxRounds` nothing reacts and the worker is not
+        told. One line in `repairContinuation` (`src/pi-subprocess.ts`),
+        from `failureCount`.
+      - Missing runtime piece for composing checked nodes: a gate node,
+        a final whole-oracle check that spends no worker when it passes.
+        Today `before: "fail"` rejects a passing check as vacuous and
+        `before: "pass"` still runs a worker (`unjudgeableFindings`,
+        `src/pi-subprocess.ts`). The one measured fan-out win, polyglot's
+        eight parallel checked luna nodes ($0.21 and $0.30 against solo
+        sol's $0.83 and $0.87), had a complete check on every node; coupled
+        code such as `restore` does not split that way (6b). Not built.
    7. Decide which claim the pilot tests (`bench/DESIGN.md` **What the bench
       says so far**). On current evidence the saving exists only where a
       command can accept the work. A pilot drawn from test-backed tasks (the
@@ -873,17 +915,22 @@ What remains, in order:
 
 ## Known defects
 
-### `spendSplit` counts a sol node as worker spend
+### `spendSplit` counted a sol node as worker spend (fixed 2026-10-02)
 
-`bench/analyse.mjs` `spendSplit` sums every node's cost as `nodeCost` and
-takes only a review policy's share (`usage.review`) out as reviewer spend, so
-"nodeShare minus reviewShare is the workers" assumes every node ran on the
+`bench/analyse.mjs` `spendSplit` summed every node's cost as `nodeCost` and
+took only a review policy's share (`usage.review`) out as reviewer spend, so
+"nodeShare minus reviewShare is the workers" assumed every node ran on the
 worker profile. A parent can run a node on any profile. On
 `parso-cluster-20-graph-luna-2` (2026-09-30) it ran `diagnose-errors` on the
 `reviewer` profile, which is sol: $0.392 that the split would report as luna.
-The fix is to attribute by the node's profile, which the node's usage does not
-carry today; until then, check `worker_graph` calls in the events for the
-profile of each node before quoting a worker share.
+Now each node's entry in the parent-facing result names the profile it ran
+on, and each model round in `rounds` names its own; `spendSplit` attributes
+a node's own rounds to the arm's `worker` profile only when the node names
+it (`workerShare`, `workerCostUsd`, `otherProfileCostUsd`), and a record
+whose nodes predate the field is reported as unattributed rather than as the
+worker's. Records before build K (2026-10-02) carry no profile; for those,
+check the `worker_graph` calls in the events for each node's profile before
+quoting a worker share.
 
 ### A kill inside a mutation strands the run's mutation lock
 

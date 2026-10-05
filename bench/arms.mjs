@@ -1,5 +1,5 @@
 /**
- * The four queued arms, a trial-only baseline, and the configuration each
+ * The four queued arms, two trial-only ones, and the configuration each
  * one hands the agent.
  *
  * They vary two things independently: whether the orchestration machinery is
@@ -29,6 +29,13 @@ export const PROVIDER = process.env.BENCH_PROVIDER;
 // so the mechanism and the arm agree about what a reviewer is.
 const REVIEWER_TOOLS = ["read", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
+
+/**
+ * The profile a graph arm's workers run on. The spend split attributes a
+ * node's own rounds to the arm's worker only when the node names this
+ * profile; a node the parent ran on any other is the other model's spend.
+ */
+export const WORKER_PROFILE = "worker";
 
 /**
  * Open decision 2 in DESIGN.md: 2 is the cheap default and whether 3 buys
@@ -70,6 +77,15 @@ export const ARMS = {
     worker: MODELS.luna,
     reviewer: MODELS.sol,
   },
+  // Trial-only, like `solo-sol-refine`: one checked luna node and no parent
+  // (`bench/loop-runner.mjs`), for whether the parent buys anything over the
+  // check loop. The check is the parent's choice in a `graph` arm, so here it
+  // is the arm's: the task's own test command and test paths, with these.
+  "loop-luna": {
+    machinery: true,
+    loop: { maxRounds: 4, before: "fail" },
+    worker: MODELS.luna,
+  },
 };
 
 export function armNames() {
@@ -79,7 +95,7 @@ export function armNames() {
 /**
  * Every model an arm needs, deduplicated. A solo arm needs one; a graph arm
  * needs its parent, its workers and its reviewer, which may be two ids or
- * three.
+ * three; a loop arm only its workers.
  */
 export function armModels(name) {
   const arm = armConfig(name);
@@ -116,18 +132,22 @@ export function workerGraphConfig(
     // when the graph returns.
     ...(maxGraphCostUsd === undefined ? {} : { maxGraphCostUsd }),
     profiles: {
-      worker: {
+      [WORKER_PROFILE]: {
         provider,
         model: arm.worker,
         thinkingLevel: "medium",
         tools: WORKER_TOOLS,
       },
-      reviewer: {
-        provider,
-        model: arm.reviewer,
-        thinkingLevel: "medium",
-        tools: REVIEWER_TOOLS,
-      },
+      ...(arm.reviewer === undefined
+        ? {}
+        : {
+            reviewer: {
+              provider,
+              model: arm.reviewer,
+              thinkingLevel: "medium",
+              tools: REVIEWER_TOOLS,
+            },
+          }),
     },
   };
 }

@@ -53,6 +53,22 @@ tasks (**The restore suite**).
   commands. The suite prompt now says none exists.
 - All of these cells ran Pi 0.85.1.
 
+Added 2026-10-02, from the repair-tail experiment on `parso-cluster-20`
+(**What the repair-tail cells say, 2026-10-02**): a 12 KiB repair tail
+changed nothing in node 1; node 1 fails by arithmetic (the work round
+removes about 190 of 455 failures, a repair about 27, four runs leave
+169–231, and the rate decays); a cell's cost and time are decided by what
+the parent plans after that failure; one repair in six regresses the full
+suite; and second-node outcomes vary more between cells than any variable
+tested, so three cells an arm can judge node-level outcomes only.
+
+Read 2026-10-02 from the event streams, $0: the parent's first graph was
+the same on all eight parso cells with records (F x3, G x3, H x2): one
+unreviewed node with the prompt's test command as its check, 4 rounds,
+`test` frozen, 30 minutes. So on this task the parent's first plan adds
+nothing beyond the prompt, and the trial-only `loop-luna` arm (**Arms**)
+fixes that plan without the parent.
+
 Open: no `solo-luna` cell on `mustache`, so whether its review bought
 anything is unmeasured, and `jsonpath` is unrun. Details and caveats are
 under **The polyglot suite**, **The cold-start suite**, and `docs/NEXT.md`.
@@ -219,6 +235,39 @@ The result worth having is **`graph-luna` near `solo-sol` on quality and near
 `solo-luna` on cost**. The result worth having *first* is that `graph-sol` is
 not worse than `solo-sol`, because if the machinery is lossy the economics
 question is moot until the package is fixed.
+
+**`loop-luna`, a trial-only arm, built 2026-10-02, not run.** One checked
+luna node and no parent (`bench/loop-runner.mjs`, run in the container on
+the package the cell installed): `runGraph` with
+`createPiSubprocessExecutor`, the code the parent's tool calls, on a
+one-node graph. No runtime change. It answers what `graph-luna` against
+`solo-luna` cannot: whether the sol parent buys anything over the check
+loop alone. The parent was 15-20% of a parso cell (`docs/ESCALATION.md`).
+
+What the arm fixes, which the parent chooses in `graph-luna`, disclosed with
+every result:
+
+- **The node is the parent's own first node.** On all eight parso graph
+  cells with records (F x3, G x3, H x2) the parent's first graph was one
+  node, no review, check `python3 -m pytest test`, `maxRounds` 4,
+  `before: "fail"`, `test` frozen, `taskTimeoutMs` 30 minutes, and an
+  assignment restating the prompt (read on g-3). The arm uses the task's own command and
+  test paths (`taskCheck`, `bench/suites/restore/suite.mjs`) and the prompt
+  every arm gets as the assignment. Only `restore` tasks carry a check so
+  far; a loop cell on any other suite is not attempted.
+- **A failed node runs again.** A node may not run past 30 minutes
+  (`RUN_GRAPH_LIMITS.maxTaskRuntimeMs`), and every parso node 1 failed, so
+  one node would measure only node 1. While a node fails with a worker
+  round done and the cell has time and budget, the same node runs again as
+  a fresh graph in the same checkout, its assignment ending with one fixed
+  line to continue from the earlier work: the parent's plain re-plan on F
+  ("continue, preserve"), without its residual-focused wording. At most 8
+  graphs; a node that failed before any worker ran ends the loop.
+- **The cap and the limit are the cell's**, checked on live progress as the
+  parent's tool checks its graph budget.
+
+On build G a loop node fails by arithmetic like node 1, so the arm is
+informative on I or K, where D25 extends a node that is still improving.
 
 ### Ordering: the package question before the economics question
 
@@ -931,6 +980,12 @@ Built, and covered by `npm run test:bench` against fakes:
   for.
 - **Preconditions** (`bench/preconditions.mjs`), evaluated from the tool's own
   arguments. Arguments the stream did not carry are unknown, never satisfied.
+  A loop arm has no tool calls; its precondition is that a worker ran under
+  the check at least once (`loopPreconditions`).
+- **The loop arm's agent** (`bench/loop-runner.mjs`), the trial-only
+  `loop-luna`: copied into the container and run by the toolchain's Node on
+  the package the cell installed, it records each graph's node trace under
+  `detail.loopAttempts`. Tested with fakes only; not yet run in a container.
 - **The prompt every arm gets** (`bench/suites/promax/suite.mjs`), with its hash in the
   manifest and checked on every later run, so a reworded preamble cannot be
   pooled with cells drawn under the old one. See **The prompt every arm gets**.
@@ -1164,6 +1219,12 @@ is uninformative and must be reported as such rather than quietly used anyway.
    it encodes the solution in the tests, costs at least what `solo-sol` does,
    and forces a design choice on the model (`docs/NEXT.md`). No queue arm
    carries harness guidance.
+
+   Disclosed: the trial-only `loop-luna` (**Arms**) has no parent, so the
+   harness writes its node: the prompt every arm gets as the assignment, the
+   task's own check, and on a repeated node one fixed line telling the
+   worker to continue from the earlier work (`CONTINUE`,
+   `bench/loop-runner.mjs`).
 
 ## Measured
 
@@ -2414,12 +2475,108 @@ its amendment, five cells in and h-3 skipped.
   determined cell each way, so the branch is inconclusive and the next
   variable is the maintainer's call.
 - **Recorded, not judged.** The 12 KiB tail is discarded as a variable on
-  node 1. Across the five cells node 1 always failed at 169-231 and the
-  cell's spread came from what followed: a `diagnose` node and a timed-out
-  node in g-2 ($1.375, 65 min), six nodes in h-1 ($1.200, 44 min), against
-  $0.54-0.72 and 22-30 min where the parent planned one or two plain
-  continuation nodes. g-3's second node, cut off at 8 failures while
-  falling 82% a round, is the case D25 (build I) addresses; unmeasured.
+  node 1. What the five cells say beyond the pre-registration follows.
+
+**What the repair-tail cells say, 2026-10-02.** Read from the five G/H
+records and the three F cells (`pi099-no-d24-2026-10-01.tgz`, **Repeats,
+2026-10-01**). The F to G source diff is instrumentation only: progress
+rounds, result lines, `checkResults`; no prompt changed. One task, five
+cells; nothing here has a variance worth the name.
+
+Node 2 and after, with how the parent framed the second node:
+
+| cell | node 2 framing | before | work | r1 | r2 | r3 | result | then |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| h-1 | "fundamentally wrong"; a scoped check added | 169 | 144 | 125 | 128 | 133 | failed | two `-k` nodes (10, 2, pass $0.076; one unjudgeable, $0); 106, 72, 55, 58, 7 failed $0.300; 7, 25, 21, pass $0.150 |
+| g-1 | "do not trust" | 199 | 174 | 12 | 32 | pass | passed | |
+| g-2 | sol `diagnose` $0.616, then repair | 175 | 107 | 98 | cut off at the 30-min node limit | | failed | a 16.5-min node, $0, aborted at the cell limit |
+| h-2 | "substantially semantically wrong" | 169 | 149 | 120 | 99 | 36 | failed | 36, 10, pass $0.139 |
+| g-3 | neutral, "classify by root cause" | 231 | 273 | 139 | 45 | 8 | failed | 8, 4, pass $0.129 |
+| F ×3 | "continue, preserve" | | | | | | passed 3/3 | counts not recorded |
+
+1. **Node 1 fails by arithmetic.** The work round removes about 190 of
+   455 (−200, −172, −211, −185, −192). A repair removes a median 27 (13
+   repairs; g-1's broken pair left out). Four runs leave 169–231; zero at
+   that rate is 7–9 repairs away. `CHECK_LIMITS.maxRounds` is sized for a
+   task of about 100 failures.
+2. **The repair rate decays within a node.** g-3: −9, −11, −12. h-1: −38,
+   −45, −3. D25 extends a node while any improvement shows, so a round
+   that takes off 1–3% counts; whether that reaches zero is unmeasured.
+3. **A new node's first round is no better than a repair.** Node 2's work
+   round against node 1's last count: −25, −25, −68, −20, +42, median −25,
+   against the repair median −27. The large drops (−162, −134, −94, −63)
+   came in node 2's own repairs, at cumulative model round six to eight.
+   Two readings fit: the parent's residual-focused assignment, or the
+   worker needing that many rounds whatever the node boundaries. The
+   records cannot separate them. This revises the pre-registration's
+   premise, which read "clearly better in four of six" from the D24
+   cells, where redirects intervened.
+4. **Cell cost and time are the parent's plan after node 1.** Node 1 cost
+   $0.17–0.20 and 9–12 min in every cell. The rest is what the parent did
+   next: a sol `diagnose` node and a node run into its 30-minute limit
+   (g-2, $1.375, 65 min); six nodes (h-1, $1.200, 44 min); or plain
+   continuation ($0.54–0.72, 22–30 min). Three `diagnose` nodes exist
+   across all parso graph cells ($0.392, $0.584, $0.616); two of those
+   cells timed out and the third is the dearest resolved cell, and no
+   `diagnose` was followed by a passing node.
+5. **Node 2 varies more than any variable tested.** From the same count,
+   one repair took 174 to 12 (g-1); another node went 144, 125, 128, 133
+   (h-1). F's second nodes passed 3/3, G/H's 1/5, with no code difference
+   that reaches the parent or worker. Three cells an arm cannot see
+   through this; node-level outcomes are the only ones such an experiment
+   can judge, as the pre-registration did.
+6. **Framing is not shown to matter.** "Do not trust" passed (g-1);
+   neutral failed at 8 (g-3). The D24 reading, that rework framing made
+   the second node fail, is not supported by these cells.
+7. **One repair in six regresses the full suite.** Six rises after 37
+   repairs: 248 to 455, 231 to 273 was a work round, 125 to 128 to 133,
+   55 to 58, 7 to 25, 12 to 32. Two are whole-file breaks. "Fix the
+   findings and nothing else" does not prevent collateral. Only the
+   full-suite check sees it, at 3–5 s a run; a check scoped to the failing
+   subset would not.
+8. **The last mile is cheap and reliable.** Every node that started at 36
+   or fewer failures passed in two or three runs, $0.08–0.15, 5–7 min. The
+   dear stretch is 100–230 failures.
+9. **The wider report changed the parent, not node 1.** h-1's parent, the
+   only one handed 16 KiB of findings, split the work by `-k` subsets. One
+   subset already passed, so `before: "fail"` failed that node for $0. The
+   split resolved the task at twice the cost and time of plain
+   continuation. This is the confound the pre-registration named.
+10. **Wall-clock is model rounds.** 96–263 s a round at any failure
+    count; checks 3–16 s; the parent's own model time rounds to zero. A
+    60-minute cell holds about 20 rounds and node 1 uses four.
+
+Not concluded: whether D25 passes node 1 (needs a cell); why node 2
+swings; whether a fresh parent-written node beats a fifth repair on the
+same count. Not read: g-2's `finish-errors` ran 16.5 min for $0; h-1's
+`fix-assignment-rules` was unjudgeable.
+
+No further cells are scheduled as of 2026-10-02. When experiments resume,
+the order is `docs/NEXT.md` 6c.
+
+**Worker-session ladder, pre-registered 2026-10-02**, before any cell.
+Builds I (`progress-rounds-2026-10-02.tgz`, D25) and K
+(`profile-attribution-2026-10-02.tgz`: J's worker sessions, D20 as amended,
+plus accounting only). Three `parso-cluster-20` `graph-luna` cells per build,
+one at a time, the G/H caps. One variable a step: G to I, then I to K.
+
+- **Primary, each step:** node 1 passing within its runs, as for G/H.
+- **K's token cost, secondary.** A resumed round re-reads the whole session
+  prefix on every turn, so its cache reads grow with the rounds before it;
+  a fresh round reads only its own. Estimated, not measured: at a
+  150k-token context and 30 turns a round reads about 4.5M cached tokens
+  against perhaps 1.2M fresh, so over eight rounds K could spend more on
+  tokens than I while saving wall-clock. Read per model round from
+  `rounds[].usage.cacheRead`, `rounds[].usage.cost` and
+  `rounds[].durationMs` in each node's record.
+- **What each result decides for K.** Node 1 passing at least as often as
+  on I with node 1 spend no higher: K stays. Passing as often but dearer:
+  the next build resumes for the first N repairs and then starts fresh, N
+  being the round at which a resumed round's cache reads pass a fresh
+  round's. Passing less often: the reading is that a fresh context is what
+  produced node 2's late drops (**What the repair-tail cells say**, item 3),
+  and repairs go back to fresh workers. No earlier record separates that
+  reading from "more rounds"; this step is the first that can.
 
 **Harness: two cells of one task and arm cannot run at once.** `bench.mjs
 cell` fixes repetition 0 (`bench/bench.mjs:408`), so both cells derive the
@@ -2429,3 +2586,39 @@ cell then settles with no provider turn, `no-agent-turn`, $0. Stopping
 `bench.mjs` by signal also leaves the cell's containers running, still
 spending; remove them by name.
 
+
+**Attribution probe, 2026-10-02: a restore task's failing tests do not
+split by function.** The coverage-split idea, a per-node check made of the
+tests that reach only that node's functions, several nodes in parallel and a
+whole-suite gate after them, was probed at no provider spend before anything
+was built. In the task image, a `sys.setprofile` pytest plugin recorded, per
+test, every package function called during the test body on the pristine
+checkout; the gutted checkout gave the failing set. Scripts and raw output:
+`handoff/diagnostics/attribution-2026-10-02/` (gitignored).
+
+| task | failing tests | gutted functions reached per failing test | reached by most failing tests | finest partition | tests reaching one function only |
+| --- | --- | --- | --- | --- | --- |
+| `parso-cluster-20` | 455 | 4-17, mode 7 | 4 by all 455: `ErrorFinder.visit_leaf`, `visit_node`, `_Context._analyze_names`, `_Context.finalize` | 1 part, 20 functions | 0 |
+| `parso-spread-20` | 1772 (711 at setup) | 1-9, mode 5 | `split_lines` 1753, `tokenize_lines` 1733 | 1 part, 17 functions | 37 |
+| `chess-cluster-20` | 199 | 1-15, mode 8 | `piece_type_at` 192, `_set_piece_at` 179 | 1 part, 20 functions | 1 |
+| `chess-spread-20` | 181 | 1-6, mode 1 | `attackers_mask` 135 | 3 parts: 16 functions with 177 tests, two pairs with 2 tests each | 99 (73 on `attackers_mask`) |
+
+The finest partition joins two functions whenever one failing test reaches
+both, so a part is the largest unit whose tests can pass without the rest.
+On every task the parts are one giant component: no node of a parallel
+graph could carry a complete check, and a per-node check of the exclusive
+tests would accept with most of the work undone (0, 37, 1 and 99 tests of
+455, 1772, 199 and 181). On `parso-cluster-20` no test can pass until four
+functions are restored, and the tests then come in layers: 51 after the
+core four, 103 after seven, 265 after ten, 455 after all twenty. That is a
+chain, not a fan-out, and one node iterating is already that chain.
+
+So on this suite the parent's one-node graphs were the right shape, and
+parallelism is not where a saving is; the lever is the convergence loop
+(D23, D25) and what a round costs (D20 as amended). The split stays an idea
+for tasks whose pieces share nothing, which polyglot already measures.
+Limitation: only the test body is profiled, so a function reached in a
+fixture is missed; that can only make the partition finer than the truth,
+so the one-part result is conservative. Three `parso-spread-20` functions
+were reached by no failing test's body (`_NodesTree.copy_nodes`,
+`BaseNode.get_leaf_for_position`, `NodeOrLeaf.dump`), which is that gap.

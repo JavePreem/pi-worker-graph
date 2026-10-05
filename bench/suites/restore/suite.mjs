@@ -320,11 +320,27 @@ async function buildTask(root, id, library, mode, key, image) {
   return { dir, ...task };
 }
 
+function testCommand(library) {
+  const args = [...LIBRARIES[library].tests, ...deselected(library)];
+  return `python3 -m pytest ${args.join(" ")}`;
+}
+
+/**
+ * The task's own check, for an arm with no parent to choose one
+ * (`loop-luna`): the command the prompt gives, with the tests it runs frozen.
+ * It is what the parent chose on every parso graph cell.
+ */
+export function taskCheck(library) {
+  return {
+    commands: [testCommand(library)],
+    frozen: [...LIBRARIES[library].tests],
+  };
+}
+
 export function taskPrompt({ library, functions }) {
-  const command = [...LIBRARIES[library].tests, ...deselected(library)];
   return [
     `The library is ${library}. Run its tests with:`,
-    `  python3 -m pytest ${command.join(" ")}`,
+    `  ${testCommand(library)}`,
     "",
     `The ${functions.length} functions to re-implement:`,
     ...functions.map(
@@ -350,6 +366,7 @@ export async function loadTasks({ root = SOURCES } = {}) {
         library,
         image,
         prompt: taskPrompt(built),
+        check: taskCheck(library),
         build: built.dir,
         tests: built.tests,
         functions: built.functions,

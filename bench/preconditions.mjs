@@ -88,3 +88,23 @@ export function evaluatePreconditions({ arm, events = [], toolCalls = [] }) {
     acceptedNodes: accepted,
   };
 }
+
+/**
+ * A loop arm's treatment is its checked node, run with no parent: met when a
+ * worker ran under the check at least once. Each attempt is a one-node graph
+ * whose node carried a check, so the graph fields read as they would for a
+ * `graph` arm that planned the same.
+ */
+export function loopPreconditions(loop) {
+  const ran = loop.attempts.filter(
+    (attempt) => (attempt.rounds ?? []).length > 0,
+  ).length;
+  const failed = ran === 0 ? ["no worker ran"] : [];
+  return {
+    met: failed.length === 0,
+    failed,
+    calls: loop.attempts.length,
+    graphSizes: loop.attempts.map(() => 1),
+    acceptedNodes: loop.attempts.length,
+  };
+}

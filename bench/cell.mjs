@@ -13,8 +13,14 @@
  * point of failure.
  */
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
-import { armConfig, PROVIDER, workerGraphConfig } from "./arms.mjs";
+import {
+  armConfig,
+  PROVIDER,
+  WORKER_PROFILE,
+  workerGraphConfig,
+} from "./arms.mjs";
 import {
   run as dockerCli,
   ensureImage,
@@ -23,11 +29,12 @@ import {
   TESTBED,
 } from "./container.mjs";
 import { startEgressBroker } from "./egress.mjs";
-import { evaluatePreconditions } from "./preconditions.mjs";
+import { evaluatePreconditions, loopPreconditions } from "./preconditions.mjs";
 import { makeRecord } from "./queue.mjs";
 import { openPi } from "./rpc-client.mjs";
 import {
   CONTAINER_AGENT_DIR,
+  CONTAINER_NODE,
   CONTAINER_PATH,
   CONTAINER_PI,
   installInContainer,
@@ -233,6 +240,93 @@ async function openAgent(container, { arm, provider }) {
   return client;
 }
 
+// Under /tmp: with every capability dropped, the container's root cannot
+// write into a directory a `docker cp` left owned by the host user.
+const LOOP_RUNNER = "/tmp/loop-runner.mjs";
+const LOOP_REQUEST = "/tmp/loop-request.json";
+const LOOP_RESULT = "/tmp/loop-result.json";
+
+/**
+ * What stands in for the session in a loop arm, which has none: no events,
+ * no parent tool calls, nothing to abort or close.
+ */
+const NO_SESSION = Object.freeze({
+  events: [],
+  toolCalls: [],
+  send: async () => ({ success: false }),
+  close: async () => {},
+});
+
+/**
+ * Run a loop arm's agent (`bench/loop-runner.mjs`) in the container and read
+ * back what a session would have said: why it stopped and what it spent.
+ *
+ * The assignment is the prompt every arm gets, and the check is the task's
+ * own with the arm's round limit: the choices a parent makes in a `graph`
+ * arm, fixed here and disclosed with the arm.
+ */
+async function runLoopAgent(
+  container,
+  { arm, suite, task, profiles, settleMs, capUsd },
+) {
+  if (task.check === undefined) {
+    throw new NotAttempted(
+      "task has no check",
+      `a loop arm needs its suite to give ${task.id} a check`,
+    );
+  }
+  await container.write(
+    LOOP_RUNNER,
+    await readFile(new URL("./loop-runner.mjs", import.meta.url), "utf8"),
+  );
+  await container.write(
+    LOOP_REQUEST,
+    JSON.stringify({
+      packageEntry: `${CONTAINER_AGENT_DIR}/npm/node_modules/pi-worker-graph/dist/index.js`,
+      // Where the parent's tool keeps its runs by default, so a node's
+      // sessions live where they would in a `graph` arm.
+      stateRoot: `${CONTAINER_AGENT_DIR}/worker-graph`,
+      workingDirectory: TESTBED,
+      profiles,
+      profile: WORKER_PROFILE,
+      assignment: `${suite.preamble}${task.prompt}`,
+      check: { ...task.check, ...armConfig(arm).loop },
+      settleMs,
+      ...(capUsd === undefined ? {} : { capUsd }),
+    }),
+  );
+  // The runner stops itself at the deadline; this only bounds a runner that
+  // does not.
+  const ran = await container.exec(
+    `cd ${TESTBED} && PATH=${CONTAINER_PATH} PI_CODING_AGENT_DIR=${CONTAINER_AGENT_DIR} ${CONTAINER_NODE} ${LOOP_RUNNER} ${LOOP_REQUEST} ${LOOP_RESULT} && cat ${LOOP_RESULT}`,
+    { timeoutMs: settleMs + 300_000 },
+  );
+  if (ran.code !== 0) {
+    throw new NotAttempted(
+      "harness",
+      `loop runner: ${String(ran.stderr).slice(-400)}`,
+    );
+  }
+  // The last line: a login shell may print before the command runs.
+  const loop = JSON.parse(ran.stdout.trim().split("\n").at(-1));
+  const { usage } = loop;
+  return {
+    outcome: loop.outcome,
+    // The shape a session's stats have, so the record reads the same.
+    stats: {
+      cost: usage.cost.total,
+      tokens: {
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+        total: usage.totalTokens,
+      },
+    },
+    loop,
+  };
+}
+
 /**
  * Remove the copied credentials from the container.
  *
@@ -317,7 +411,7 @@ async function gradeSafely(grade, container, task) {
 }
 
 /** What a graded record carries beside its class and outcome. */
-function gradeDetail(graded, client, startedAt) {
+function gradeDetail(graded, client, startedAt, loop) {
   return {
     targetStates: Object.fromEntries(
       Object.entries(graded.states ?? {}).map(([t, s]) => [
@@ -343,6 +437,8 @@ function gradeDetail(graded, client, startedAt) {
     workerGraphResults: client.toolCalls
       .filter((c) => c.toolName === "worker_graph")
       .map((c) => c.text),
+    // A loop arm's nodes, which reach no parent's tool result.
+    ...(loop === undefined ? {} : { loopAttempts: loop.attempts }),
     wallClockMs: Date.now() - startedAt,
     ...(graded.detail === undefined ? {} : { gradeDetail: graded.detail }),
   };
@@ -373,6 +469,7 @@ export async function runCell({
     agentDirectory = makeAgentDirectory,
     openAgentSession = openAgent,
     settle = settleWithSpendCap,
+    runLoop = runLoopAgent,
     startBroker = startEgressBroker,
     grade = suite.grade,
     dropImage = process.env.BENCH_RMI === "1",
@@ -394,6 +491,7 @@ export async function runCell({
   let agent;
   let client;
   let broker;
+  let loop;
   let sessionClosed = false;
   try {
     let stats;
@@ -425,22 +523,34 @@ export async function runCell({
         packageTree,
         packageVersion,
         provider,
-        model: armConfig(cell.arm).parent,
+        model: armConfig(cell.arm).parent ?? armConfig(cell.arm).worker,
       });
       await install(container, { toolchainDir, agentDir: agent.dir });
-      client = await openAgentSession(container, {
-        arm: cell.arm,
-        provider,
-        settleMs,
-      });
       // One deadline for the whole session, follow-ups included, so a refining
       // arm is held to the same limit as the arm it is compared with.
       const deadline = Date.now() + settleMs;
-      ({ outcome, stats } = await settle(client, {
-        prompt: `${suite.preamble}${task.prompt}`,
-        settleMs,
-        capUsd,
-      }));
+      if (armConfig(cell.arm).loop === undefined) {
+        client = await openAgentSession(container, {
+          arm: cell.arm,
+          provider,
+          settleMs,
+        });
+        ({ outcome, stats } = await settle(client, {
+          prompt: `${suite.preamble}${task.prompt}`,
+          settleMs,
+          capUsd,
+        }));
+      } else {
+        client = NO_SESSION;
+        ({ outcome, stats, loop } = await runLoop(container, {
+          arm: cell.arm,
+          suite,
+          task,
+          profiles: workerGraphConfig(cell.arm, { provider }).profiles,
+          settleMs,
+          capUsd,
+        }));
+      }
       for (const followUp of armConfig(cell.arm).followUps ?? []) {
         if (outcome !== "settled") break;
         const remaining = deadline - Date.now();
@@ -473,6 +583,7 @@ export async function runCell({
           await onEvents({
             events: client.events,
             toolCalls: client.toolCalls,
+            ...(loop === undefined ? {} : { loop }),
             brokerLog: await brokerLog(),
           });
         } catch {}
@@ -529,7 +640,7 @@ export async function runCell({
           stopped: `agent did not settle: ${outcome}`,
           resolved: graded.resolved,
           gradeOutcome: graded.outcome,
-          ...gradeDetail(graded, client, startedAt),
+          ...gradeDetail(graded, client, startedAt, loop),
         },
       });
     }
@@ -589,11 +700,14 @@ export async function runCell({
       });
     }
 
-    const preconditions = evaluatePreconditions({
-      arm: cell.arm,
-      events: client.events,
-      toolCalls: client.toolCalls,
-    });
+    const preconditions =
+      loop === undefined
+        ? evaluatePreconditions({
+            arm: cell.arm,
+            events: client.events,
+            toolCalls: client.toolCalls,
+          })
+        : loopPreconditions(loop);
 
     // A graph arm whose workers never started is not evidence about the task.
     //
@@ -652,7 +766,7 @@ export async function runCell({
       preconditions,
       diff,
       egress,
-      detail: gradeDetail(graded, client, startedAt),
+      detail: gradeDetail(graded, client, startedAt, loop),
     });
   } catch (error) {
     if (!(error instanceof NotAttempted)) throw error;

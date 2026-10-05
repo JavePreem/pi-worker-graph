@@ -197,6 +197,13 @@ export interface PiCheckTrace {
  */
 export interface PiRoundTrace {
   readonly kind: "check_before" | "work" | "check" | "review" | "repair";
+  /**
+   * The worker profile a model round ran on: the task's for its work and
+   * repair rounds, the review policy's for a review. Absent on a check,
+   * which spends nothing. It is what lets a round's spend be attributed to
+   * a model rather than assumed to be the worker's.
+   */
+  readonly profile?: string;
   readonly durationMs: number;
   readonly blockers: number;
   readonly usage?: PiWorkerUsage;
@@ -1736,10 +1743,12 @@ async function runPiReviewCycle(
     blockers: number,
     usage?: TaskUsage,
     result?: readonly string[],
+    profile?: string,
   ): void => {
     rounds.push(
       Object.freeze({
         kind,
+        ...(profile === undefined ? {} : { profile }),
         durationMs: Date.now() - since,
         blockers,
         ...(usage === undefined ? {} : { usage: immutableUsage(usage) }),
@@ -1912,7 +1921,14 @@ async function runPiReviewCycle(
         session,
         continuation,
       );
-      traceRound(kind, since, result.output.blockers.length, result.usage);
+      traceRound(
+        kind,
+        since,
+        result.output.blockers.length,
+        result.usage,
+        undefined,
+        next.profile,
+      );
       return result;
     } catch (error) {
       traceRound(
@@ -1920,6 +1936,8 @@ async function runPiReviewCycle(
         since,
         0,
         error instanceof TaskExecutionFailure ? error.usage : undefined,
+        undefined,
+        next.profile,
       );
       throw error;
     }

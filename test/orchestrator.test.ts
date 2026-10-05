@@ -42,6 +42,7 @@ interface RegisteredTool {
       readonly nodes: readonly {
         readonly taskId: string;
         readonly status: string;
+        readonly profile?: string;
         readonly report?: {
           readonly summary: string;
           readonly blockers: readonly string[];
@@ -207,11 +208,13 @@ test("runs a configured graph and returns bounded status plus nested usage", asy
     {
       taskId: "implementation",
       status: "succeeded",
+      profile: "writer",
       report: { summary: "Completed implementation", blockers: [] },
     },
     {
       taskId: "validation",
       status: "succeeded",
+      profile: "writer",
       report: { summary: "Completed validation", blockers: [] },
     },
   ]);
@@ -383,6 +386,8 @@ test("names each task's wall-clock and rounds beside its report", async (t) => {
 
   assert.equal(result.details.nodes[0]?.durationMs, 60);
   assert.deepEqual(result.details.nodes[0]?.rounds, rounds);
+  // The profile the task ran on, so its spend is attributable to a model.
+  assert.equal(result.details.nodes[0]?.profile, "writer");
 });
 
 test("a failed check's result lines reach the details, never the parent's text", async (t) => {
@@ -568,6 +573,7 @@ test("passes parent cancellation into the graph runner", async (t) => {
     {
       taskId: "task",
       status: "aborted",
+      profile: "writer",
       diagnostics: "Graph run was aborted",
     },
   ]);

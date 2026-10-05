@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { _internal, preamble, taskPrompt } from "./suite.mjs";
+import { _internal, preamble, taskCheck, taskPrompt } from "./suite.mjs";
 
 const TOOL = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -203,4 +203,15 @@ test("the prompt names every gutted function and the command that judges them", 
   );
   assert.match(preamble, /restored to their original state/);
   assert.match(preamble, /No other copy of the library exists/);
+});
+
+test("a task's own check is the prompt's command, with the tests it runs frozen", () => {
+  assert.deepEqual(taskCheck("parso"), {
+    commands: ["python3 -m pytest test"],
+    frozen: ["test"],
+  });
+  const chess = taskCheck("chess");
+  assert.deepEqual(chess.frozen, ["test.py"]);
+  const prompt = taskPrompt({ library: "chess", tests: [], functions: [] });
+  assert.ok(prompt.includes(`  ${chess.commands[0]}\n`));
 });
