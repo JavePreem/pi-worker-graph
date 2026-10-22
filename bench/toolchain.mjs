@@ -54,9 +54,12 @@ export const CONTAINER_PI = "/usr/local/bin/pi";
 /**
  * The Node the toolchain fetches. Pinned rather than tracking latest, because
  * a cell records what it ran under and two cells run under different Nodes is
- * two measurements. It is the floor the package's own `engines` declares.
+ * two measurements. It is the 22 line's latest security release rather than
+ * the `engines` floor, because Pi's TLS runs under it with the cell's
+ * credentials, and 22.23.4 is the first to distrust the compromised eMudhra
+ * CAs.
  */
-export const NODE_VERSION = "22.19.0";
+export const NODE_VERSION = "22.23.4";
 
 /**
  * The PATH Pi runs under, and therefore the one its worker subprocesses
